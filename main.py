@@ -1,0 +1,540 @@
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Extra, ValidationError
+from typing import Optional
+import openai
+import faiss
+import numpy as np
+import json
+import os
+import io
+import re
+import uuid
+from dotenv import load_dotenv
+import pandas as pd
+from sklearn.metrics.pairwise import cosine_similarity
+import logging
+import whisper
+import yt_dlp
+from datetime import datetime
+from supabase import create_client, Client
+from pinecone import Pinecone
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+load_dotenv()
+
+openai.api_key = os.getenv("OPENAI_API_KEY")
+openai.proxy = None  # Explicitly disable proxy usage
+
+# --- Resource Loading and Answering Logic ---
+RESOURCE_CACHE = {}
+
+# Global video URL mapping
+VIDEO_URL_MAPPING = {}
+
+# Pinecone initialization
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+PINECONE_INDEX = os.getenv("PINECONE_INDEX", "qudemo-index")
+
+pc = Pinecone(api_key=PINECONE_API_KEY)
+index = pc.Index(PINECONE_INDEX)
+
+# Helper: upsert vectors to Pinecone
+def upsert_chunks_to_pinecone(company_name, chunks, embeddings):
+    vectors = []
+    for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
+        vector_id = f"{company_name}-{uuid.uuid4().hex[:8]}-{i}"
+        meta = {
+            "company_name": company_name,
+            "text": chunk["text"],
+            "context": chunk.get("context", ""),
+            "source": chunk.get("source", ""),
+            "original_video_url": chunk.get("original_video_url", ""),
+            "type": chunk.get("type", "video"),
+            "start": chunk.get("start"),
+            "end": chunk.get("end")
+        }
+        vectors.append((vector_id, emb, meta))
+    index.upsert(vectors)
+
+# Helper: query Pinecone for similar chunks
+def query_pinecone(company_name, embedding, top_k=6):
+    result = index.query(vector=embedding, top_k=top_k, include_metadata=True, filter={"company_name": company_name})
+    return result["matches"]
+
+def fetch_video_urls_from_supabase():
+    """Fetch video URLs from Supabase videos table"""
+    try:
+        # Initialize Supabase client
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_ANON_KEY")
+        
+        if not supabase_url or not supabase_key:
+            logger.error("❌ Supabase credentials not found in environment variables")
+            return {}
+        
+        supabase: Client = create_client(supabase_url, supabase_key)
+        
+        # Query videos table to get video_url mappings using video_name as key
+        response = supabase.table('videos').select('video_url, video_name').execute()
+        
+        video_mappings = {}
+        for video in response.data:
+            if video.get('video_url') and video.get('video_name'):
+                video_name = video.get('video_name', '').strip()
+                if video_name:
+                    video_mappings[video_name] = video['video_url']
+                    logger.info(f"📝 Mapped {video_name} -> {video['video_url']}")
+        
+        logger.info(f"📝 Fetched {len(video_mappings)} video mappings from Supabase")
+        return video_mappings
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to fetch video URLs from Supabase: {e}")
+        return {}
+
+def initialize_existing_mappings():
+    """Initialize mappings for existing videos from Supabase"""
+    global VIDEO_URL_MAPPING
+    supabase_mappings = fetch_video_urls_from_supabase()
+    VIDEO_URL_MAPPING.update(supabase_mappings)
+    logger.info(f"📝 Initialized {len(VIDEO_URL_MAPPING)} video mappings from database")
+
+# Initialize existing mappings when the module loads
+initialize_existing_mappings()
+
+def load_resources_for_company(company_name):
+    # Use company name as bucket name (sanitized) - same logic as process_video
+    bucket_name = company_name.lower().replace(' ', '_').replace('-', '_')
+    transcript_json_path = "transcripts/transcript_chunks.json"
+    faiss_gcs_path = "faiss_indexes/faiss_index.bin"
+    faiss_local_path = f"faiss_index_{company_name}.bin"
+    
+    try:
+        chunks = load_transcript_chunks(bucket_name, transcript_json_path)
+        faiss_index = load_faiss_index(faiss_local_path, bucket_name, faiss_gcs_path)
+        
+        RESOURCE_CACHE[company_name] = {
+            "chunks": chunks,
+            "faiss_index": faiss_index,
+            "bucket_name": bucket_name
+        }
+        return RESOURCE_CACHE[company_name]
+    except Exception as e:
+        logger.error(f"Failed to load resources for company {company_name}: {e}")
+        raise
+
+def get_resources(company_name):
+    if company_name not in RESOURCE_CACHE:
+        return load_resources_for_company(company_name)
+    return RESOURCE_CACHE[company_name]
+
+def answer_question(company_name, question):
+    try:
+        logger.info(f"QUESTION for {company_name}: {question}")
+        # Create embedding for the question
+        try:
+            q_embedding = openai.embeddings.create(
+                input=[question],
+                model="text-embedding-3-small",
+                timeout=15
+            ).data[0].embedding
+            logger.info("✅ Created embedding for the question.")
+        except Exception as e:
+            logger.error(f"❌ Failed to create question embedding: {e}")
+            return {"error": "Failed to create question embedding."}
+        # Query Pinecone
+        try:
+            matches = query_pinecone(company_name, q_embedding, top_k=6)
+            top_chunks = [m["metadata"] for m in matches]
+            logger.info(f"🔎 Retrieved top {len(top_chunks)} chunks from Pinecone.")
+        except Exception as e:
+            logger.error(f"❌ Pinecone query failed: {e}")
+            return {"error": f"Pinecone query failed: {e}"}
+        
+        # Rerank chunks using GPT-3.5
+        try:
+            rerank_prompt = f"Question: {question}\n\nHere are the chunks:\n"
+            for i, chunk in enumerate(top_chunks):
+                snippet = chunk["text"][:500].strip().replace("\n", " ")
+                rerank_prompt += f"{i+1}. [{chunk.get('type', 'video')}] {chunk.get('context','')}\n{snippet}\n\n"
+            rerank_prompt += "Which chunk is most relevant to the question above? Just give the number."
+            rerank_response = openai.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": rerank_prompt}],
+                timeout=20
+            )
+            best_index = int(re.findall(r"\d+", rerank_response.choices[0].message.content)[0]) - 1
+            best_chunk = top_chunks[best_index]
+            logger.info(f"🏅 GPT-3.5-turbo reranked chunk #{best_index+1} as the most relevant.")
+        except Exception as e:
+            best_chunk = top_chunks[0]
+            logger.warning(f"⚠️ Reranking failed, falling back to top Pinecone chunk: {e}")
+        
+        # Generate answer using GPT-4
+        try:
+            context = "\n\n".join([
+                f"{chunk['source']}: {chunk['text'][:500]}" for chunk in top_chunks[:3]
+            ])
+            system_prompt = (
+                f"You are a product expert bot with full knowledge of {company_name} derived from video transcripts. "
+                "Use clear, confident, and concise answers—no more than 700 characters. "
+                "Use bullet points or short paragraphs if needed. Do not include inline citations like [source](...)."
+            )
+            user_prompt = f"Context:\n{context}\n\nQuestion: {question}"
+            completion = openai.chat.completions.create(
+                model="gpt-4-turbo",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                timeout=20
+            )
+            raw_answer = completion.choices[0].message.content
+            logger.info("✅ Generated answer with GPT-4.")
+        except Exception as e:
+            logger.error(f"❌ Failed to generate GPT-4 answer: {e}")
+            return {"error": "Failed to generate answer."}
+        
+        def strip_sources(text):
+            return re.sub(r'\[source\]\([^)]+\)', '', text).strip()
+        
+        def format_answer(text):
+            text = re.sub(r'\s*[-•]\s+', r'\n• ', text)
+            text = re.sub(r'\s*\d+\.\s+', lambda m: f"\n{m.group(0)}", text)
+            return re.sub(r'\n+', '\n', text).strip()
+        
+        raw_answer = strip_sources(raw_answer)
+        clean_answer = format_answer(raw_answer)
+        sources = [chunk["source"] for chunk in top_chunks]
+        
+        # Get original video URL using metadata
+        video_url = best_chunk.get("original_video_url")
+        if not video_url:
+            logger.warning(f"⚠️ No original_video_url found in best_chunk metadata. Falling back to source: {best_chunk.get('source')}")
+            video_url = best_chunk.get("source")
+        logger.info(f"📤 Returning final answer. Video URL: {video_url}")
+        
+        return {
+            "answer": clean_answer,
+            "sources": sources,
+            "video_url": video_url,
+            "start": best_chunk.get("start"),
+            "end": best_chunk.get("end")
+        }
+    except Exception as e:
+        logger.error(f"Error in answer_question for {company_name}: {e}")
+        return {"error": f"Failed to answer question: {str(e)}"}
+
+# Video processing functions
+def download_video(video_url, output_filename):
+    """Download video from URL using yt-dlp"""
+    ydl_opts = {
+        'format': 'mp4',
+        'outtmpl': output_filename,
+        'quiet': True
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([video_url])
+    return output_filename
+
+def transcribe_video(video_path, company_name, original_video_url=None):
+    """Transcribe video using Whisper and return chunks"""
+    model = whisper.load_model("base")
+    result = model.transcribe(video_path, task="translate")
+    
+    # Generate context
+    try:
+        context_input = "\n".join([seg["text"] for seg in result["segments"][:10]])
+        context_prompt = f"Summarize the main topic or context of this transcript:\n\n{context_input}"
+        context_resp = openai.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You summarize transcripts."},
+                {"role": "user", "content": context_prompt}
+            ],
+            max_tokens=150,
+            temperature=0.5
+        )
+        context = context_resp.choices[0].message.content.strip()
+        logger.info(f"📘 Context: {context}")
+    except Exception as e:
+        logger.error(f"❌ Context generation failed: {e}")
+        context = "No context available."
+    
+    # Format time for chunks
+    def format_time(t):
+        h, m, s = int(t // 3600), int((t % 3600) // 60), t % 60
+        return f"{h:02}:{m:02}:{s:06.3f}".replace('.', ',')
+    
+    # Create transcript chunks
+    chunks = []
+    for seg in result["segments"]:
+        chunk = {
+            "source": f"{os.path.basename(video_path)} [{format_time(seg['start'])} - {format_time(seg['end'])}]",
+            "original_video_url": original_video_url,  # Store the original video URL
+            "text": seg["text"].strip(),
+            "context": context,
+            "type": "video",
+            "start": seg["start"],
+            "end": seg["end"]
+        }
+        chunks.append(chunk)
+    
+    return chunks, context
+
+def build_faiss_index(chunks, bucket_name, company_name):
+    """Build FAISS index from transcript chunks"""
+    texts = [chunk["text"].strip()[:3000] for chunk in chunks if "text" in chunk and chunk["text"].strip()]
+    
+    if not texts:
+        raise ValueError("❌ No valid text chunks found to build FAISS index.")
+    
+    logger.info(f"📦 Total chunks to embed: {len(texts)}")
+    
+    # Create embeddings
+    embeddings = []
+    batch_size = 10
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i+batch_size]
+        try:
+            response = openai.embeddings.create(
+                input=batch,
+                model="text-embedding-3-small"
+            )
+            embeddings.extend([e.embedding for e in response.data])
+            logger.info(f"✅ Created embeddings for batch {i//batch_size + 1}")
+        except Exception as e:
+            logger.error(f"❌ Embedding failed at batch {i}-{i+batch_size}: {e}")
+            # Try with a smaller batch size as fallback
+            try:
+                for text in batch:
+                    response = openai.embeddings.create(
+                        input=[text],
+                        model="text-embedding-3-small"
+                    )
+                    embeddings.extend([e.embedding for e in response.data])
+                logger.info(f"✅ Created embeddings for batch {i//batch_size + 1} (individual)")
+            except Exception as e2:
+                logger.error(f"❌ Individual embedding also failed: {e2}")
+                raise
+    
+    # Build and save FAISS index
+    vectors = np.array(embeddings).astype("float32")
+    index = faiss.IndexFlatL2(vectors.shape[1])
+    index.add(vectors)
+    
+    # Save locally and upload to GCS
+    local_path = f"faiss_index_{company_name}.bin"
+    gcs_path = "faiss_indexes/faiss_index.bin"
+    
+    faiss.write_index(index, local_path)
+    upload_to_gcs(local_path, bucket_name, gcs_path)
+    
+    logger.info(f"✅ Built FAISS index with {len(vectors)} vectors for {company_name}")
+    return index
+
+def process_video(video_url, company_name, bucket_name, source=None, meeting_link=None):
+    """Main function to process a video for a company"""
+    try:
+        video_filename = f"downloaded_video_{uuid.uuid4().hex[:8]}.mp4"
+        logger.info(f"📥 Downloading video: {video_url}")
+        download_video(video_url, video_filename)
+        add_video_url_mapping(video_filename, video_url)
+        logger.info(f"🔍 Transcribing video: {video_filename}")
+        chunks, context = transcribe_video(video_filename, company_name, video_url)
+        # Create embeddings for all chunks
+        texts = [chunk["text"] for chunk in chunks]
+        embeddings = []
+        batch_size = 10
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i+batch_size]
+            try:
+                response = openai.embeddings.create(
+                    input=batch,
+                    model="text-embedding-3-small"
+                )
+                embeddings.extend([e.embedding for e in response.data])
+            except Exception as e:
+                logger.error(f"❌ Embedding failed at batch {i}-{i+batch_size}: {e}")
+                for text in batch:
+                    try:
+                        response = openai.embeddings.create(
+                            input=[text],
+                            model="text-embedding-3-small"
+                        )
+                        embeddings.extend([e.embedding for e in response.data])
+                    except Exception as e2:
+                        logger.error(f"❌ Individual embedding also failed: {e2}")
+                        raise
+        # Upsert to Pinecone
+        upsert_chunks_to_pinecone(company_name, chunks, embeddings)
+        # Clean up local video file after processing
+        if os.path.exists(video_filename):
+            os.remove(video_filename)
+        return {
+            "success": True,
+            "data": {
+                "video_filename": video_filename,
+                "chunks_count": len(chunks),
+                "bucket_name": bucket_name,
+                "context": context
+            }
+        }
+    except Exception as e:
+        logger.error(f"❌ Video processing failed: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+# FastAPI app setup
+app = FastAPI(title="QuDemo Video Processing API")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure as needed
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Pydantic models
+class ProcessVideoRequest(BaseModel, extra=Extra.allow):
+    video_url: str
+    company_name: str
+    bucket_name: Optional[str] = None  # Make bucket_name optional
+    source: Optional[str] = None
+    meeting_link: Optional[str] = None
+    is_youtube: bool = True
+
+class AskQuestionRequest(BaseModel):
+    question: str
+    company_name: str
+
+class AskQuestionCompanyRequest(BaseModel):
+    question: str
+
+# API endpoints
+@app.post("/process-video/{company_name}")
+async def process_video_endpoint(company_name: str, request: Request):
+    """Process a video for a specific company"""
+    try:
+        # Log the raw request for debugging
+        body = await request.body()
+        logger.info(f"📥 Received request for company: {company_name}")
+        logger.info(f"📥 Raw request body: {body}")
+        logger.info(f"📥 Content-Type: {request.headers.get('content-type')}")
+        
+        # Try to parse the JSON body
+        try:
+            json_body = await request.json()
+            logger.info(f"📥 Parsed JSON: {json_body}")
+        except Exception as e:
+            logger.error(f"❌ Failed to parse JSON: {e}")
+            raise HTTPException(status_code=400, detail="Invalid JSON")
+        
+        # Try to validate with Pydantic model
+        try:
+            validated_request = ProcessVideoRequest(**json_body)
+            logger.info(f"📥 Validated request: {validated_request.dict()}")
+        except ValidationError as e:
+            logger.error(f"❌ Validation error: {e}")
+            logger.error(f"❌ Validation details: {e.errors()}")
+            raise HTTPException(status_code=422, detail=f"Validation error: {e.errors()}")
+        
+        # Use provided bucket_name or derive from company_name
+        bucket_name = validated_request.bucket_name
+        if not bucket_name:
+            bucket_name = company_name.lower().replace(' ', '_').replace('-', '_')
+            logger.info(f"📥 Using derived bucket name: {bucket_name}")
+        
+        result = process_video(
+            video_url=validated_request.video_url,
+            company_name=company_name,
+            bucket_name=bucket_name,
+            source=validated_request.source,
+            meeting_link=validated_request.meeting_link
+        )
+        
+        if result["success"]:
+            return result
+        else:
+            raise HTTPException(status_code=500, detail=result["error"])
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing video for {company_name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ask-question")
+async def ask_question_endpoint(request: AskQuestionRequest):
+    """Ask a question about a company's video content"""
+    try:
+        result = answer_question(request.company_name, request.question)
+        
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error answering question for {request.company_name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ask/{company_name}")
+async def ask_question_company_endpoint(company_name: str, request: AskQuestionCompanyRequest):
+    """Ask a question about a specific company's video content"""
+    try:
+        logger.info(f"📝 Question for {company_name}: {request.question}")
+        result = answer_question(company_name, request.question)
+        
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error answering question for {company_name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+def add_video_url_mapping(local_filename, original_url):
+    """Add mapping between local filename and original video URL"""
+    global VIDEO_URL_MAPPING
+    # Extract just the filename without path
+    filename = os.path.basename(local_filename)
+    VIDEO_URL_MAPPING[filename] = original_url
+    logger.info(f"📝 Added video mapping: {filename} -> {original_url}")
+
+def get_original_video_url(local_filename):
+    """Get original video URL from local filename"""
+    global VIDEO_URL_MAPPING
+    # Extract just the filename without path and timestamp
+    if '[' in local_filename:
+        filename = local_filename.split('[')[0].strip()
+    else:
+        filename = local_filename
+    
+    original_url = VIDEO_URL_MAPPING.get(filename)
+    if original_url:
+        logger.info(f"🔗 Found video mapping: {filename} -> {original_url}")
+    else:
+        logger.warning(f"⚠️ No video mapping found for: {filename}")
+    
+    return original_url
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=5001) 

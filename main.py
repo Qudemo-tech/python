@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Extra, ValidationError
-from typing import Optional
+from typing import Optional, List, Dict
 import openai
 import faiss
 import numpy as np
@@ -216,8 +216,12 @@ def answer_question(company_name, question):
         # Get original video URL using metadata
         video_url = best_chunk.get("original_video_url")
         if not video_url:
-            logger.warning(f"⚠️ No original_video_url found in best_chunk metadata. Falling back to source: {best_chunk.get('source')}")
-            video_url = best_chunk.get("source")
+            # Try to resolve from the chunk's source filename
+            source_filename = best_chunk.get("source", "").split(" [")[0].strip()
+            video_url = get_original_video_url(source_filename)
+            if not video_url:
+                logger.warning(f"⚠️ No video mapping found for: {source_filename}")
+                video_url = best_chunk.get("source")
         logger.info(f"📤 Returning final answer. Video URL: {video_url}")
         
         return {
@@ -421,6 +425,11 @@ class AskQuestionRequest(BaseModel):
 class AskQuestionCompanyRequest(BaseModel):
     question: str
 
+class GenerateSummaryRequest(BaseModel):
+    questions_and_answers: List[Dict[str, str]]  # Each dict: {"question": ..., "answer": ...}
+    buyer_name: Optional[str] = None
+    company_name: Optional[str] = None
+
 # API endpoints
 @app.post("/process-video/{company_name}")
 async def process_video_endpoint(company_name: str, request: Request):
@@ -505,34 +514,77 @@ async def ask_question_company_endpoint(company_name: str, request: AskQuestionC
         logger.error(f"Error answering question for {company_name}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/generate-summary")
+async def generate_summary_endpoint(request: GenerateSummaryRequest):
+    """Generate a concise summary for a buyer's Q&A using OpenAI"""
+    try:
+        # Compose the prompt for ChatGPT
+        qa_pairs = request.questions_and_answers
+        buyer = request.buyer_name or "the buyer"
+        company = request.company_name or "the company"
+        qa_text = "\n".join([
+            f"Q: {qa.get('question','')}\nA: {qa.get('answer','')}" for qa in qa_pairs
+        ])
+        prompt = (
+            f"You are an expert sales assistant. Below are questions asked by {buyer} during a product demo for {company}, and the answers provided by the bot. "
+            "Summarize in under 100 words what the buyer is interested in and what they want, so a salesperson can quickly understand their needs. "
+            "Be concise, specific, and focus on actionable insights for the sales team.\n\n"
+            f"{qa_text}\n\nSummary:"
+        )
+        response = openai.chat.completions.create(
+            model="gpt-4-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+            temperature=0.4
+        )
+        summary = response.choices[0].message.content.strip()
+        return {"summary": summary}
+    except Exception as e:
+        logger.error(f"Error generating summary: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(e)}")
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 def add_video_url_mapping(local_filename, original_url):
-    """Add mapping between local filename and original video URL"""
     global VIDEO_URL_MAPPING
-    # Extract just the filename without path
     filename = os.path.basename(local_filename)
     VIDEO_URL_MAPPING[filename] = original_url
     logger.info(f"📝 Added video mapping: {filename} -> {original_url}")
+    # Also upsert to Supabase
+    try:
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_ANON_KEY")
+        if supabase_url and supabase_key:
+            supabase: Client = create_client(supabase_url, supabase_key)
+            # Upsert by video_name
+            supabase.table('videos').upsert({
+                'video_name': filename,
+                'video_url': original_url
+            }, on_conflict=['video_name']).execute()
+            logger.info(f"📝 Upserted video mapping to Supabase: {filename} -> {original_url}")
+    except Exception as e:
+        logger.error(f"❌ Failed to upsert video mapping to Supabase: {e}")
 
 def get_original_video_url(local_filename):
-    """Get original video URL from local filename"""
     global VIDEO_URL_MAPPING
-    # Extract just the filename without path and timestamp
     if '[' in local_filename:
         filename = local_filename.split('[')[0].strip()
     else:
         filename = local_filename
-    
+
     original_url = VIDEO_URL_MAPPING.get(filename)
+    if not original_url:
+        # Try to refresh mapping from Supabase
+        logger.info(f"🔄 Refreshing video mappings from Supabase for: {filename}")
+        VIDEO_URL_MAPPING.update(fetch_video_urls_from_supabase())
+        original_url = VIDEO_URL_MAPPING.get(filename)
     if original_url:
         logger.info(f"🔗 Found video mapping: {filename} -> {original_url}")
     else:
         logger.warning(f"⚠️ No video mapping found for: {filename}")
-    
     return original_url
 
 if __name__ == "__main__":

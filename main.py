@@ -212,7 +212,24 @@ def answer_question(company_name, question):
         raw_answer = strip_sources(raw_answer)
         clean_answer = format_answer(raw_answer)
         sources = [chunk["source"] for chunk in top_chunks]
-        
+
+        # If the answer is 'I do not have that information' or similar, do not return video info
+        no_info_phrases = [
+            "I do not have that information",
+            "I don't have that information",
+            "I do not know",
+            "I don't know",
+            "no information available",
+            "I couldn't find any information",
+            "Sorry, I couldn't find",
+            "Sorry, I do not have"
+        ]
+        if any(phrase.lower() in clean_answer.lower() for phrase in no_info_phrases):
+            return {
+                "answer": clean_answer,
+                "sources": sources
+            }
+
         # Get original video URL using metadata
         video_url = best_chunk.get("original_video_url")
         if not video_url:
@@ -224,12 +241,20 @@ def answer_question(company_name, question):
                 video_url = best_chunk.get("source")
         logger.info(f"📤 Returning final answer. Video URL: {video_url}")
         
+        # Get more accurate start/end from top 3 chunks
+        relevant_chunks = top_chunks[:3]
+        start = min(chunk.get("start", 0) for chunk in relevant_chunks)
+        end = max(chunk.get("end", 0) for chunk in relevant_chunks)
+        # Add a 2-second buffer before and after
+        start = max(0, start - 2)
+        end = end + 2
+        
         return {
             "answer": clean_answer,
             "sources": sources,
             "video_url": video_url,
-            "start": best_chunk.get("start"),
-            "end": best_chunk.get("end")
+            "start": start,
+            "end": end
         }
     except Exception as e:
         logger.error(f"Error in answer_question for {company_name}: {e}")

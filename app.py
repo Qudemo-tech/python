@@ -7,7 +7,10 @@ app = FastAPI(title="QuDemo Video Processing API")
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure as needed
+    allow_origins=[
+        "https://qu-demo.vercel.app",
+        "https://qudemo.com"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

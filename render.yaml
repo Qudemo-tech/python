@@ -3,7 +3,6 @@ services:
   - type: web
     name: python
     runtime: python
-    pythonVersion: 3.10.13
     repo: https://github.com/Qudemo-tech/python
     plan: starter
     buildCommand: pip install -r requirements.txt

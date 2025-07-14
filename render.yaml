@@ -1,2 +1,38 @@
-build:
-  command: ./render-build.sh
+# Exported from Render on 2025-07-14T11:53:59Z
+services:
+  - type: web
+    name: python
+    runtime: python
+    pythonVersion: 3.10.13
+    repo: https://github.com/Qudemo-tech/python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python run.py
+    autoDeployTrigger: commit
+    region: oregon
+    envVars:
+      - key: PINECONE_INDEX
+        sync: false
+      - key: PINECONE_ENV
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: GCS_BUCKET_NAME
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: GOOGLE_CLOUD_PROJECT_ID
+        sync: false
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PORT
+        sync: false
+version: "1"

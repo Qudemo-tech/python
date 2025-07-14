@@ -4,8 +4,8 @@ FROM python:3.10-slim
 # Set work directory
 WORKDIR /app
 
-# Install build tools
-RUN pip install --upgrade pip setuptools wheel
+# Install build tools and git
+RUN apt-get update && apt-get install -y git && pip install --upgrade pip setuptools wheel
 
 # Copy requirements and install
 COPY requirements.txt .

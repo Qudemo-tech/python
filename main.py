@@ -262,12 +262,18 @@ def answer_question(company_name, question):
 
 # Video processing functions
 def download_video(video_url, output_filename):
-    """Download video from URL using yt-dlp"""
+    """Download video from URL using yt-dlp, using cookies if available"""
+    cookies_path = "/app/cookies.txt"
     ydl_opts = {
         'format': 'mp4',
         'outtmpl': output_filename,
         'quiet': True
     }
+    if os.path.exists(cookies_path):
+        ydl_opts['cookiefile'] = cookies_path
+        logger.info(f"Using cookies file for yt-dlp: {cookies_path}")
+    else:
+        logger.info("No cookies file found, downloading without authentication.")
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([video_url])
     return output_filename

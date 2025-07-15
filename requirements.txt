@@ -16,7 +16,7 @@ requests==2.32.4
 openai==1.93.0
 
 # Video & Audio
-yt-dlp==2025.6.30
+yt-dlp==2023.07.06
 git+https://github.com/openai/whisper.git@c0d2f624c09dc18e709e37c2ad90c039a4eb72a2
 
 # Data science

@@ -262,20 +262,31 @@ def answer_question(company_name, question):
 
 # Video processing functions
 def download_video(video_url, output_filename):
-    """Download video from URL using yt-dlp, using cookies if available"""
-    cookies_path = "/app/cookies.txt"
+    """Download video from URL using yt-dlp (no cookies, production safe)"""
     ydl_opts = {
         'format': 'mp4',
         'outtmpl': output_filename,
         'quiet': True
     }
-    if os.path.exists(cookies_path):
-        ydl_opts['cookiefile'] = cookies_path
-        logger.info(f"Using cookies file for yt-dlp: {cookies_path}")
-    else:
-        logger.info("No cookies file found, downloading without authentication.")
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([video_url])
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
+    except Exception as e:
+        error_msg = str(e)
+        # Check for common restriction errors
+        if (
+            'Sign in to confirm you’re not a bot' in error_msg or
+            'This video is age-restricted' in error_msg or
+            'does not look like a Netscape format cookies file' in error_msg or
+            'This video is private' in error_msg or
+            'HTTP Error 403' in error_msg or
+            'This video is unavailable' in error_msg
+        ):
+            logger.error(f"❌ Video download failed due to YouTube restrictions: {error_msg}")
+            raise Exception("This YouTube video cannot be processed because it is restricted. Please provide a public, unrestricted video or upload your own file.")
+        else:
+            logger.error(f"❌ Video download failed: {error_msg}")
+            raise
     return output_filename
 
 def transcribe_video(video_path, company_name, original_video_url=None):

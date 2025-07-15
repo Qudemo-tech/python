@@ -14,8 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of your code
 COPY . .
 
-# Copy cookies.txt if present
-COPY cookies.txt /app/cookies.txt
+# Copy cookies.txt if present, else create an empty file
+RUN if [ -f cookies.txt ]; then cp cookies.txt /app/cookies.txt; else touch /app/cookies.txt; fi
 
 # Expose the port your app runs on
 EXPOSE 5001

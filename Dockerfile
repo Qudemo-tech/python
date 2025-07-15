@@ -11,11 +11,8 @@ RUN apt-get update && apt-get install -y git && pip install --upgrade pip setupt
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of your code
+# Copy the rest of your code (including cookies.txt if present)
 COPY . .
-
-# Copy cookies.txt if present, else create an empty file
-RUN if [ -f cookies.txt ]; then cp cookies.txt /app/cookies.txt; else touch /app/cookies.txt; fi
 
 # Expose the port your app runs on
 EXPOSE 5001

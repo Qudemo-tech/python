@@ -19,6 +19,8 @@ import yt_dlp
 from datetime import datetime
 from supabase import create_client, Client
 from pinecone import Pinecone
+import urllib.request
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -260,14 +262,28 @@ def answer_question(company_name, question):
         logger.error(f"Error in answer_question for {company_name}: {e}")
         return {"error": f"Failed to answer question: {str(e)}"}
 
+def fetch_cookies_from_url(url, destination_path):
+    """Download cookies.txt from public GCS URL"""
+    try:
+        urllib.request.urlretrieve(url, destination_path)
+        logger.info(f"✅ Downloaded cookies from: {url}")
+    except Exception as e:
+        logger.error(f"❌ Failed to download cookies: {e}")
+
+
 # Video processing functions
 def download_video(video_url, output_filename):
     """Download video from URL using yt-dlp, using cookies if available"""
-    cookies_path = "/app/cookies.txt"
+    cookies_url = "https://storage.googleapis.com/cookies-qudemo/www.youtube.com_cookies%20(1).txt"
+    cookies_path = "/tmp/cookies.txt"
+    
+    fetch_cookies_from_url(cookies_url, cookies_path)
+    
     ydl_opts = {
         'format': 'mp4',
         'outtmpl': output_filename,
-        'quiet': True
+        'quiet': True,
+        'cookiefile': cookies_path,
     }
     if os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 0:
         ydl_opts['cookiefile'] = cookies_path

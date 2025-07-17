@@ -29,6 +29,8 @@ faiss-cpu==1.7.4
 supabase==2.12.0
 pinecone-client==3.0.0
 
+
+
 # (Optional) If you use torch, faiss, etc., add them here:
 # torch==2.7.1
 # faiss-cpu==1.7.4

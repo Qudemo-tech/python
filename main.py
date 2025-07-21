@@ -20,6 +20,9 @@ from datetime import datetime
 from supabase import create_client, Client
 from pinecone import Pinecone
 import urllib.request
+import requests
+from google.cloud import storage
+import tempfile
 
 
 logging.basicConfig(
@@ -262,54 +265,90 @@ def answer_question(company_name, question):
         logger.error(f"Error in answer_question for {company_name}: {e}")
         return {"error": f"Failed to answer question: {str(e)}"}
 
-def fetch_cookies_from_url(url, destination_path):
-    """Download cookies.txt from public GCS URL"""
+def fetch_cookies_from_supabase(bucket_name, file_name, destination_path):
+    """Download cookies file from Supabase Storage."""
+    import os
+    from supabase import create_client
+    logger.info(f"Attempting to download cookies from Supabase Storage: bucket='{bucket_name}', file='{file_name}'")
     try:
-        urllib.request.urlretrieve(url, destination_path)
-        logger.info(f"✅ Downloaded cookies from: {url}")
+        supabase_url = os.getenv("SUPABASE_URL")
+        # Use service role key for backend admin access to storage
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        if not supabase_url or not supabase_key:
+            logger.error("❌ Supabase URL or Service Role Key not found.")
+            return
+
+        supabase = create_client(supabase_url, supabase_key)
+        
+        # Ensure the destination directory exists
+        os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+
+        with open(destination_path, "wb+") as f:
+            res = supabase.storage.from_(bucket_name).download(file_name)
+            f.write(res)
+        
+        logger.info(f"✅ Downloaded cookies from Supabase Storage to {destination_path}")
+
     except Exception as e:
-        logger.error(f"❌ Failed to download cookies: {e}")
+        import traceback
+        logger.error(f"❌ Failed to download cookies from Supabase Storage: {type(e).__name__}: {e}")
+        logger.error(traceback.format_exc())
 
 
 # Video processing functions
 def download_video(video_url, output_filename):
-    """Download video from URL using yt-dlp, using cookies if available"""
-    cookies_url = "https://storage.googleapis.com/cookies-qudemo/www.youtube.com_cookies%20(1).txt"
-    cookies_path = "/tmp/cookies.txt"
-    
-    fetch_cookies_from_url(cookies_url, cookies_path)
-    
-    ydl_opts = {
-        'format': 'mp4',
-        'outtmpl': output_filename,
-        'quiet': True,
-        'cookiefile': cookies_path,
-    }
-    if os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 0:
-        ydl_opts['cookiefile'] = cookies_path
-        logger.info(f"Using cookies file for yt-dlp: {cookies_path}")
-    else:
-        logger.info("No cookies file found, downloading without authentication.")
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([video_url])
-    except Exception as e:
-        error_msg = str(e)
-        # Check for common restriction errors
-        if (
-            'Sign in to confirm you’re not a bot' in error_msg or
-            'This video is age-restricted' in error_msg or
-            'does not look like a Netscape format cookies file' in error_msg or
-            'This video is private' in error_msg or
-            'HTTP Error 403' in error_msg or
-            'This video is unavailable' in error_msg
-        ):
-            logger.error(f"❌ Video download failed due to YouTube restrictions: {error_msg}")
-            raise Exception("This YouTube video cannot be processed because it is restricted. Please provide a public, unrestricted video or upload your own file.")
+    """Download video from URL using yt-dlp, using cookies if available, or handle local file paths."""
+    # If it's a local file path, just return it
+    if os.path.exists(video_url):
+        logger.info(f"Using local file: {video_url}")
+        return video_url
+    # If it's a YouTube link, use yt-dlp
+    if video_url.startswith('http') and ('youtube.com' in video_url or 'youtu.be' in video_url):
+        cookies_bucket = "cookies"
+        cookies_file = "www.youtube.com_cookies (1).txt"
+        cookies_path = os.path.join(tempfile.gettempdir(), "cookies.txt")
+        fetch_cookies_from_supabase(cookies_bucket, cookies_file, cookies_path)
+        
+        ydl_opts = {
+            'format': 'mp4',
+            'outtmpl': output_filename,
+            'quiet': True,
+            'cookiefile': cookies_path,
+        }
+        if os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 0:
+            ydl_opts['cookiefile'] = cookies_path
+            logger.info(f"Using cookies file for yt-dlp: {cookies_path}")
         else:
-            logger.error(f"❌ Video download failed: {error_msg}")
-            raise
-    return output_filename
+            logger.info("No cookies file found, downloading without authentication.")
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([video_url])
+        except Exception as e:
+            error_msg = str(e)
+            # Check for common restriction errors
+            if (
+                'Sign in to confirm you’re not a bot' in error_msg or
+                'This video is age-restricted' in error_msg or
+                'does not look like a Netscape format cookies file' in error_msg or
+                'This video is private' in error_msg or
+                'HTTP Error 403' in error_msg or
+                'This video is unavailable' in error_msg
+            ):
+                logger.error(f"❌ Video download failed due to YouTube restrictions: {error_msg}")
+                raise Exception("This YouTube video cannot be processed because it is restricted. Please provide a public, unrestricted video or upload your own file.")
+            else:
+                logger.error(f"❌ Video download failed: {error_msg}")
+                raise
+        return output_filename
+    # If it's another HTTP(S) URL, download it directly
+    if video_url.startswith('http'):
+        logger.info(f"Downloading video from direct URL: {video_url}")
+        r = requests.get(video_url, stream=True)
+        with open(output_filename, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+        return output_filename
+    raise Exception("Invalid video input: must be a file path or a valid URL")
 
 def transcribe_video(video_path, company_name, original_video_url=None):
     """Transcribe video using Whisper and return chunks"""

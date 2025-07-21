@@ -305,7 +305,7 @@ def download_video(video_url, output_filename):
     # If it's a YouTube link, use yt-dlp
     if video_url.startswith('http') and ('youtube.com' in video_url or 'youtu.be' in video_url):
         cookies_bucket = "cookies"
-        cookies_file = "www.youtube.com_cookies (1).txt"
+        cookies_file = "www.youtube.com_cookies.txt"
         cookies_path = os.path.join(tempfile.gettempdir(), "cookies.txt")
         fetch_cookies_from_supabase(cookies_bucket, cookies_file, cookies_path)
         

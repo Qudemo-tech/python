@@ -5,7 +5,7 @@ services:
     runtime: python
     repo: https://github.com/Qudemo-tech/python
     plan: starter
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements-minimal.txt
     startCommand: python run.py
     autoDeployTrigger: commit
     region: oregon

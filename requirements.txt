@@ -3,36 +3,36 @@ setuptools>=68.0.0
 wheel>=0.40.0
 
 # Web and API
-fastapi==0.104.1
-uvicorn==0.24.0
+fastapi>=0.104.0
+uvicorn>=0.24.0
 
 # Data validation & file handling
-pydantic==2.5.0
-python-multipart==0.0.6
-python-dotenv==1.0.0
+pydantic>=2.5.0
+python-multipart>=0.0.6
+python-dotenv>=1.0.0
 
 # HTTP & OpenAI
-requests==2.32.4
-openai==1.93.0
+requests>=2.32.0
+openai>=1.93.0
 
 # Video & Audio
-yt-dlp==2023.11.16
+yt-dlp>=2023.11.0
 git+https://github.com/openai/whisper.git@c0d2f624c09dc18e709e37c2ad90c039a4eb72a2
 # Note: ffmpeg needs to be installed system-wide, not via pip
 
 # Data science
-numpy>=1.26.0
-pandas>=2.1.0
-scikit-learn>=1.3.0
-faiss-cpu>=1.7.4
+numpy>=1.28.0
+pandas>=2.2.0
+scikit-learn>=1.4.0
+faiss-cpu>=1.8.0
 
 # Vector DBs & backends
-supabase==2.12.0
-pinecone-client==3.0.0
-google-cloud-storage==2.10.0
+supabase>=2.12.0
+pinecone-client>=4.0.0
+google-cloud-storage>=2.10.0
 
 # System monitoring
-psutil==5.9.6
+psutil>=5.9.0
 
 
 # (Optional) If you use torch, faiss, etc., add them here:

@@ -1,0 +1,26 @@
+# Minimal requirements for testing deployment
+setuptools>=68.0.0
+wheel>=0.40.0
+
+# Core dependencies
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.5.0
+python-dotenv>=1.0.0
+requests>=2.32.0
+openai>=1.93.0
+
+# Video processing
+yt-dlp>=2023.11.0
+git+https://github.com/openai/whisper.git@c0d2f624c09dc18e709e37c2ad90c039a4eb72a2
+
+# Data science (minimal)
+numpy>=1.28.0
+pandas>=2.2.0
+
+# Vector DBs
+supabase>=2.12.0
+pinecone-client>=4.0.0
+
+# System monitoring
+psutil>=5.9.0 

@@ -26,7 +26,7 @@ pinecone>=3.0.0
 
 # AI/ML
 openai>=1.0.0
-whisper>=1.0.0
+openai-whisper>=20231117
 
 # Utilities
 psutil>=5.9.0

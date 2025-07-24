@@ -685,7 +685,7 @@ async def process_video_endpoint(company_name: str, request: Request):
         # Try to validate with Pydantic model
         try:
             validated_request = ProcessVideoRequest(**json_body)
-            logger.info(f"📥 Validated request: {validated_request.dict()}")
+            logger.info(f"📥 Validated request: {validated_request.model_dump()}")
         except ValidationError as e:
             logger.error(f"❌ Validation error: {e}")
             logger.error(f"❌ Validation details: {e.errors()}")

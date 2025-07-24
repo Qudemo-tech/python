@@ -12,7 +12,7 @@ openai>=1.93.0
 
 # Video processing
 yt-dlp>=2024.3.10
-git+https://github.com/openai/whisper.git@c0d2f624c09dc18e709e37c2ad90c039a4eb72a2
+openai-whisper>=20231117
 
 # Data science (minimal)
 numpy>=1.26.0

@@ -13,6 +13,8 @@
 2. **Package Installation**: ✅ All packages installed
 3. **Missing Dependencies**: ✅ Added `faiss-cpu`, `scikit-learn`, `google-cloud-storage`
 4. **Pinecone Package**: ✅ Updated from `pinecone-client` to `pinecone`
+5. **Whisper Package**: ✅ Updated from `whisper` to `openai-whisper`
+6. **Pydantic Warning**: ✅ Updated `.dict()` to `.model_dump()`
 
 ## **🔧 Latest Changes**
 
@@ -25,6 +27,9 @@ google-cloud-storage>=2.10.0
 
 # Fixed Pinecone package:
 pinecone>=3.0.0  # Updated from pinecone-client
+
+# Fixed Whisper package:
+openai-whisper>=20231117  # Updated from whisper
 ```
 
 ### **Current Status:**

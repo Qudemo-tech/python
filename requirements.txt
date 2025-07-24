@@ -17,7 +17,7 @@ openai>=1.93.0
 
 # Video & Audio
 yt-dlp>=2023.11.0
-git+https://github.com/openai/whisper.git@c0d2f624c09dc18e709e37c2ad90c039a4eb72a2
+openai-whisper>=20231117
 # Note: ffmpeg needs to be installed system-wide, not via pip
 
 # Data science

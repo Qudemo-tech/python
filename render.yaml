@@ -5,11 +5,13 @@ services:
     runtime: python
     repo: https://github.com/Qudemo-tech/python
     plan: starter
-    buildCommand: pip install -r requirements-simple.txt
-    startCommand: python simple_test.py
+    buildCommand: pip install -r requirements-python312.txt
+    startCommand: python main.py
     autoDeployTrigger: commit
     region: oregon
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
       - key: PINECONE_INDEX
         sync: false
       - key: PINECONE_ENV

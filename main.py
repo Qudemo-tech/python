@@ -506,9 +506,30 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
         
         # Use chunked processing for large videos
         if is_large_video:
-            from large_video_processor import LargeVideoProcessor
-            processor = LargeVideoProcessor(max_memory_mb=400, chunk_duration=300)
-            result = processor.process_large_video(video_url, company_name)
+            try:
+                from large_video_processor import LargeVideoProcessor
+                processor = LargeVideoProcessor(max_memory_mb=400, chunk_duration=300)
+                result = processor.process_large_video(video_url, company_name)
+            except ImportError as e:
+                logger.warning(f"Large video processor not available: {e}")
+                logger.info("🔄 Trying simple video processor")
+                try:
+                    from simple_video_processor import SimpleVideoProcessor
+                    processor = SimpleVideoProcessor(max_memory_mb=400)
+                    result = processor.process_video(video_url, company_name)
+                except ImportError:
+                    logger.info("🔄 Falling back to normal processing for large video")
+                    is_large_video = False
+            except Exception as e:
+                logger.error(f"Large video processing failed: {e}")
+                logger.info("🔄 Trying simple video processor")
+                try:
+                    from simple_video_processor import SimpleVideoProcessor
+                    processor = SimpleVideoProcessor(max_memory_mb=400)
+                    result = processor.process_video(video_url, company_name)
+                except ImportError:
+                    logger.info("🔄 Falling back to normal processing")
+                    is_large_video = False
             
             if result["success"]:
                 # Process the chunks for embeddings

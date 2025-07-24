@@ -100,6 +100,20 @@ class LargeVideoProcessor:
         
         self.log_memory("Before video splitting")
         
+        # Check if ffmpeg is available
+        try:
+            subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+            ffmpeg_available = True
+            logger.info("✅ ffmpeg is available for video chunking")
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            ffmpeg_available = False
+            logger.warning("⚠️ ffmpeg not available, using fallback processing")
+        
+        if not ffmpeg_available:
+            # Fallback: process the entire video without chunking
+            logger.info("🔄 Using fallback: processing entire video without chunking")
+            return [video_path]
+        
         # Get video duration
         cmd = [
             'ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',

@@ -23,6 +23,7 @@ import urllib.request
 import requests
 from google.cloud import storage
 import tempfile
+import psutil
 
 
 logging.basicConfig(
@@ -30,6 +31,14 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+def log_memory_usage():
+    """Log current memory usage"""
+    process = psutil.Process()
+    memory_info = process.memory_info()
+    memory_mb = memory_info.rss / 1024 / 1024
+    logger.info(f"💾 Memory usage: {memory_mb:.1f}MB")
+    return memory_mb
 
 load_dotenv()
 
@@ -310,9 +319,10 @@ def download_video(video_url, output_filename):
         fetch_cookies_from_supabase(cookies_bucket, cookies_file, cookies_path)
         
         ydl_opts = {
-            'format': 'mp4',
+            'format': 'worst[height<=480]',  # Use lowest quality to save memory
             'outtmpl': output_filename,
             'quiet': True,
+            'max_filesize': '50M',  # Limit file size to 50MB
             'cookiefile': cookies_path,
         }
         if os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 0:
@@ -343,16 +353,28 @@ def download_video(video_url, output_filename):
     # If it's another HTTP(S) URL, download it directly
     if video_url.startswith('http'):
         logger.info(f"Downloading video from direct URL: {video_url}")
-        r = requests.get(video_url, stream=True)
+        # Use streaming to avoid loading entire file into memory
+        r = requests.get(video_url, stream=True, timeout=30)
+        r.raise_for_status()
+        
+        # Check file size before downloading
+        content_length = r.headers.get('content-length')
+        if content_length:
+            file_size_mb = int(content_length) / (1024 * 1024)
+            if file_size_mb > 50:  # Limit to 50MB
+                raise Exception(f"File too large: {file_size_mb:.1f}MB (max 50MB)")
+        
         with open(output_filename, 'wb') as f:
             for chunk in r.iter_content(chunk_size=8192):
-                f.write(chunk)
+                if chunk:  # Filter out keep-alive chunks
+                    f.write(chunk)
         return output_filename
     raise Exception("Invalid video input: must be a file path or a valid URL")
 
 def transcribe_video(video_path, company_name, original_video_url=None):
     """Transcribe video using Whisper and return chunks"""
-    model = whisper.load_model("base")
+    # Use tiny model to save memory
+    model = whisper.load_model("tiny")
     result = model.transcribe(video_path, task="translate")
     
     # Generate context
@@ -449,16 +471,100 @@ def build_faiss_index(chunks, bucket_name, company_name):
 def process_video(video_url, company_name, bucket_name, source=None, meeting_link=None):
     """Main function to process a video for a company"""
     try:
+        log_memory_usage()
+        
+        # Check if this is a large video that needs chunked processing
+        is_large_video = False
+        
+        # For YouTube videos, check if it's likely to be large
+        if video_url.startswith('http') and ('youtube.com' in video_url or 'youtu.be' in video_url):
+            # Use yt-dlp to get video info without downloading
+            try:
+                ydl_opts = {'quiet': True}
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(video_url, download=False)
+                    duration = info.get('duration', 0)
+                    # If video is longer than 10 minutes, use chunked processing
+                    if duration > 600:  # 10 minutes
+                        is_large_video = True
+                        logger.info(f"📹 Large video detected: {duration//60} minutes, using chunked processing")
+            except:
+                pass  # Continue with normal processing if info extraction fails
+        
+        # For direct URLs, check file size
+        elif video_url.startswith('http'):
+            try:
+                r = requests.head(video_url, timeout=10)
+                content_length = r.headers.get('content-length')
+                if content_length:
+                    file_size_mb = int(content_length) / (1024 * 1024)
+                    if file_size_mb > 50:  # If larger than 50MB
+                        is_large_video = True
+                        logger.info(f"📹 Large video detected: {file_size_mb:.1f}MB, using chunked processing")
+            except:
+                pass  # Continue with normal processing if size check fails
+        
+        # Use chunked processing for large videos
+        if is_large_video:
+            from large_video_processor import LargeVideoProcessor
+            processor = LargeVideoProcessor(max_memory_mb=400, chunk_duration=300)
+            result = processor.process_large_video(video_url, company_name)
+            
+            if result["success"]:
+                # Process the chunks for embeddings
+                chunks = result["chunks"]
+                texts = [chunk["text"] for chunk in chunks]
+                embeddings = []
+                batch_size = 5
+                
+                for i in range(0, len(texts), batch_size):
+                    batch = texts[i:i+batch_size]
+                    try:
+                        response = openai.embeddings.create(
+                            input=batch,
+                            model="text-embedding-3-small"
+                        )
+                        embeddings.extend([e.embedding for e in response.data])
+                        logger.info(f"✅ Processed embedding batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
+                    except Exception as e:
+                        logger.error(f"❌ Embedding failed at batch {i}-{i+batch_size}: {e}")
+                        raise
+                
+                # Upsert to Pinecone
+                upsert_chunks_to_pinecone(company_name, chunks, embeddings)
+                
+                return {
+                    "success": True,
+                    "data": {
+                        "video_filename": f"large_video_chunked_{uuid.uuid4().hex[:8]}",
+                        "chunks_count": len(chunks),
+                        "bucket_name": bucket_name,
+                        "context": "Large video processed in chunks",
+                        "processing_method": "chunked"
+                    }
+                }
+            else:
+                return result
+        
+        # Normal processing for smaller videos
         video_filename = f"downloaded_video_{uuid.uuid4().hex[:8]}.mp4"
         logger.info(f"📥 Downloading video: {video_url}")
         download_video(video_url, video_filename)
         add_video_url_mapping(video_filename, video_url)
         logger.info(f"🔍 Transcribing video: {video_filename}")
         chunks, context = transcribe_video(video_filename, company_name, video_url)
-        # Create embeddings for all chunks
+        
+        # Clean up video file immediately after transcription to save memory
+        if os.path.exists(video_filename):
+            os.remove(video_filename)
+            logger.info(f"🗑️ Cleaned up video file: {video_filename}")
+        
+        log_memory_usage()
+        
+        # Create embeddings for all chunks with smaller batch size
         texts = [chunk["text"] for chunk in chunks]
         embeddings = []
-        batch_size = 10
+        batch_size = 5  # Reduced batch size to save memory
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i+batch_size]
             try:
@@ -467,6 +573,7 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
                     model="text-embedding-3-small"
                 )
                 embeddings.extend([e.embedding for e in response.data])
+                logger.info(f"✅ Processed embedding batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
             except Exception as e:
                 logger.error(f"❌ Embedding failed at batch {i}-{i+batch_size}: {e}")
                 for text in batch:
@@ -479,11 +586,10 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
                     except Exception as e2:
                         logger.error(f"❌ Individual embedding also failed: {e2}")
                         raise
+        
         # Upsert to Pinecone
         upsert_chunks_to_pinecone(company_name, chunks, embeddings)
-        # Clean up local video file after processing
-        if os.path.exists(video_filename):
-            os.remove(video_filename)
+        
         return {
             "success": True,
             "data": {
@@ -495,6 +601,9 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
         }
     except Exception as e:
         logger.error(f"❌ Video processing failed: {e}")
+        # Clean up video file on error too
+        if 'video_filename' in locals() and os.path.exists(video_filename):
+            os.remove(video_filename)
         return {
             "success": False,
             "error": str(e)

@@ -12,6 +12,7 @@
 1. **Python Version**: ✅ 3.12.0 working
 2. **Package Installation**: ✅ All packages installed
 3. **Missing Dependencies**: ✅ Added `faiss-cpu`, `scikit-learn`, `google-cloud-storage`
+4. **Pinecone Package**: ✅ Updated from `pinecone-client` to `pinecone`
 
 ## **🔧 Latest Changes**
 
@@ -21,6 +22,9 @@
 faiss-cpu>=1.7.0
 scikit-learn>=1.3.0
 google-cloud-storage>=2.10.0
+
+# Fixed Pinecone package:
+pinecone>=3.0.0  # Updated from pinecone-client
 ```
 
 ### **Current Status:**

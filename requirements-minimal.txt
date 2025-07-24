@@ -20,7 +20,7 @@ pandas>=2.2.0
 
 # Vector DBs
 supabase>=2.12.0
-pinecone-client>=4.0.0
+pinecone>=3.0.0
 
 # System monitoring
 psutil>=5.9.0 

@@ -513,15 +513,27 @@ class LoomVideoProcessor:
         raise Exception(f"Could not download Loom video from any available source. yt-dlp failed and fallbacks are disabled on Render.")
     
     def transcribe_video(self, video_path: str, company_name: str, original_video_url: str = None) -> List[Dict]:
-        """Transcribe video using tiny Whisper model with memory management"""
+        """Transcribe video using tiny Whisper model with aggressive memory management"""
         self.log_memory("Before transcription")
         
         # Force garbage collection before transcription
         import gc
         gc.collect()
         
+        # Memory check before loading model
+        current_memory = self.log_memory("Before loading Whisper model")
+        if current_memory > self.max_memory_mb * 0.7:  # 70% threshold
+            logger.warning(f"⚠️ High memory usage before model load: {current_memory:.1f}MB")
+            # Force additional cleanup
+            gc.collect()
+        
         # Use tiny model for memory efficiency
-        model = whisper.load_model(self.whisper_model)
+        try:
+            model = whisper.load_model(self.whisper_model)
+            self.log_memory("After loading Whisper model")
+        except Exception as e:
+            logger.error(f"❌ Failed to load Whisper model: {e}")
+            raise
         
         # Memory check before transcription
         current_memory = self.log_memory("Before Whisper transcription")
@@ -541,7 +553,8 @@ class LoomVideoProcessor:
         except Exception as e:
             logger.error(f"❌ Transcription failed: {e}")
             # Cleanup on error
-            del model
+            if 'model' in locals():
+                del model
             gc.collect()
             raise
         
@@ -605,6 +618,25 @@ class LoomVideoProcessor:
             
             # Download video
             downloaded_file = self.download_loom_video(loom_url, temp_filename)
+            
+            # Check video file size before processing
+            if os.path.exists(downloaded_file):
+                file_size_mb = os.path.getsize(downloaded_file) / (1024 * 1024)
+                max_size_mb = RENDER_CONFIG.get('MAX_VIDEO_SIZE_MB', 20)
+                
+                if file_size_mb > max_size_mb:
+                    # Clean up large file
+                    os.remove(downloaded_file)
+                    error_msg = f"Video file too large: {file_size_mb:.1f}MB (max: {max_size_mb}MB)"
+                    logger.warning(f"⚠️ {error_msg}")
+                    return {
+                        "success": False,
+                        "error": error_msg,
+                        "video_url": loom_url,
+                        "company_name": company_name
+                    }
+                
+                logger.info(f"📊 Video file size: {file_size_mb:.1f}MB")
             
             # Transcribe video
             chunks = self.transcribe_video(downloaded_file, company_name, loom_url)

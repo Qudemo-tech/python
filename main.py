@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Extra, ValidationError
+from pydantic import BaseModel, ValidationError
 from typing import Optional, List, Dict
 import openai
 import faiss
@@ -749,7 +749,7 @@ app.add_middleware(
 )
 
 # Pydantic models
-class ProcessVideoRequest(BaseModel, extra=Extra.allow):
+class ProcessVideoRequest(BaseModel, extra='allow'):
     video_url: str
     company_name: str
     bucket_name: Optional[str] = None  # Make bucket_name optional

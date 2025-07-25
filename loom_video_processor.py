@@ -59,10 +59,21 @@ class LoomVideoProcessor:
         logger.info(f"   Prefer yt-dlp: {self.prefer_ytdlp}")
     
     def log_memory(self, stage: str):
-        """Log current memory usage"""
+        """Log current memory usage and check limits"""
         process = psutil.Process()
         memory_mb = process.memory_info().rss / 1024 / 1024
         logger.info(f"💾 {stage} - Memory: {memory_mb:.1f}MB")
+        
+        # Check if we're approaching the limit
+        if memory_mb > self.max_memory_mb * 0.8:  # 80% threshold
+            logger.warning(f"⚠️ High memory usage at {stage}: {memory_mb:.1f}MB (limit: {self.max_memory_mb}MB)")
+            
+        # Force garbage collection if memory is high
+        if memory_mb > self.max_memory_mb * 0.7:  # 70% threshold
+            import gc
+            gc.collect()
+            logger.info(f"🧹 Forced garbage collection at {stage}")
+            
         return memory_mb
     
     def extract_loom_id(self, loom_url: str) -> Optional[str]:
@@ -346,7 +357,17 @@ class LoomVideoProcessor:
     
     def download_loom_video(self, loom_url: str, output_filename: str) -> str:
         """Download Loom video using yt-dlp as primary method with API fallback"""
-        self.log_memory("Before Loom download")
+        # Check memory before starting download
+        current_memory = self.log_memory("Before Loom download")
+        
+        # If memory is already too high, fail early
+        if current_memory > self.max_memory_mb * 0.9:  # 90% threshold
+            raise Exception(f"Memory usage too high before download: {current_memory:.1f}MB (limit: {self.max_memory_mb}MB)")
+        
+        # Force garbage collection before download
+        import gc
+        gc.collect()
+        logger.info("🧹 Pre-download garbage collection")
         
         # Extract Loom ID from URL
         loom_id = self.extract_loom_id(loom_url)
@@ -369,6 +390,14 @@ class LoomVideoProcessor:
                 'no_warnings': True,
                 'ignoreerrors': False,
                 'nocheckcertificate': True,  # Sometimes helps with SSL issues
+                # Force lowest quality for memory optimization
+                'prefer_free_formats': True,
+                'format_sort': ['res:240', 'res:360', 'res:480', 'res:720', 'res:1080'],
+                'format_sort_force': True,
+                # Additional quality restrictions
+                'format_sort_quality': 'worst',
+                'format_sort_filesize': 'smallest',
+                'format_sort_fps': 'worst',
                 'http_headers': {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                 }
@@ -380,6 +409,16 @@ class LoomVideoProcessor:
                 try:
                     info = ydl.extract_info(loom_url, download=False)
                     logger.info(f"✅ Video info extracted: {info.get('title', 'Unknown')} - Duration: {info.get('duration', 'Unknown')}s")
+                    
+                    # Log available formats for debugging
+                    if 'formats' in info:
+                        formats = info['formats']
+                        logger.info(f"📊 Available formats: {len(formats)} total")
+                        for fmt in formats[:5]:  # Show first 5 formats
+                            resolution = fmt.get('resolution', 'unknown')
+                            filesize = fmt.get('filesize', 'unknown')
+                            logger.info(f"   - {resolution}: {filesize} bytes")
+                    
                 except Exception as info_error:
                     logger.warning(f"⚠️ Could not extract video info: {info_error}")
                 
@@ -622,12 +661,12 @@ class LoomVideoProcessor:
             # Check video file size before processing
             if os.path.exists(downloaded_file):
                 file_size_mb = os.path.getsize(downloaded_file) / (1024 * 1024)
-                max_size_mb = RENDER_CONFIG.get('MAX_VIDEO_SIZE_MB', 20)
+                max_size_mb = RENDER_CONFIG.get('MAX_VIDEO_SIZE_MB', 15)
                 
                 if file_size_mb > max_size_mb:
                     # Clean up large file
                     os.remove(downloaded_file)
-                    error_msg = f"Video file too large: {file_size_mb:.1f}MB (max: {max_size_mb}MB)"
+                    error_msg = f"Video file too large: {file_size_mb:.1f}MB (max: {max_size_mb}MB). Please use a lower quality video or upgrade to Standard plan for larger videos."
                     logger.warning(f"⚠️ {error_msg}")
                     return {
                         "success": False,
@@ -636,7 +675,7 @@ class LoomVideoProcessor:
                         "company_name": company_name
                     }
                 
-                logger.info(f"📊 Video file size: {file_size_mb:.1f}MB")
+                logger.info(f"📊 Video file size: {file_size_mb:.1f}MB (within {max_size_mb}MB limit)")
             
             # Transcribe video
             chunks = self.transcribe_video(downloaded_file, company_name, loom_url)

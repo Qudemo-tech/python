@@ -407,8 +407,8 @@ class LoomVideoProcessor:
         except Exception as yt_error:
             logger.warning(f"⚠️ yt-dlp download failed: {yt_error}")
         
-        # Fallback method: Try API approach (if API key is available and not on Render)
-        if self.loom_api_key and not self.prefer_ytdlp:
+        # Fallback method: Try API approach (if API key is available and fallbacks enabled)
+        if self.loom_api_key and RENDER_CONFIG.get('LOOM_FALLBACK_TO_API', True):
             try:
                 logger.info("🔄 Trying API approach as fallback")
                 # Get video info first
@@ -451,8 +451,8 @@ class LoomVideoProcessor:
             except Exception as e:
                 logger.warning(f"⚠️ API approach failed: {e}")
         
-        # Final fallback: Try direct download from Loom CDN (only if not on Render)
-        if not self.prefer_ytdlp:
+        # Final fallback: Try direct download from Loom CDN (if fallbacks enabled)
+        if RENDER_CONFIG.get('LOOM_FALLBACK_TO_API', True):
             logger.info("🔄 Using final fallback - direct CDN download")
             
             # Get the video URL first
@@ -510,7 +510,7 @@ class LoomVideoProcessor:
                 logger.error(f"❌ Final fallback failed: {e}")
         
         # If we get here, all methods failed
-        raise Exception(f"Could not download Loom video from any available source. yt-dlp failed and fallbacks are disabled on Render.")
+        raise Exception(f"Could not download Loom video from any available source. All download methods failed.")
     
     def transcribe_video(self, video_path: str, company_name: str, original_video_url: str = None) -> List[Dict]:
         """Transcribe video using tiny Whisper model with aggressive memory management"""

@@ -375,7 +375,7 @@ def transcribe_video(video_path, company_name, original_video_url=None):
     """Transcribe video using Whisper and return chunks"""
     # Use tiny model to save memory
     model = whisper.load_model("tiny")
-    result = model.transcribe(video_path, task="translate")
+    result = model.transcribe(video_path, task="translate",verbose=True)
     
     # Generate context
     try:
@@ -473,6 +473,93 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
     try:
         log_memory_usage()
         
+        # Check if this is a Loom video first
+        try:
+            from loom_video_processor import is_loom_url, LoomVideoProcessor
+            if is_loom_url(video_url):
+                logger.info(f"🎬 Processing Loom video: {video_url}")
+                processor = LoomVideoProcessor(max_memory_mb=400)
+                
+                # Check if Loom API key is available
+                loom_api_key = os.getenv('LOOM_API_KEY')
+                if not loom_api_key:
+                    logger.warning("⚠️ LOOM_API_KEY not found - using yt-dlp fallback method")
+                
+                try:
+                    result = processor.process_loom_video(video_url, company_name)
+                    
+                    if result["success"]:
+                        # Process the chunks for embeddings
+                        chunks = result["chunks"]
+                        texts = [chunk["text"] for chunk in chunks]
+                        embeddings = []
+                        
+                        # Use Render-optimized batch size
+                        try:
+                            from render_deployment_config import get_render_optimized_settings
+                            render_settings = get_render_optimized_settings()
+                            batch_size = render_settings['embedding_batch_size']
+                        except (ImportError, AttributeError):
+                            batch_size = 2  # Conservative default for Render
+                        
+                        logger.info(f"📦 Processing {len(texts)} chunks in batches of {batch_size}")
+                        
+                        for i in range(0, len(texts), batch_size):
+                            batch = texts[i:i+batch_size]
+                            try:
+                                # Memory check before each batch
+                                current_memory = log_memory_usage()
+                                if current_memory > 450:  # 450MB threshold for 512MB plan
+                                    logger.warning(f"⚠️ High memory usage before batch {i//batch_size + 1}: {current_memory:.1f}MB")
+                                
+                                response = openai.embeddings.create(
+                                    input=batch,
+                                    model="text-embedding-3-small"
+                                )
+                                embeddings.extend([e.embedding for e in response.data])
+                                logger.info(f"✅ Processed embedding batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
+                                
+                                # Force cleanup after each batch
+                                import gc
+                                gc.collect()
+                                
+                            except Exception as e:
+                                logger.error(f"❌ Embedding failed at batch {i}-{i+batch_size}: {e}")
+                                raise
+                        
+                        # Upsert to Pinecone
+                        upsert_chunks_to_pinecone(company_name, chunks, embeddings)
+                        
+                        # Final cleanup - ensure no files are left
+                        import gc
+                        gc.collect()
+                        
+                        return {
+                            "success": True,
+                            "data": {
+                                "video_filename": f"loom_video_{uuid.uuid4().hex[:8]}",
+                                "chunks_count": len(chunks),
+                                "bucket_name": bucket_name,
+                                "context": "Loom video processed successfully",
+                                "processing_method": "loom",
+                                "video_type": "loom",
+                                "memory_usage_mb": log_memory_usage()
+                            }
+                        }
+                    else:
+                        logger.error(f"❌ Loom video processing failed: {result.get('error', 'Unknown error')}")
+                        # Continue to fallback methods
+                        
+                except Exception as loom_error:
+                    logger.error(f"❌ Loom video processing failed with exception: {loom_error}")
+                    logger.info("🔄 Falling back to standard video processing methods")
+                    # Continue to fallback methods
+        except ImportError:
+            logger.warning("⚠️ Loom video processor not available - using standard methods")
+        except Exception as e:
+            logger.error(f"❌ Loom video processing failed: {e}")
+            logger.info("🔄 Falling back to standard video processing methods")
+        
         # Check if this is a large video that needs chunked processing
         is_large_video = False
         
@@ -536,17 +623,36 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
                 chunks = result["chunks"]
                 texts = [chunk["text"] for chunk in chunks]
                 embeddings = []
-                batch_size = 5
+                
+                # Use Render-optimized batch size
+                try:
+                    from render_deployment_config import get_render_optimized_settings
+                    render_settings = get_render_optimized_settings()
+                    batch_size = render_settings['embedding_batch_size']
+                except (ImportError, AttributeError):
+                    batch_size = 2  # Conservative default for Render
+                
+                logger.info(f"📦 Processing {len(texts)} chunks in batches of {batch_size}")
                 
                 for i in range(0, len(texts), batch_size):
                     batch = texts[i:i+batch_size]
                     try:
+                        # Memory check before each batch
+                        current_memory = log_memory_usage()
+                        if current_memory > 450:  # 450MB threshold for 512MB plan
+                            logger.warning(f"⚠️ High memory usage before batch {i//batch_size + 1}: {current_memory:.1f}MB")
+                        
                         response = openai.embeddings.create(
                             input=batch,
                             model="text-embedding-3-small"
                         )
                         embeddings.extend([e.embedding for e in response.data])
                         logger.info(f"✅ Processed embedding batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
+                        
+                        # Force cleanup after each batch
+                        import gc
+                        gc.collect()
+                        
                     except Exception as e:
                         logger.error(f"❌ Embedding failed at batch {i}-{i+batch_size}: {e}")
                         raise

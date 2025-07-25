@@ -5,7 +5,11 @@ services:
     runtime: python
     repo: https://github.com/Qudemo-tech/python
     plan: starter
-    buildCommand: pip install -r requirements-python312.txt
+    buildCommand: |
+      # Install system dependencies for video processing
+      apt-get update && apt-get install -y ffmpeg
+      # Install Python dependencies
+      pip install -r requirements-python312.txt
     startCommand: python main.py
     autoDeployTrigger: commit
     region: oregon
@@ -36,4 +40,10 @@ services:
         sync: false
       - key: PORT
         sync: false
+      - key: LOOM_API_KEY
+        sync: false
+      - key: NODE_ENV
+        value: production
+      - key: MAX_MEMORY_MB
+        value: "400"
 version: "1"

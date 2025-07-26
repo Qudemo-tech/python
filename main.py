@@ -24,6 +24,7 @@ import requests
 from google.cloud import storage
 import tempfile
 import psutil
+import sys
 
 
 logging.basicConfig(
@@ -61,6 +62,8 @@ index = pc.Index(PINECONE_INDEX)
 # Helper: upsert vectors to Pinecone
 def upsert_chunks_to_pinecone(company_name, chunks, embeddings):
     vectors = []
+    logger.info(f"🔍 Storing {len(chunks)} chunks for company: {company_name}")
+    
     for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
         vector_id = f"{company_name}-{uuid.uuid4().hex[:8]}-{i}"
         meta = {
@@ -74,12 +77,35 @@ def upsert_chunks_to_pinecone(company_name, chunks, embeddings):
             "end": chunk.get("end")
         }
         vectors.append((vector_id, emb, meta))
-    index.upsert(vectors)
+        
+        # Log first few chunks for debugging
+        if i < 3:
+            logger.info(f"📝 Chunk {i+1}: company={meta['company_name']}, source={meta['source']}, text_length={len(meta['text'])}")
+    
+    try:
+        index.upsert(vectors)
+        logger.info(f"✅ Successfully stored {len(vectors)} chunks in Pinecone for company: {company_name}")
+    except Exception as e:
+        logger.error(f"❌ Failed to store chunks in Pinecone: {e}")
+        raise
 
 # Helper: query Pinecone for similar chunks
 def query_pinecone(company_name, embedding, top_k=6):
-    result = index.query(vector=embedding, top_k=top_k, include_metadata=True, filter={"company_name": company_name})
-    return result["matches"]
+    logger.info(f"🔍 Querying Pinecone for company: {company_name}")
+    try:
+        result = index.query(vector=embedding, top_k=top_k, include_metadata=True, filter={"company_name": company_name})
+        matches = result["matches"]
+        logger.info(f"✅ Found {len(matches)} matches for company: {company_name}")
+        
+        # Log first few matches for debugging
+        for i, match in enumerate(matches[:3]):
+            meta = match.get("metadata", {})
+            logger.info(f"📝 Match {i+1}: company={meta.get('company_name')}, source={meta.get('source')}, score={match.get('score', 0):.3f}")
+        
+        return matches
+    except Exception as e:
+        logger.error(f"❌ Pinecone query failed for company {company_name}: {e}")
+        raise
 
 def fetch_video_urls_from_supabase():
     """Fetch video URLs from Supabase videos table"""
@@ -912,6 +938,125 @@ async def generate_summary_endpoint(request: GenerateSummaryRequest):
         logger.error(f"Error generating summary: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(e)}")
 
+@app.get("/debug/videos")
+async def debug_videos():
+    """Debug endpoint to check video mappings in Supabase"""
+    try:
+        logger.info("🔍 Debug: Checking video mappings in Supabase")
+        
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_ANON_KEY")
+        
+        if not supabase_url or not supabase_key:
+            return {"error": "Supabase credentials not found"}
+        
+        supabase: Client = create_client(supabase_url, supabase_key)
+        
+        # Query videos table
+        response = supabase.table('videos').select('*').execute()
+        
+        videos = response.data
+        logger.info(f"🔍 Debug: Found {len(videos)} videos in Supabase")
+        
+        # Return debug information
+        debug_info = {
+            "total_videos": len(videos),
+            "videos": []
+        }
+        
+        for video in videos[:10]:  # Show first 10 videos
+            debug_info["videos"].append({
+                "video_name": video.get("video_name"),
+                "video_url": video.get("video_url"),
+                "original_url": video.get("original_url"),
+                "video_type": video.get("video_type"),
+                "created_at": video.get("created_at")
+            })
+        
+        return debug_info
+        
+    except Exception as e:
+        logger.error(f"❌ Debug videos endpoint failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/debug/pinecone/{company_name}")
+async def debug_pinecone_company(company_name: str):
+    """Debug endpoint to check what's stored in Pinecone for a company"""
+    try:
+        logger.info(f"🔍 Debug: Checking Pinecone for company: {company_name}")
+        
+        # Create a dummy embedding to query with
+        dummy_embedding = [0.0] * 1536  # OpenAI embedding dimension
+        
+        # Query Pinecone with a dummy embedding to see what's stored
+        result = index.query(
+            vector=dummy_embedding, 
+            top_k=10, 
+            include_metadata=True, 
+            filter={"company_name": company_name}
+        )
+        
+        matches = result["matches"]
+        logger.info(f"🔍 Debug: Found {len(matches)} chunks for company: {company_name}")
+        
+        # Return debug information
+        debug_info = {
+            "company_name": company_name,
+            "total_chunks": len(matches),
+            "chunks": []
+        }
+        
+        for i, match in enumerate(matches[:5]):  # Show first 5 chunks
+            meta = match.get("metadata", {})
+            debug_info["chunks"].append({
+                "index": i + 1,
+                "company_name": meta.get("company_name"),
+                "source": meta.get("source"),
+                "text_preview": meta.get("text", "")[:100] + "..." if len(meta.get("text", "")) > 100 else meta.get("text", ""),
+                "original_video_url": meta.get("original_video_url"),
+                "score": match.get("score", 0)
+            })
+        
+        return debug_info
+        
+    except Exception as e:
+        logger.error(f"❌ Debug endpoint failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/status")
+async def status_check():
+    """Status check endpoint with basic info about stored data"""
+    try:
+        # Check Pinecone index
+        try:
+            # Get index stats
+            index_stats = index.describe_index_stats()
+            total_vectors = index_stats.get('total_vector_count', 0)
+            logger.info(f"📊 Pinecone index stats: {total_vectors} total vectors")
+        except Exception as e:
+            logger.error(f"❌ Failed to get Pinecone stats: {e}")
+            total_vectors = "Error"
+        
+        # Check video mappings
+        try:
+            video_count = len(VIDEO_URL_MAPPING)
+            logger.info(f"📊 Video mappings: {video_count} videos")
+        except Exception as e:
+            logger.error(f"❌ Failed to get video mappings: {e}")
+            video_count = "Error"
+        
+        return {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "pinecone_vectors": total_vectors,
+            "video_mappings": video_count,
+            "python_version": sys.version,
+            "environment": "production" if os.getenv("RENDER") else "development"
+        }
+    except Exception as e:
+        logger.error(f"❌ Status check failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
@@ -922,18 +1067,26 @@ def add_video_url_mapping(local_filename, original_url):
     filename = os.path.basename(local_filename)
     VIDEO_URL_MAPPING[filename] = original_url
     logger.info(f"📝 Added video mapping: {filename} -> {original_url}")
+    
     # Also upsert to Supabase
     try:
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_ANON_KEY")
         if supabase_url and supabase_key:
             supabase: Client = create_client(supabase_url, supabase_key)
+            
+            # For Loom videos, store the original share URL as the video_url for playback
+            # Loom share URLs can be embedded and played directly
+            video_url_for_playback = original_url
+            
             # Upsert by video_name
             supabase.table('videos').upsert({
                 'video_name': filename,
-                'video_url': original_url
+                'video_url': video_url_for_playback,
+                'original_url': original_url,  # Keep original for reference
+                'video_type': 'loom' if 'loom.com' in original_url else 'video'
             }, on_conflict=['video_name']).execute()
-            logger.info(f"📝 Upserted video mapping to Supabase: {filename} -> {original_url}")
+            logger.info(f"📝 Upserted video mapping to Supabase: {filename} -> {video_url_for_playback}")
     except Exception as e:
         logger.error(f"❌ Failed to upsert video mapping to Supabase: {e}")
 

@@ -452,115 +452,86 @@ class LoomVideoProcessor:
             logger.error(f"❌ Download error: {d.get('error', 'Unknown error')}")
     
     def download_loom_video(self, loom_url: str, output_filename: str) -> str:
-        """Download Loom video using yt-dlp as primary method with API fallback"""
-        # Check memory before starting download
+        """Download Loom video using yt-dlp with quality fallback and validation"""
         current_memory = self.log_memory("Before Loom download")
-        
-        # If memory is already too high, try aggressive cleanup first
-        if current_memory > self.max_memory_mb * 0.9:  # 90% threshold
+        if current_memory > self.max_memory_mb * 0.9:
             logger.warning(f"⚠️ Memory usage too high before download: {current_memory:.1f}MB (limit: {self.max_memory_mb}MB)")
             logger.info("🧹 Attempting aggressive memory cleanup...")
-            
-            # Try aggressive cleanup
             current_memory = self.aggressive_memory_cleanup()
-            
-            # If still too high after cleanup, fail
-            if current_memory > self.max_memory_mb * 0.95:  # 95% threshold
+            if current_memory > self.max_memory_mb * 0.95:
                 raise Exception(f"Memory usage too high after cleanup: {current_memory:.1f}MB (limit: {self.max_memory_mb}MB)")
-        
-        # Force garbage collection before download
         import gc
         gc.collect()
         logger.info("🧹 Pre-download garbage collection")
-        
-        # Extract Loom ID from URL
         loom_id = self.extract_loom_id(loom_url)
         if not loom_id:
             raise Exception(f"Invalid Loom URL format: {loom_url}")
-        
         logger.info(f"🎬 Processing Loom video ID: {loom_id}")
-        
-        # Primary method: Use yt-dlp (which has excellent Loom support)
-        logger.info("🔄 Using yt-dlp as primary download method for Loom video")
-        try:
-            import yt_dlp
-            
+        # Try multiple formats in order of preference
+        formats_to_try = [
+            'worst[height<=240]',
+            'worst[height<=360]',
+            'worst[height<=480]',
+            'best[height<=720]'
+        ]
+        import yt_dlp
+        for fmt in formats_to_try:
             ydl_opts = {
-                'format': self.ytdlp_format,  # Use Render-optimized format
+                'format': fmt,
                 'outtmpl': output_filename,
                 'quiet': True,
-                'max_filesize': self.ytdlp_max_filesize,  # Use Render-optimized max filesize
+                'max_filesize': self.ytdlp_max_filesize,
                 'extract_flat': False,
                 'no_warnings': True,
                 'ignoreerrors': False,
-                'nocheckcertificate': True,  # Sometimes helps with SSL issues
-                # Force lowest quality for memory optimization
+                'nocheckcertificate': True,
                 'prefer_free_formats': True,
                 'format_sort': ['res:144', 'res:240', 'res:360', 'res:480', 'res:720', 'res:1080'],
                 'format_sort_force': True,
-                # Additional quality restrictions for production
                 'format_sort_quality': 'worst',
                 'format_sort_filesize': 'smallest',
                 'format_sort_fps': 'worst',
-                # Force 240p or lower for production
                 'format_sort_resolution': 'worst',
                 'http_headers': {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                 },
-                # Add retry logic for better reliability
                 'retries': 3,
                 'fragment_retries': 3,
                 'skip_unavailable_fragments': True,
-                # Add progress hooks for better monitoring
                 'progress_hooks': [self._download_progress_hook],
             }
-            
-            logger.info(f"🔍 Downloading with yt-dlp: {loom_url}")
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # First, try to extract info to see if it's accessible
-                try:
-                    info = ydl.extract_info(loom_url, download=False)
-                    logger.info(f"✅ Video info extracted: {info.get('title', 'Unknown')} - Duration: {info.get('duration', 'Unknown')}s")
-                    
-                    # Log available formats for debugging
-                    if 'formats' in info:
-                        formats = info['formats']
-                        logger.info(f"📊 Available formats: {len(formats)} total")
-                        for fmt in formats[:5]:  # Show first 5 formats
-                            resolution = fmt.get('resolution', 'unknown')
-                            filesize = fmt.get('filesize', 'unknown')
-                            logger.info(f"   - {resolution}: {filesize} bytes")
-                    
-                except Exception as info_error:
-                    logger.warning(f"⚠️ Could not extract video info: {info_error}")
-                
-                # Now download the video
-                ydl.download([loom_url])
-            
-            if os.path.exists(output_filename):
-                # Verify the file is actually a video
-                file_size = os.path.getsize(output_filename)
-                if file_size > 1024:  # At least 1KB
-                    # Enhanced validation for corrupted files
-                    if self.validate_video_file_enhanced(output_filename):
-                        logger.info(f"✅ Successfully downloaded using yt-dlp: {output_filename} ({file_size} bytes)")
+            logger.info(f"🔍 Trying yt-dlp format: {fmt}")
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    try:
+                        info = ydl.extract_info(loom_url, download=False)
+                        logger.info(f"✅ Video info extracted: {info.get('title', 'Unknown')} - Duration: {info.get('duration', 'Unknown')}s")
+                        if 'formats' in info:
+                            formats = info['formats']
+                            logger.info(f"📊 Available formats: {len(formats)} total")
+                            for f in formats[:5]:
+                                resolution = f.get('resolution', 'unknown')
+                                filesize = f.get('filesize', 'unknown')
+                                logger.info(f"   - {resolution}: {filesize} bytes")
+                    except Exception as info_error:
+                        logger.warning(f"⚠️ Could not extract video info: {info_error}")
+                    ydl.download([loom_url])
+                if os.path.exists(output_filename):
+                    file_size = os.path.getsize(output_filename)
+                    if file_size > 1024 and self.validate_video_file_enhanced(output_filename):
+                        logger.info(f"✅ Successfully downloaded using yt-dlp: {output_filename} ({file_size} bytes) with format {fmt}")
                         self.log_memory("After yt-dlp download")
                         return output_filename
                     else:
-                        logger.warning(f"⚠️ Downloaded file failed enhanced validation, removing: {output_filename}")
-                        os.remove(output_filename)  # Remove invalid file
-                        raise Exception("Downloaded video file is corrupted or invalid")
-                else:
-                    logger.warning(f"⚠️ Downloaded file too small ({file_size} bytes), may be invalid")
-                    os.remove(output_filename)  # Remove invalid file
-                    raise Exception("Downloaded video file is too small")
-            else:
-                logger.warning("⚠️ yt-dlp download failed - file not created")
-                raise Exception("yt-dlp download failed - no file created")
-                
-        except Exception as yt_error:
-            logger.warning(f"⚠️ yt-dlp download failed: {yt_error}")
-            raise yt_error  # Re-raise to prevent fallback to API method which may have same issues
+                        logger.warning(f"⚠️ Downloaded file failed validation or too small, removing: {output_filename}")
+                        os.remove(output_filename)
+            except Exception as yt_error:
+                logger.warning(f"⚠️ yt-dlp download failed for format {fmt}: {yt_error}")
+                if os.path.exists(output_filename):
+                    os.remove(output_filename)
+                continue  # Try next format
+        # If all formats fail
+        raise Exception("Could not download Loom video in any supported format (tried 240p, 360p, 480p, 720p). The video may not be available for download or is protected.")
     
     def transcribe_video(self, video_path: str, company_name: str, original_video_url: str = None) -> List[Dict]:
         """Transcribe video using Whisper with audio conversion for memory optimization"""

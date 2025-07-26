@@ -837,87 +837,6 @@ class LoomVideoProcessor:
                 os.remove(audio_path)
             raise
     
-    def process_loom_video(self, loom_url: str, company_name: str) -> Dict:
-        """Process Loom video: download, transcribe, and cleanup"""
-        try:
-            # Create temporary file with unique name
-            temp_filename = f"loom_video_{os.getpid()}.mp4"
-            
-            # Download video
-            downloaded_file = self.download_loom_video(loom_url, temp_filename)
-            
-            # Check video file size before processing
-            if os.path.exists(downloaded_file):
-                file_size_mb = os.path.getsize(downloaded_file) / (1024 * 1024)
-                
-                # Get configuration settings
-                try:
-                    from render_deployment_config import get_render_optimized_settings
-                    config = get_render_optimized_settings()
-                    max_size_mb = config.get('MAX_VIDEO_SIZE_MB', 300)  # Default to 300MB for 2GB plan
-                except ImportError:
-                    max_size_mb = 300  # Fallback for 2GB RAM plan
-                
-                if file_size_mb > max_size_mb:
-                    # Clean up large file
-                    os.remove(downloaded_file)
-                    error_msg = f"Video file too large: {file_size_mb:.1f}MB (max: {max_size_mb}MB). With 2GB RAM, you can process videos up to {max_size_mb}MB. Consider using a lower quality video or contact support for larger videos."
-                    logger.warning(f"⚠️ {error_msg}")
-                    return {
-                        "success": False,
-                        "error": error_msg,
-                        "video_url": loom_url,
-                        "company_name": company_name
-                    }
-                
-                logger.info(f"📊 Video file size: {file_size_mb:.1f}MB (within {max_size_mb}MB limit for 2GB RAM)")
-            
-            # Transcribe video
-            chunks = self.transcribe_video(downloaded_file, company_name, loom_url)
-            
-            # IMMEDIATELY DELETE THE VIDEO FILE
-            if os.path.exists(downloaded_file):
-                os.remove(downloaded_file)
-                logger.info(f"🗑️ Cleaned up Loom video file: {downloaded_file}")
-            
-            return {
-                "success": True,
-                "chunks": chunks,
-                "video_url": loom_url,
-                "company_name": company_name,
-                "processing_method": "loom_ytdlp"
-            }
-            
-        except Exception as e:
-            # Cleanup on error
-            temp_filename = f"loom_video_{os.getpid()}.mp4"
-            if os.path.exists(temp_filename):
-                os.remove(temp_filename)
-                logger.info(f"🗑️ Cleaned up Loom video file on error: {temp_filename}")
-            
-            logger.error(f"❌ Loom video processing failed: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "video_url": loom_url,
-                "company_name": company_name
-            }
-
-def is_loom_url(url: str) -> bool:
-    """Check if URL is a Loom video URL"""
-    loom_patterns = [
-        r'loom\.com/share/',
-        r'loom\.com/embed/',
-        r'loom\.com/recordings/',
-        r'^[a-zA-Z0-9-]+$'  # Just an ID
-    ]
-    
-    for pattern in loom_patterns:
-        if re.search(pattern, url):
-            return True
-    
-    return False 
-
     def _get_audio_duration(self, audio_path: str) -> float:
         """Get audio duration in seconds using ffprobe"""
         try:
@@ -1005,4 +924,87 @@ def is_loom_url(url: str) -> bool:
             logger.error(f"❌ Chunked transcription failed: {e}")
             # Fallback to regular transcription
             logger.info("🔄 Falling back to regular transcription")
-            return model.transcribe(audio_path, **options) 
+            return model.transcribe(audio_path, **options)
+    
+    def process_loom_video(self, loom_url: str, company_name: str) -> Dict:
+        """Process Loom video: download, transcribe, and cleanup"""
+        try:
+            # Create temporary file with unique name
+            temp_filename = f"loom_video_{os.getpid()}.mp4"
+            
+            # Download video
+            downloaded_file = self.download_loom_video(loom_url, temp_filename)
+            
+            # Check video file size before processing
+            if os.path.exists(downloaded_file):
+                file_size_mb = os.path.getsize(downloaded_file) / (1024 * 1024)
+                
+                # Get configuration settings
+                try:
+                    from render_deployment_config import get_render_optimized_settings
+                    config = get_render_optimized_settings()
+                    max_size_mb = config.get('MAX_VIDEO_SIZE_MB', 300)  # Default to 300MB for 2GB plan
+                except ImportError:
+                    max_size_mb = 300  # Fallback for 2GB RAM plan
+                
+                if file_size_mb > max_size_mb:
+                    # Clean up large file
+                    os.remove(downloaded_file)
+                    error_msg = f"Video file too large: {file_size_mb:.1f}MB (max: {max_size_mb}MB). With 2GB RAM, you can process videos up to {max_size_mb}MB. Consider using a lower quality video or contact support for larger videos."
+                    logger.warning(f"⚠️ {error_msg}")
+                    return {
+                        "success": False,
+                        "error": error_msg,
+                        "video_url": loom_url,
+                        "company_name": company_name
+                    }
+                
+                logger.info(f"📊 Video file size: {file_size_mb:.1f}MB (within {max_size_mb}MB limit for 2GB RAM)")
+            
+            # Transcribe video
+            chunks = self.transcribe_video(downloaded_file, company_name, loom_url)
+            
+            # IMMEDIATELY DELETE THE VIDEO FILE
+            if os.path.exists(downloaded_file):
+                os.remove(downloaded_file)
+                logger.info(f"🗑️ Cleaned up Loom video file: {downloaded_file}")
+            
+            return {
+                "success": True,
+                "chunks": chunks,
+                "video_url": loom_url,
+                "company_name": company_name,
+                "processing_method": "loom_ytdlp"
+            }
+            
+        except Exception as e:
+            # Cleanup on error
+            temp_filename = f"loom_video_{os.getpid()}.mp4"
+            if os.path.exists(temp_filename):
+                os.remove(temp_filename)
+                logger.info(f"🗑️ Cleaned up Loom video file on error: {temp_filename}")
+            
+            logger.error(f"❌ Loom video processing failed: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "video_url": loom_url,
+                "company_name": company_name
+            }
+
+def is_loom_url(url: str) -> bool:
+    """Check if URL is a Loom video URL"""
+    loom_patterns = [
+        r'loom\.com/share/',
+        r'loom\.com/embed/',
+        r'loom\.com/recordings/',
+        r'^[a-zA-Z0-9-]+$'  # Just an ID
+    ]
+    
+    for pattern in loom_patterns:
+        if re.search(pattern, url):
+            return True
+    
+    return False 
+
+ 

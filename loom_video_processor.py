@@ -586,6 +586,17 @@ class LoomVideoProcessor:
                                 'best[height<=240]',
                             ]
                             
+                            # Also try using specific format IDs if available
+                            available_format_ids = []
+                            for fmt in formats:
+                                format_id = fmt.get('format_id')
+                                if format_id and format_id not in available_format_ids:
+                                    available_format_ids.append(format_id)
+                            
+                            # Add format IDs to the beginning of preferences
+                            for format_id in available_format_ids[:3]:  # Try first 3 format IDs
+                                format_preferences.insert(0, format_id)
+                            
                             for format_spec in format_preferences:
                                 logger.info(f"🔍 Trying yt-dlp format: {format_spec}")
                                 
@@ -645,7 +656,40 @@ class LoomVideoProcessor:
                         if os.path.exists(output_filename):
                             os.remove(output_filename)
                     
-
+                    # Final fallback: Try direct download from any available format URL
+                    if formats:
+                        logger.info(f"🔍 Trying direct download from available format URLs")
+                        for i, fmt in enumerate(formats[:3]):  # Try first 3 formats
+                            try:
+                                format_url = fmt.get('url')
+                                if format_url:
+                                    logger.info(f"🔍 Trying direct download from format {i+1} URL")
+                                    import requests
+                                    
+                                    # Download directly using requests
+                                    r = requests.get(format_url, stream=True, timeout=30)
+                                    r.raise_for_status()
+                                    
+                                    with open(output_filename, 'wb') as f:
+                                        for chunk in r.iter_content(chunk_size=8192):
+                                            if chunk:
+                                                f.write(chunk)
+                                    
+                                    # Validate the downloaded file
+                                    if os.path.exists(output_filename) and self.validate_video_file_enhanced(output_filename):
+                                        file_size = os.path.getsize(output_filename)
+                                        logger.info(f"✅ Successfully downloaded using direct URL (format {i+1}): {output_filename} ({file_size} bytes)")
+                                        return output_filename
+                                    else:
+                                        logger.warning(f"⚠️ Direct download validation failed for format {i+1}")
+                                        if os.path.exists(output_filename):
+                                            os.remove(output_filename)
+                                            
+                            except Exception as direct_error:
+                                logger.warning(f"⚠️ Direct download failed for format {i+1}: {direct_error}")
+                                if os.path.exists(output_filename):
+                                    os.remove(output_filename)
+                                continue
             
             except Exception as e:
                 logger.warning(f"⚠️ Could not extract video info: {e}")

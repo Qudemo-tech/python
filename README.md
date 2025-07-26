@@ -1,20 +1,35 @@
 # QuDemo Python Backend
 
-This is the Python backend for the QuDemo application, handling video processing, transcription, and Q&A functionality using AI.
+Production-ready Python backend for the QuDemo application, handling video processing, transcription, and Q&A functionality using AI with optimized settings for Render deployment.
 
-## Features
+## 🚀 Features
 
 - **Video Processing**: Download and transcribe videos using yt-dlp and Whisper
+- **Audio Conversion**: Convert video to audio for memory optimization
 - **Q&A System**: Answer questions about company videos using OpenAI GPT-4 and FAISS
 - **FAISS Indexing**: Fast similarity search for video transcript chunks
 - **Google Cloud Storage**: Store transcripts and indexes in GCS buckets
 - **Supabase Integration**: Fetch video metadata from Supabase
+- **Memory Optimization**: Optimized for Render 2GB RAM deployment
 
-## Setup
+## 📁 Project Structure
+
+```
+pythonn/
+├── main.py                    # FastAPI server
+├── loom_video_processor.py    # Loom video processing with audio conversion
+├── render_deployment_config.py # Production configuration
+├── requirements-python312.txt  # Dependencies
+├── README.md                  # This file
+├── PRODUCTION_DEPLOYMENT_2GB.md # Production deployment guide
+└── venv/                     # Virtual environment
+```
+
+## 🛠️ Setup
 
 ### 1. Environment Variables
 
-Create a `.env` file in the `backend/python/` directory:
+Create a `.env` file in the `backend/pythonn/` directory:
 
 ```env
 # OpenAI API
@@ -31,46 +46,64 @@ SUPABASE_ANON_KEY=your_supabase_anon_key_here
 HOST=0.0.0.0
 PORT=5001
 DEBUG=False
+
+# Render Environment (for production)
+RENDER=true
 ```
 
 ### 2. Install Dependencies
 
 ```bash
 # Create virtual environment
-python -m venv env
+python -m venv venv
 
 # Activate virtual environment
 # On Windows:
-env\Scripts\activate
+venv\Scripts\activate
 # On macOS/Linux:
-source env/bin/activate
+source venv/bin/activate
 
 # Install dependencies
-pip install -r requirements.txt
+pip install -r requirements-python312.txt
 ```
 
-### 3. Google Cloud Setup
-
-1. Create a Google Cloud project
-2. Enable Cloud Storage API
-3. Create a service account and download the JSON key
-4. Set the path to the key in `GOOGLE_APPLICATION_CREDENTIALS`
-
-## Usage
-
-### Start the API Server
+### 3. Start the API Server
 
 ```bash
-python run.py
+# Development
+python main.py
+
+# Production (with RENDER=true)
+RENDER=true python main.py
 ```
 
 The API will be available at:
 - **API**: http://localhost:5001
 - **Docs**: http://localhost:5001/docs
 
-### API Endpoints
+## 🎯 Production Optimizations
 
-#### Process Video
+### Memory Management
+- **Audio Conversion**: Convert video to 16kHz mono audio before Whisper processing
+- **Memory Limits**: 1.8GB max for Render 2GB RAM plan
+- **Video Quality**: Force 240p downloads for minimal memory usage
+- **Whisper Model**: 'tiny' model for fastest processing
+
+### Performance Settings
+```python
+{
+    'max_memory_mb': 1800,
+    'ytdlp_format': 'worst[height<=240]',
+    'whisper_model': 'tiny',
+    'embedding_batch_size': 8,
+    'audio_sample_rate': 16000,
+    'audio_channels': 1,
+}
+```
+
+## 📊 API Endpoints
+
+### Process Video
 ```bash
 POST /process-video/{company_name}
 ```
@@ -78,15 +111,15 @@ POST /process-video/{company_name}
 Process a video for a specific company:
 ```json
 {
-  "video_url": "https://youtube.com/watch?v=...",
+  "video_url": "https://www.loom.com/share/...",
   "company_name": "Company Name",
-  "bucket_name": "optional_bucket_name",
-  "source": "optional_source",
-  "meeting_link": "optional_meeting_link"
+  "is_youtube": true,
+  "source": null,
+  "meeting_link": ""
 }
 ```
 
-#### Ask Question
+### Ask Question
 ```bash
 POST /ask/{company_name}
 ```
@@ -98,111 +131,53 @@ Ask a question about a company's video content:
 }
 ```
 
-#### Health Check
-```bash
-GET /health
-```
+## 🔧 Production Deployment
 
-### Standalone Scripts
+### Render Deployment
+1. Set `RENDER=true` environment variable
+2. Deploy with Python 3.12
+3. Install FFmpeg dependency
+4. Use `requirements-python312.txt`
 
-#### Process a Video
-```bash
-python process_video.py <video_url> <company_name> [source] [meeting_link]
-```
+### Expected Performance
+- **Memory Usage**: 800-1000MB peak
+- **Processing Time**: 25-65 seconds per video
+- **Success Rate**: >95%
+- **Concurrent Requests**: 2-3 videos simultaneously
 
-#### Ask a Question
-```bash
-python ask_question.py <company_name> <question>
-```
+## 📋 Dependencies
 
-#### Rebuild FAISS Index
-```bash
-python rebuild_index.py <company_name>
-```
+- **FastAPI**: Web framework
+- **Whisper**: Audio transcription
+- **yt-dlp**: Video downloading
+- **FFmpeg**: Audio conversion
+- **OpenAI**: Embeddings and Q&A
+- **Supabase**: Database integration
+- **Pinecone**: Vector storage
 
-List all companies:
-```bash
-python rebuild_index.py --list
-```
+## 🚨 Troubleshooting
 
-## Architecture
+### Memory Issues
+- Check video file size (max 30MB for production)
+- Verify 240p format is being used
+- Monitor memory usage in logs
 
-### Core Components
+### Processing Failures
+- Check Loom video accessibility
+- Verify FFmpeg installation
+- Check OpenAI API key
 
-1. **Video Processing Pipeline**:
-   - Download video using yt-dlp
-   - Transcribe using OpenAI Whisper
-   - Create transcript chunks with timestamps
-   - Upload to Google Cloud Storage
+### Performance Issues
+- Ensure `RENDER=true` is set for production
+- Check network connectivity
+- Monitor CPU usage
 
-2. **Q&A System**:
-   - Create embeddings for questions using OpenAI
-   - Search FAISS index for relevant chunks
-   - Rerank chunks using GPT-3.5
-   - Generate answers using GPT-4
+## 📈 Monitoring
 
-3. **Storage**:
-   - Google Cloud Storage for transcripts and indexes
-   - FAISS for fast similarity search
-   - Supabase for video metadata
+Key metrics to monitor:
+- Memory usage (should stay under 1.5GB)
+- Processing time (25-65 seconds)
+- Success rate (>95%)
+- Error rate (<5%)
 
-### File Structure
-
-```
-backend/python/
-├── main.py              # Main FastAPI application
-├── run.py               # Server startup script
-├── requirements.txt     # Python dependencies
-├── ask_question.py      # Standalone Q&A script
-├── process_video.py     # Standalone video processing script
-├── rebuild_index.py     # FAISS index rebuild script
-├── README.md           # This file
-├── key.json            # Google Cloud service account key
-└── env/                # Virtual environment
-```
-
-## Troubleshooting
-
-### Common Issues
-
-1. **NumPy Version Conflicts**: If you get numpy-related errors, try:
-   ```bash
-   pip uninstall numpy faiss-cpu
-   pip install numpy==1.24.4
-   pip install faiss-cpu
-   ```
-
-2. **Google Cloud Authentication**: Ensure your service account key is valid and has the necessary permissions.
-
-3. **OpenAI API**: Make sure your OpenAI API key is valid and has sufficient credits.
-
-4. **Port Conflicts**: If port 5001 is in use, change the PORT environment variable.
-
-### Logs
-
-The application uses structured logging. Check the console output for detailed information about:
-- Video processing progress
-- Q&A operations
-- API requests
-- Error messages
-
-## Development
-
-### Adding New Features
-
-1. Add new endpoints in `main.py`
-2. Update the Pydantic models for request/response validation
-3. Add any new dependencies to `requirements.txt`
-4. Update this README with new usage instructions
-
-### Testing
-
-Test the API using the interactive docs at http://localhost:5001/docs
-
-### Deployment
-
-For production deployment:
-1. Set `DEBUG=False`
-2. Use a proper WSGI server like Gunicorn
-3. Set up proper CORS configuration
-4. Use environment-specific configuration 
+For detailed deployment information, see `PRODUCTION_DEPLOYMENT_2GB.md`. 

@@ -471,14 +471,49 @@ def build_faiss_index(chunks, bucket_name, company_name):
 def process_video(video_url, company_name, bucket_name, source=None, meeting_link=None):
     """Main function to process a video for a company"""
     try:
-        log_memory_usage()
+        # Initial memory check and cleanup
+        initial_memory = log_memory_usage()
+        logger.info(f"📥 Starting video processing for company: {company_name}")
+        logger.info(f"📥 Raw request body: {video_url}")
+        
+        # Get configuration settings
+        try:
+            from render_deployment_config import get_render_optimized_settings
+            config = get_render_optimized_settings()
+            memory_fail_threshold = config['memory_fail_threshold']
+            memory_cleanup_threshold = config['memory_cleanup_threshold']
+        except ImportError:
+            # Fallback settings for 2GB RAM
+            memory_fail_threshold = 1800
+            memory_cleanup_threshold = 1200
+        
+        # If memory is already high, perform cleanup
+        if initial_memory > memory_cleanup_threshold:
+            logger.warning(f"⚠️ High initial memory usage: {initial_memory:.1f}MB")
+            logger.info("🧹 Performing memory cleanup before processing...")
+            
+            # Force garbage collection
+            import gc
+            for i in range(3):
+                gc.collect()
+            
+            # Check memory after cleanup
+            post_cleanup_memory = log_memory_usage()
+            logger.info(f"🧹 Memory after cleanup: {post_cleanup_memory:.1f}MB (was {initial_memory:.1f}MB)")
+            
+            # If still too high, fail early
+            if post_cleanup_memory > memory_fail_threshold:
+                raise Exception(f"Memory usage too high after cleanup: {post_cleanup_memory:.1f}MB. Please try again later or use a smaller video.")
         
         # Check if this is a Loom video first
         try:
             from loom_video_processor import is_loom_url, LoomVideoProcessor
             if is_loom_url(video_url):
                 logger.info(f"🎬 Processing Loom video: {video_url}")
-                processor = LoomVideoProcessor(max_memory_mb=400)
+                
+                # Use configuration-based memory limit
+                memory_limit = config.get('max_memory_mb', 1500)  # Default to 1.5GB for 2GB plan
+                processor = LoomVideoProcessor(max_memory_mb=memory_limit)
                 
                 # Check if Loom API key is available
                 loom_api_key = os.getenv('LOOM_API_KEY')
@@ -494,13 +529,8 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
                         texts = [chunk["text"] for chunk in chunks]
                         embeddings = []
                         
-                        # Use Render-optimized batch size
-                        try:
-                            from render_deployment_config import get_render_optimized_settings
-                            render_settings = get_render_optimized_settings()
-                            batch_size = render_settings['embedding_batch_size']
-                        except (ImportError, AttributeError):
-                            batch_size = 2  # Conservative default for Render
+                        # Use configuration-based batch size
+                        batch_size = config.get('embedding_batch_size', 5)
                         
                         logger.info(f"📦 Processing {len(texts)} chunks in batches of {batch_size}")
                         
@@ -509,7 +539,7 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
                             try:
                                 # Memory check before each batch
                                 current_memory = log_memory_usage()
-                                if current_memory > 450:  # 450MB threshold for 512MB plan
+                                if current_memory > memory_cleanup_threshold:
                                     logger.warning(f"⚠️ High memory usage before batch {i//batch_size + 1}: {current_memory:.1f}MB")
                                 
                                 response = openai.embeddings.create(
@@ -519,7 +549,7 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
                                 embeddings.extend([e.embedding for e in response.data])
                                 logger.info(f"✅ Processed embedding batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
                                 
-                                # Force cleanup after each batch
+                                # Light cleanup after each batch
                                 import gc
                                 gc.collect()
                                 
@@ -530,7 +560,7 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
                         # Upsert to Pinecone
                         upsert_chunks_to_pinecone(company_name, chunks, embeddings)
                         
-                        # Final cleanup - ensure no files are left
+                        # Final cleanup
                         import gc
                         gc.collect()
                         
@@ -540,8 +570,8 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
                                 "video_filename": f"loom_video_{uuid.uuid4().hex[:8]}",
                                 "chunks_count": len(chunks),
                                 "bucket_name": bucket_name,
-                                "context": "Loom video processed successfully",
-                                "processing_method": "loom",
+                                "context": "Loom video processed successfully with audio conversion",
+                                "processing_method": "loom_audio_optimized",
                                 "video_type": "loom",
                                 "memory_usage_mb": log_memory_usage()
                             }
@@ -678,7 +708,7 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
         logger.info(f"📥 Downloading video: {video_url}")
         download_video(video_url, video_filename)
         add_video_url_mapping(video_filename, video_url)
-        logger.info(f"🔍 Transcribing video: {video_filename}")
+        logger.info(f"�� Transcribing video: {video_filename}")
         chunks, context = transcribe_video(video_filename, company_name, video_url)
         
         # Clean up video file immediately after transcription to save memory

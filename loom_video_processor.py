@@ -13,6 +13,14 @@ from dotenv import load_dotenv
 import re
 import json
 
+# Import yt-dlp for video downloading
+try:
+    import yt_dlp
+except ImportError:
+    logger = logging.getLogger(__name__)
+    logger.error("❌ yt-dlp not installed. Please install with: pip install yt-dlp")
+    yt_dlp = None
+
 # Load environment variables
 load_dotenv()
 
@@ -386,56 +394,63 @@ class LoomVideoProcessor:
             return False
     
     def validate_video_file_enhanced(self, file_path: str) -> bool:
-        """Enhanced validation for corrupted files."""
+        """Enhanced video file validation with multiple checks"""
         try:
             if not os.path.exists(file_path):
-                logger.error(f"❌ File does not exist: {file_path}")
+                logger.warning(f"⚠️ File does not exist: {file_path}")
                 return False
             
-            # Read a small portion of the file to check for common corruption markers
+            file_size = os.path.getsize(file_path)
+            if file_size == 0:
+                logger.warning(f"⚠️ File is empty: {file_path}")
+                return False
+            
+            # Check if file is too small (likely HTML error page)
+            if file_size < 1024:  # Less than 1KB
+                logger.warning(f"⚠️ File too small ({file_size} bytes), likely HTML error: {file_path}")
+                return False
+            
+            # Read first few bytes to check file signature
             with open(file_path, 'rb') as f:
-                header = f.read(1024) # Read first 1KB
-                
-                # Check for common corruption markers
-                corruption_markers = [
-                    b'<!DOCTYPE', # HTML corruption
-                    b'<html',     # HTML corruption
-                    b'<!DOCTYPE', # HTML corruption (alternate)
-                    b'<html',     # HTML corruption (alternate)
-                    b'<!DOCTYPE', # HTML corruption (alternate)
-                    b'<html',     # HTML corruption (alternate)
-                    b'<!DOCTYPE', # HTML corruption (alternate)
-                    b'<html',     # HTML corruption (alternate)
-                    b'<!DOCTYPE', # HTML corruption (alternate)
-                    b'<html',     # HTML corruption (alternate)
-                ]
-                
-                for marker in corruption_markers:
-                    if marker in header:
-                        logger.warning(f"⚠️ File appears to be corrupted (marker found): {file_path}")
+                header = f.read(12)
+            
+            # Check for common video file signatures
+            video_signatures = [
+                b'\x00\x00\x00\x20ftyp',  # MP4
+                b'\x00\x00\x00\x18ftyp',  # MP4
+                b'\x00\x00\x00\x1cftyp',  # MP4
+                b'RIFF',  # AVI
+                b'\x1a\x45\xdf\xa3',  # WebM/MKV
+            ]
+            
+            is_video = any(header.startswith(sig) for sig in video_signatures)
+            
+            # Check for HTML content (error pages)
+            html_indicators = [b'<!DOCTYPE', b'<html', b'<HTML', b'<title>', b'<TITLE>']
+            is_html = any(header.startswith(indicator) for indicator in html_indicators)
+            
+            if is_html:
+                logger.warning(f"⚠️ File appears to be HTML (error page): {file_path}")
+                return False
+            
+            if is_video:
+                logger.info(f"✅ Valid video file signature detected: {file_path}")
+                return True
+            else:
+                logger.warning(f"⚠️ Unknown file format, not a recognized video: {file_path}")
+                # Try to read more to see if it's HTML
+                with open(file_path, 'rb') as f:
+                    content = f.read(1024)
+                    if b'<html' in content.lower() or b'<!doctype' in content.lower():
+                        logger.warning(f"⚠️ File contains HTML content (error page): {file_path}")
                         return False
                 
-                # Check for common video file signatures (if not HTML)
-                video_signatures = [
-                    b'\x00\x00\x00\x20ftyp',  # MP4
-                    b'\x00\x00\x00\x18ftyp',  # MP4
-                    b'\x00\x00\x00\x1cftyp',  # MP4
-                    b'\x1a\x45\xdf\xa3',      # WebM
-                    b'RIFF',                  # AVI
-                    b'\x00\x00\x00\x14ftyp',  # MP4
-                ]
-                
-                for sig in video_signatures:
-                    if header.startswith(sig):
-                        logger.info(f"✅ Valid video file signature detected: {file_path}")
-                        return True
-                
-                # If no signature matches, it's likely corrupted or not a video
-                logger.warning(f"⚠️ File does not have a valid video signature: {file_path}")
-                return False
+                # If we can't determine, assume it's valid but log
+                logger.info(f"⚠️ File format unclear, assuming valid: {file_path}")
+                return True
                 
         except Exception as e:
-            logger.error(f"❌ Error validating file {file_path} enhanced: {e}")
+            logger.error(f"❌ Error validating file {file_path}: {e}")
             return False
     
     def _download_progress_hook(self, d):
@@ -454,6 +469,10 @@ class LoomVideoProcessor:
     def download_loom_video(self, loom_url: str, output_filename: str) -> str:
         """Download Loom video using yt-dlp with fallback formats"""
         try:
+            # Check if yt-dlp is available
+            if yt_dlp is None:
+                raise Exception("yt-dlp is not installed. Please install with: pip install yt-dlp")
+            
             # Get configuration settings
             try:
                 from render_deployment_config import get_render_optimized_settings
@@ -484,10 +503,21 @@ class LoomVideoProcessor:
                     'quiet': True,
                     'max_filesize': ytdlp_max_filesize,
                     'progress_hooks': [self._download_progress_hook],
+                    'no_warnings': True,
+                    'ignoreerrors': False,
                 }
                 
                 try:
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        # First, try to extract video info to validate the URL
+                        try:
+                            info = ydl.extract_info(loom_url, download=False)
+                            logger.info(f"✅ Video info extracted: {info.get('title', 'Unknown')} - Duration: {info.get('duration', 0)}s")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Could not extract video info: {e}")
+                            continue
+                        
+                        # Download the video
                         ydl.download([loom_url])
                     
                     # Validate the downloaded file

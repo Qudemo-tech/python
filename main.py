@@ -1107,8 +1107,7 @@ def add_video_url_mapping(local_filename, original_url):
             # Upsert by video_name - only include columns that exist in schema
             supabase.table('videos').upsert({
                 'video_name': filename,
-                'video_url': video_url_for_playback,
-                'video_type': 'loom' if 'loom.com' in original_url else 'video'
+                'video_url': video_url_for_playback
             }, on_conflict=['video_name']).execute()
             logger.info(f"📝 Upserted video mapping to Supabase: {filename} -> {video_url_for_playback}")
     except Exception as e:

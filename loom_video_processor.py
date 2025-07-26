@@ -736,6 +736,24 @@ class LoomVideoProcessor:
             audio_duration = self._get_audio_duration(audio_path)
             logger.info(f"🎤 Audio duration: {audio_duration:.1f} seconds")
             
+            # Check if this is a silent video (very short duration or silent audio)
+            if audio_duration < 1.0:  # Less than 1 second, likely silent
+                logger.warning(f"⚠️ Silent video detected (duration: {audio_duration:.1f}s), creating empty transcript")
+                
+                # Create a single empty chunk for silent videos
+                chunks = [{
+                    "source": f"{os.path.basename(video_path)} [00:00:00,000 - 00:00:05,000]",
+                    "original_video_url": original_video_url,
+                    "text": "[Silent video - no audio content]",
+                    "context": f"Video transcription for {company_name}",
+                    "type": "loom_video",
+                    "start": 0.0,
+                    "end": 5.0
+                }]
+                
+                logger.info(f"✅ Created empty transcript for silent video")
+                return chunks
+            
             if audio_duration > 300:  # If longer than 5 minutes
                 logger.info(f"🎤 Long video detected ({audio_duration:.1f}s), using chunked transcription")
                 result = self._transcribe_in_chunks(audio_path, model, transcription_options)
@@ -851,8 +869,66 @@ class LoomVideoProcessor:
             )
             
             if result.returncode != 0:
-                logger.error(f"❌ FFmpeg conversion failed: {result.stderr}")
-                raise Exception(f"FFmpeg conversion failed: {result.stderr}")
+                # Check if the error is due to no audio stream
+                if "Output file #0 does not contain any stream" in result.stderr or "No audio stream found" in result.stderr:
+                    logger.warning(f"⚠️ No audio stream found in video, creating silent audio file")
+                    
+                    # Create a silent audio file with the same duration as the video
+                    try:
+                        # Get video duration first
+                        duration_cmd = [
+                            'ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+                            '-of', 'default=noprint_wrappers=1:nokey=1', video_path
+                        ]
+                        
+                        duration_result = subprocess.run(duration_cmd, capture_output=True, text=True, timeout=30)
+                        if duration_result.returncode == 0:
+                            duration = float(duration_result.stdout.strip())
+                            logger.info(f"🎵 Video duration: {duration:.2f} seconds")
+                            
+                            # Create silent audio with the same duration
+                            silent_cmd = [
+                                'ffmpeg',
+                                '-f', 'lavfi',
+                                '-i', f'anullsrc=channel_layout=mono:sample_rate={sample_rate}',
+                                '-t', str(duration),
+                                '-acodec', codec,
+                                '-ar', str(sample_rate),
+                                '-ac', str(channels),
+                                '-y',
+                                audio_path
+                            ]
+                            
+                            logger.info(f"🎵 Creating silent audio: {' '.join(silent_cmd)}")
+                            silent_result = subprocess.run(silent_cmd, capture_output=True, text=True, timeout=60)
+                            
+                            if silent_result.returncode == 0 and os.path.exists(audio_path):
+                                file_size = os.path.getsize(audio_path)
+                                if file_size > 1024:  # At least 1KB
+                                    logger.info(f"✅ Silent audio created successfully: {audio_path} ({file_size} bytes)")
+                                    logger.info(f"🎵 Silent audio settings: {sample_rate}Hz, {channels} channel(s), {codec}")
+                                    return audio_path
+                                else:
+                                    logger.error(f"❌ Silent audio file too small: {file_size} bytes")
+                                    os.remove(audio_path)
+                                    raise Exception("Silent audio file too small")
+                            else:
+                                logger.error(f"❌ Silent audio creation failed: {silent_result.stderr}")
+                                if os.path.exists(audio_path):
+                                    os.remove(audio_path)
+                                raise Exception(f"Silent audio creation failed: {silent_result.stderr}")
+                        else:
+                            logger.error(f"❌ Could not get video duration: {duration_result.stderr}")
+                            raise Exception("Could not get video duration for silent audio")
+                            
+                    except Exception as silent_error:
+                        logger.error(f"❌ Silent audio creation failed: {silent_error}")
+                        if os.path.exists(audio_path):
+                            os.remove(audio_path)
+                        raise Exception(f"Silent audio creation failed: {silent_error}")
+                else:
+                    logger.error(f"❌ FFmpeg conversion failed: {result.stderr}")
+                    raise Exception(f"FFmpeg conversion failed: {result.stderr}")
             
             # Verify audio file was created and has content
             if os.path.exists(audio_path):

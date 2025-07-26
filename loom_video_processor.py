@@ -679,7 +679,28 @@ class LoomVideoProcessor:
             
             # Transcribe audio (much more memory efficient than video)
             logger.info(f"🎤 Transcribing audio: {audio_path}")
-            result = model.transcribe(audio_path)
+            
+            # Add transcription options for faster processing
+            transcription_options = {
+                'language': 'en',  # Specify language for faster processing
+                'task': 'transcribe',
+                'fp16': False,  # Disable FP16 to avoid warnings
+                'verbose': False,  # Reduce logging
+            }
+            
+            # For longer videos, use chunking to avoid timeouts
+            audio_duration = self._get_audio_duration(audio_path)
+            logger.info(f"🎤 Audio duration: {audio_duration:.1f} seconds")
+            
+            if audio_duration > 300:  # If longer than 5 minutes
+                logger.info(f"🎤 Long video detected ({audio_duration:.1f}s), using chunked transcription")
+                result = self._transcribe_in_chunks(audio_path, model, transcription_options)
+            else:
+                # Regular transcription with optimized settings
+                logger.info(f"🎤 Starting transcription for {audio_duration:.1f}s audio")
+                result = model.transcribe(audio_path, **transcription_options)
+                logger.info(f"✅ Transcription completed successfully")
+                    
             self.log_memory("After transcription")
             
             # Clean up audio file immediately
@@ -896,3 +917,92 @@ def is_loom_url(url: str) -> bool:
             return True
     
     return False 
+
+    def _get_audio_duration(self, audio_path: str) -> float:
+        """Get audio duration in seconds using ffprobe"""
+        try:
+            import subprocess
+            import json
+            
+            cmd = [
+                'ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+                '-of', 'json', audio_path
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                duration = float(data['format']['duration'])
+                return duration
+            else:
+                logger.warning(f"⚠️ Could not get audio duration, assuming 60s")
+                return 60.0
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Error getting audio duration: {e}, assuming 60s")
+            return 60.0
+    
+    def _transcribe_in_chunks(self, audio_path: str, model, options: dict) -> dict:
+        """Transcribe long audio in chunks to avoid timeouts"""
+        try:
+            import subprocess
+            import tempfile
+            import os
+            
+            # Get total duration
+            total_duration = self._get_audio_duration(audio_path)
+            chunk_duration = 300  # 5 minutes per chunk
+            chunks = []
+            
+            logger.info(f"🎤 Transcribing {total_duration:.1f}s audio in {chunk_duration}s chunks")
+            
+            for start_time in range(0, int(total_duration), chunk_duration):
+                end_time = min(start_time + chunk_duration, int(total_duration))
+                
+                # Create temporary chunk file
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+                    chunk_path = temp_file.name
+                
+                try:
+                    # Extract audio chunk using ffmpeg
+                    cmd = [
+                        'ffmpeg', '-i', audio_path,
+                        '-ss', str(start_time),
+                        '-t', str(end_time - start_time),
+                        '-c', 'copy',
+                        '-y', chunk_path
+                    ]
+                    
+                    subprocess.run(cmd, capture_output=True, timeout=30)
+                    
+                    if os.path.exists(chunk_path) and os.path.getsize(chunk_path) > 0:
+                        # Transcribe chunk
+                        logger.info(f"🎤 Transcribing chunk {start_time}-{end_time}s")
+                        chunk_result = model.transcribe(chunk_path, **options)
+                        
+                        # Adjust timestamps
+                        for segment in chunk_result['segments']:
+                            segment['start'] += start_time
+                            segment['end'] += start_time
+                        
+                        chunks.extend(chunk_result['segments'])
+                        
+                finally:
+                    # Clean up chunk file
+                    if os.path.exists(chunk_path):
+                        os.remove(chunk_path)
+            
+            # Combine all chunks
+            combined_result = {
+                'text': ' '.join([seg['text'] for seg in chunks]),
+                'segments': chunks
+            }
+            
+            logger.info(f"✅ Chunked transcription completed: {len(chunks)} segments")
+            return combined_result
+            
+        except Exception as e:
+            logger.error(f"❌ Chunked transcription failed: {e}")
+            # Fallback to regular transcription
+            logger.info("🔄 Falling back to regular transcription")
+            return model.transcribe(audio_path, **options) 

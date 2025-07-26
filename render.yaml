@@ -13,6 +13,7 @@ services:
     startCommand: python main.py
     autoDeployTrigger: commit
     region: oregon
+    timeout: 1800  # 30 minutes timeout for video processing
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0

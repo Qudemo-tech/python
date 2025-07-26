@@ -337,6 +337,13 @@ def download_video(video_url, output_filename):
     if os.path.exists(video_url):
         logger.info(f"Using local file: {video_url}")
         return video_url
+    
+    # Check if it's a Loom URL
+    if 'loom.com' in video_url:
+        logger.warning(f"⚠️ Loom URL detected in fallback download: {video_url}")
+        logger.warning(f"⚠️ This should be handled by LoomVideoProcessor, not fallback download")
+        raise Exception("Loom videos should be processed by LoomVideoProcessor. yt-dlp download failed.")
+    
     # If it's a YouTube link, use yt-dlp
     if video_url.startswith('http') and ('youtube.com' in video_url or 'youtu.be' in video_url):
         cookies_bucket = "cookies"
@@ -363,7 +370,7 @@ def download_video(video_url, output_filename):
             error_msg = str(e)
             # Check for common restriction errors
             if (
-                'Sign in to confirm you’re not a bot' in error_msg or
+                'Sign in to confirm you\'re not a bot' in error_msg or
                 'This video is age-restricted' in error_msg or
                 'does not look like a Netscape format cookies file' in error_msg or
                 'This video is private' in error_msg or
@@ -376,6 +383,7 @@ def download_video(video_url, output_filename):
                 logger.error(f"❌ Video download failed: {error_msg}")
                 raise
         return output_filename
+    
     # If it's another HTTP(S) URL, download it directly
     if video_url.startswith('http'):
         logger.info(f"Downloading video from direct URL: {video_url}")
@@ -394,7 +402,22 @@ def download_video(video_url, output_filename):
             for chunk in r.iter_content(chunk_size=8192):
                 if chunk:  # Filter out keep-alive chunks
                     f.write(chunk)
+        
+        # Validate the downloaded file
+        try:
+            from loom_video_processor import LoomVideoProcessor
+            processor = LoomVideoProcessor()
+            if not processor.validate_video_file_enhanced(output_filename):
+                os.remove(output_filename)
+                raise Exception("Downloaded file appears to be invalid (possibly HTML error page)")
+        except Exception as e:
+            logger.error(f"❌ Downloaded file validation failed: {e}")
+            if os.path.exists(output_filename):
+                os.remove(output_filename)
+            raise
+        
         return output_filename
+    
     raise Exception("Invalid video input: must be a file path or a valid URL")
 
 def transcribe_video(video_path, company_name, original_video_url=None):
@@ -595,21 +618,17 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
                             "data": {
                                 "video_filename": f"loom_video_{uuid.uuid4().hex[:8]}",
                                 "chunks_count": len(chunks),
-                                "bucket_name": bucket_name,
-                                "context": "Loom video processed successfully with audio conversion",
-                                "processing_method": "loom_audio_optimized",
-                                "video_type": "loom",
-                                "memory_usage_mb": log_memory_usage()
+                                "message": "Loom video processed successfully"
                             }
                         }
                     else:
                         logger.error(f"❌ Loom video processing failed: {result.get('error', 'Unknown error')}")
-                        # Continue to fallback methods
+                        raise Exception(f"Loom video processing failed: {result.get('error', 'Unknown error')}")
                         
-                except Exception as loom_error:
-                    logger.error(f"❌ Loom video processing failed with exception: {loom_error}")
-                    logger.info("🔄 Falling back to standard video processing methods")
-                    # Continue to fallback methods
+                except Exception as e:
+                    logger.error(f"❌ Loom video processing failed: {e}")
+                    # Don't fall back to regular download for Loom videos
+                    raise Exception(f"Loom video processing failed: {str(e)}. Please check if the video URL is accessible and try again.")
         except ImportError:
             logger.warning("⚠️ Loom video processor not available - using standard methods")
         except Exception as e:

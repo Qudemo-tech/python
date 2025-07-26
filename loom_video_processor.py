@@ -485,58 +485,172 @@ class LoomVideoProcessor:
             
             logger.info(f"🎬 Processing Loom video ID: {self.extract_loom_id(loom_url)}")
             
-            # Try multiple formats in order of preference
-            formats_to_try = [
-                ytdlp_format,  # Use configured format first
-                'worst[height<=240]',
-                'worst[height<=360]', 
-                'worst[height<=480]',
-                'best[height<=720]'
-            ]
-            
-            for format_spec in formats_to_try:
-                logger.info(f"🔍 Trying yt-dlp format: {format_spec}")
-                
+            # First, try to get available formats
+            try:
                 ydl_opts = {
-                    'format': format_spec,
-                    'outtmpl': output_filename,
                     'quiet': True,
-                    'max_filesize': ytdlp_max_filesize,
-                    'progress_hooks': [self._download_progress_hook],
                     'no_warnings': True,
-                    'ignoreerrors': False,
                 }
                 
-                try:
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        # First, try to extract video info to validate the URL
-                        try:
-                            info = ydl.extract_info(loom_url, download=False)
-                            logger.info(f"✅ Video info extracted: {info.get('title', 'Unknown')} - Duration: {info.get('duration', 0)}s")
-                        except Exception as e:
-                            logger.warning(f"⚠️ Could not extract video info: {e}")
-                            continue
-                        
-                        # Download the video
-                        ydl.download([loom_url])
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    # Extract video info to see available formats
+                    info = ydl.extract_info(loom_url, download=False)
+                    formats = info.get('formats', [])
                     
-                    # Validate the downloaded file
-                    if os.path.exists(output_filename) and self.validate_video_file_enhanced(output_filename):
-                        file_size = os.path.getsize(output_filename)
-                        logger.info(f"✅ Successfully downloaded using yt-dlp: {output_filename} ({file_size} bytes) with format {format_spec}")
-                        return output_filename
-                    else:
-                        logger.warning(f"⚠️ Downloaded file validation failed for format {format_spec}")
+                    logger.info(f"✅ Video info extracted: {info.get('title', 'Unknown')} - Duration: {info.get('duration', 0)}s")
+                    logger.info(f"📊 Available formats: {len(formats)} total")
+                    
+                    # Log available formats for debugging
+                    for fmt in formats[:5]:  # Show first 5 formats
+                        height = fmt.get('height', 'unknown')
+                        filesize = fmt.get('filesize', 'unknown bytes')
+                        logger.info(f"   - {height}x{fmt.get('width', 'unknown')}: {filesize}")
+                    
+                    # Try to find the best available format
+                    if formats:
+                        # If only one format is available, use it directly
+                        if len(formats) == 1:
+                            format_id = formats[0].get('format_id', 'http-raw')
+                            logger.info(f"🔍 Single format available, using format ID: {format_id}")
+                            try:
+                                ydl_opts = {
+                                    'format': format_id,
+                                    'outtmpl': output_filename,
+                                    'quiet': True,
+                                    'max_filesize': ytdlp_max_filesize,
+                                    'progress_hooks': [self._download_progress_hook],
+                                    'no_warnings': True,
+                                    'ignoreerrors': False,
+                                }
+                                
+                                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                    ydl.download([loom_url])
+                                
+                                # Validate the downloaded file
+                                if os.path.exists(output_filename) and self.validate_video_file_enhanced(output_filename):
+                                    file_size = os.path.getsize(output_filename)
+                                    logger.info(f"✅ Successfully downloaded using format ID {format_id}: {output_filename} ({file_size} bytes)")
+                                    return output_filename
+                                else:
+                                    logger.warning(f"⚠️ Downloaded file validation failed for format ID {format_id}")
+                                    if os.path.exists(output_filename):
+                                        os.remove(output_filename)
+                                        
+                            except Exception as e:
+                                logger.warning(f"⚠️ Format ID download failed: {e}")
+                                if os.path.exists(output_filename):
+                                    os.remove(output_filename)
+                                
+                                # Fallback: Try direct download from format URL
+                                try:
+                                    format_url = formats[0].get('url')
+                                    if format_url:
+                                        logger.info(f"🔍 Trying direct download from format URL")
+                                        import requests
+                                        
+                                        # Download directly using requests
+                                        r = requests.get(format_url, stream=True, timeout=30)
+                                        r.raise_for_status()
+                                        
+                                        with open(output_filename, 'wb') as f:
+                                            for chunk in r.iter_content(chunk_size=8192):
+                                                if chunk:
+                                                    f.write(chunk)
+                                        
+                                        # Validate the downloaded file
+                                        if os.path.exists(output_filename) and self.validate_video_file_enhanced(output_filename):
+                                            file_size = os.path.getsize(output_filename)
+                                            logger.info(f"✅ Successfully downloaded using direct URL: {output_filename} ({file_size} bytes)")
+                                            return output_filename
+                                        else:
+                                            logger.warning(f"⚠️ Direct download validation failed")
+                                            if os.path.exists(output_filename):
+                                                os.remove(output_filename)
+                                                
+                                except Exception as direct_error:
+                                    logger.warning(f"⚠️ Direct download failed: {direct_error}")
+                                    if os.path.exists(output_filename):
+                                        os.remove(output_filename)
+                        else:
+                            # Try different format preferences - start with simple ones
+                            format_preferences = [
+                                'worst',  # Any worst quality (works with single format)
+                                'best',   # Any best quality (works with single format)
+                                'worst[height<=720]',
+                                'worst[height<=480]',
+                                'worst[height<=360]',
+                                'worst[height<=240]',
+                                'best[height<=720]',
+                                'best[height<=480]',
+                                'best[height<=360]',
+                                'best[height<=240]',
+                            ]
+                            
+                            for format_spec in format_preferences:
+                                logger.info(f"🔍 Trying yt-dlp format: {format_spec}")
+                                
+                                try:
+                                    ydl_opts = {
+                                        'format': format_spec,
+                                        'outtmpl': output_filename,
+                                        'quiet': True,
+                                        'max_filesize': ytdlp_max_filesize,
+                                        'progress_hooks': [self._download_progress_hook],
+                                        'no_warnings': True,
+                                        'ignoreerrors': False,
+                                    }
+                                    
+                                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                        ydl.download([loom_url])
+                                    
+                                    # Validate the downloaded file
+                                    if os.path.exists(output_filename) and self.validate_video_file_enhanced(output_filename):
+                                        file_size = os.path.getsize(output_filename)
+                                        logger.info(f"✅ Successfully downloaded using yt-dlp: {output_filename} ({file_size} bytes) with format {format_spec}")
+                                        return output_filename
+                                    else:
+                                        logger.warning(f"⚠️ Downloaded file validation failed for format {format_spec}")
+                                        if os.path.exists(output_filename):
+                                            os.remove(output_filename)
+                                            
+                                except Exception as e:
+                                    logger.warning(f"⚠️ yt-dlp download failed for format {format_spec}: {e}")
+                                    if os.path.exists(output_filename):
+                                        os.remove(output_filename)
+                                    continue
+                    
+                    # If no formats worked, try the original configured format
+                    logger.info(f"🔍 Trying configured format: {ytdlp_format}")
+                    try:
+                        ydl_opts = {
+                            'format': ytdlp_format,
+                            'outtmpl': output_filename,
+                            'quiet': True,
+                            'max_filesize': ytdlp_max_filesize,
+                            'progress_hooks': [self._download_progress_hook],
+                            'no_warnings': True,
+                            'ignoreerrors': False,
+                        }
+                        
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            ydl.download([loom_url])
+                        
+                        if os.path.exists(output_filename) and self.validate_video_file_enhanced(output_filename):
+                            file_size = os.path.getsize(output_filename)
+                            logger.info(f"✅ Successfully downloaded using configured format: {output_filename} ({file_size} bytes)")
+                            return output_filename
+                            
+                    except Exception as e:
+                        logger.warning(f"⚠️ Configured format download failed: {e}")
                         if os.path.exists(output_filename):
                             os.remove(output_filename)
-                            
-                except Exception as e:
-                    logger.warning(f"⚠️ yt-dlp download failed for format {format_spec}: {e}")
-                    if os.path.exists(output_filename):
-                        os.remove(output_filename)
-                    continue
+                    
+
             
-            # If all formats failed, raise an exception
+            except Exception as e:
+                logger.warning(f"⚠️ Could not extract video info: {e}")
+            
+            # If all yt-dlp attempts failed, raise an exception
             raise Exception("All yt-dlp formats failed to download video")
             
         except Exception as e:

@@ -10,69 +10,57 @@ import logging
 logger = logging.getLogger(__name__)
 
 def get_render_optimized_settings():
-    """
-    Get Render-optimized settings based on environment
-    """
-    # Check if we're running on Render
-    is_render = os.getenv('RENDER', 'false').lower() == 'true'
-    
-    if is_render:
-        logger.info("🚀 Running on Render - using optimized settings for 2GB RAM plan")
+    """Get optimized settings for Render deployment with 2GB RAM"""
+    if os.getenv("RENDER"):
+        # Production settings for 2GB RAM plan
         return {
-            # Memory management - optimized for 2GB RAM
-            'max_memory_mb': 1800,  # Conservative limit for 2GB plan
-            'memory_cleanup_threshold': 1400,  # Start cleanup at 1.4GB
-            'memory_fail_threshold': 1900,  # Fail at 1.9GB
+            # Memory settings
+            'max_memory_mb': 1800,
+            'memory_cleanup_threshold': 1400,
+            'memory_fail_threshold': 1900,
             
-            # Video processing - optimized for production
-            'ytdlp_format': 'worst[height<=240]',  # Force 240p for memory efficiency
-            'ytdlp_max_filesize': '100M',  # Smaller files for faster processing
-            'whisper_model': 'tiny',  # Fastest processing, lowest memory
-            'embedding_batch_size': 8,  # Larger batches with more RAM
+            # Video download settings - relaxed limits for 2GB RAM
+            'ytdlp_format': 'worst[height<=480]',  # Allow higher quality
+            'ytdlp_max_filesize': '500M',  # Increased to 500MB
+            'MAX_VIDEO_SIZE_MB': 300,  # Increased to 300MB for 2GB RAM
+            
+            # Whisper settings
+            'whisper_model': 'tiny',
+            
+            # Embedding settings
+            'embedding_batch_size': 8,
+            
+            # Processing settings
             'prefer_ytdlp': True,
-            
-            # Loom-specific settings
-            'LOOM_FALLBACK_TO_API': False,  # Disable API fallback for stability
-            'MAX_VIDEO_SIZE_MB': 30,  # Conservative video size limit
-            
-            # Processing optimizations
-            'enable_aggressive_cleanup': True,  # Aggressive cleanup for production
-            'cleanup_frequency': 3,  # Cleanup every 3 operations
+            'LOOM_FALLBACK_TO_API': False,
+            'enable_aggressive_cleanup': True,
+            'cleanup_frequency': 3,
             'retry_attempts': 2,
-            
-            # Audio conversion settings
-            'audio_sample_rate': 16000,  # Whisper standard
-            'audio_channels': 1,  # Mono for efficiency
-            'audio_codec': 'pcm_s16le',  # 16-bit PCM
-        }
-    else:
-        logger.info("💻 Running locally - using development settings")
-        return {
-            # Memory management
-            'max_memory_mb': 800,  # Higher limit for local development
-            'memory_cleanup_threshold': 600,
-            'memory_fail_threshold': 750,
-            
-            # Video processing
-            'ytdlp_format': 'best[height<=720]',
-            'ytdlp_max_filesize': '200M',
-            'whisper_model': 'tiny',  # Use tiny for better performance
-            'embedding_batch_size': 5,
-            'prefer_ytdlp': True,
-            
-            # Loom-specific settings
-            'LOOM_FALLBACK_TO_API': True,
-            'MAX_VIDEO_SIZE_MB': 50,
-            
-            # Processing optimizations
-            'enable_aggressive_cleanup': False,
-            'cleanup_frequency': 10,
-            'retry_attempts': 3,
             
             # Audio conversion settings
             'audio_sample_rate': 16000,
             'audio_channels': 1,
-            'audio_codec': 'pcm_s16le',
+            'audio_codec': 'pcm_s16le'
+        }
+    else:
+        # Development settings
+        return {
+            'max_memory_mb': 1500,
+            'memory_cleanup_threshold': 1200,
+            'memory_fail_threshold': 1800,
+            'ytdlp_format': 'best[height<=720]',
+            'ytdlp_max_filesize': '500M',
+            'whisper_model': 'tiny',
+            'embedding_batch_size': 5,
+            'prefer_ytdlp': True,
+            'LOOM_FALLBACK_TO_API': True,
+            'MAX_VIDEO_SIZE_MB': 200,  # Higher for development
+            'enable_aggressive_cleanup': False,
+            'cleanup_frequency': 10,
+            'retry_attempts': 3,
+            'audio_sample_rate': 16000,
+            'audio_channels': 1,
+            'audio_codec': 'pcm_s16le'
         }
 
 def get_memory_settings():

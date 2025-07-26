@@ -452,86 +452,66 @@ class LoomVideoProcessor:
             logger.error(f"❌ Download error: {d.get('error', 'Unknown error')}")
     
     def download_loom_video(self, loom_url: str, output_filename: str) -> str:
-        """Download Loom video using yt-dlp with quality fallback and validation"""
-        current_memory = self.log_memory("Before Loom download")
-        if current_memory > self.max_memory_mb * 0.9:
-            logger.warning(f"⚠️ Memory usage too high before download: {current_memory:.1f}MB (limit: {self.max_memory_mb}MB)")
-            logger.info("🧹 Attempting aggressive memory cleanup...")
-            current_memory = self.aggressive_memory_cleanup()
-            if current_memory > self.max_memory_mb * 0.95:
-                raise Exception(f"Memory usage too high after cleanup: {current_memory:.1f}MB (limit: {self.max_memory_mb}MB)")
-        import gc
-        gc.collect()
-        logger.info("🧹 Pre-download garbage collection")
-        loom_id = self.extract_loom_id(loom_url)
-        if not loom_id:
-            raise Exception(f"Invalid Loom URL format: {loom_url}")
-        logger.info(f"🎬 Processing Loom video ID: {loom_id}")
-        # Try multiple formats in order of preference
-        formats_to_try = [
-            'worst[height<=240]',
-            'worst[height<=360]',
-            'worst[height<=480]',
-            'best[height<=720]'
-        ]
-        import yt_dlp
-        for fmt in formats_to_try:
-            ydl_opts = {
-                'format': fmt,
-                'outtmpl': output_filename,
-                'quiet': True,
-                'max_filesize': self.ytdlp_max_filesize,
-                'extract_flat': False,
-                'no_warnings': True,
-                'ignoreerrors': False,
-                'nocheckcertificate': True,
-                'prefer_free_formats': True,
-                'format_sort': ['res:144', 'res:240', 'res:360', 'res:480', 'res:720', 'res:1080'],
-                'format_sort_force': True,
-                'format_sort_quality': 'worst',
-                'format_sort_filesize': 'smallest',
-                'format_sort_fps': 'worst',
-                'format_sort_resolution': 'worst',
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                },
-                'retries': 3,
-                'fragment_retries': 3,
-                'skip_unavailable_fragments': True,
-                'progress_hooks': [self._download_progress_hook],
-            }
-            logger.info(f"🔍 Trying yt-dlp format: {fmt}")
+        """Download Loom video using yt-dlp with fallback formats"""
+        try:
+            # Get configuration settings
             try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    try:
-                        info = ydl.extract_info(loom_url, download=False)
-                        logger.info(f"✅ Video info extracted: {info.get('title', 'Unknown')} - Duration: {info.get('duration', 'Unknown')}s")
-                        if 'formats' in info:
-                            formats = info['formats']
-                            logger.info(f"📊 Available formats: {len(formats)} total")
-                            for f in formats[:5]:
-                                resolution = f.get('resolution', 'unknown')
-                                filesize = f.get('filesize', 'unknown')
-                                logger.info(f"   - {resolution}: {filesize} bytes")
-                    except Exception as info_error:
-                        logger.warning(f"⚠️ Could not extract video info: {info_error}")
-                    ydl.download([loom_url])
-                if os.path.exists(output_filename):
-                    file_size = os.path.getsize(output_filename)
-                    if file_size > 1024 and self.validate_video_file_enhanced(output_filename):
-                        logger.info(f"✅ Successfully downloaded using yt-dlp: {output_filename} ({file_size} bytes) with format {fmt}")
-                        self.log_memory("After yt-dlp download")
+                from render_deployment_config import get_render_optimized_settings
+                config = get_render_optimized_settings()
+                ytdlp_format = config.get('ytdlp_format', 'worst[height<=240]')
+                ytdlp_max_filesize = config.get('ytdlp_max_filesize', '200M')
+            except ImportError:
+                ytdlp_format = 'worst[height<=240]'
+                ytdlp_max_filesize = '200M'
+            
+            logger.info(f"🎬 Processing Loom video ID: {self.extract_loom_id(loom_url)}")
+            
+            # Try multiple formats in order of preference
+            formats_to_try = [
+                ytdlp_format,  # Use configured format first
+                'worst[height<=240]',
+                'worst[height<=360]', 
+                'worst[height<=480]',
+                'best[height<=720]'
+            ]
+            
+            for format_spec in formats_to_try:
+                logger.info(f"🔍 Trying yt-dlp format: {format_spec}")
+                
+                ydl_opts = {
+                    'format': format_spec,
+                    'outtmpl': output_filename,
+                    'quiet': True,
+                    'max_filesize': ytdlp_max_filesize,
+                    'progress_hooks': [self._download_progress_hook],
+                }
+                
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        ydl.download([loom_url])
+                    
+                    # Validate the downloaded file
+                    if os.path.exists(output_filename) and self.validate_video_file_enhanced(output_filename):
+                        file_size = os.path.getsize(output_filename)
+                        logger.info(f"✅ Successfully downloaded using yt-dlp: {output_filename} ({file_size} bytes) with format {format_spec}")
                         return output_filename
                     else:
-                        logger.warning(f"⚠️ Downloaded file failed validation or too small, removing: {output_filename}")
+                        logger.warning(f"⚠️ Downloaded file validation failed for format {format_spec}")
+                        if os.path.exists(output_filename):
+                            os.remove(output_filename)
+                            
+                except Exception as e:
+                    logger.warning(f"⚠️ yt-dlp download failed for format {format_spec}: {e}")
+                    if os.path.exists(output_filename):
                         os.remove(output_filename)
-            except Exception as yt_error:
-                logger.warning(f"⚠️ yt-dlp download failed for format {fmt}: {yt_error}")
-                if os.path.exists(output_filename):
-                    os.remove(output_filename)
-                continue  # Try next format
-        # If all formats fail
-        raise Exception("Could not download Loom video in any supported format (tried 240p, 360p, 480p, 720p). The video may not be available for download or is protected.")
+                    continue
+            
+            # If all formats failed, raise an exception
+            raise Exception("All yt-dlp formats failed to download video")
+            
+        except Exception as e:
+            logger.error(f"❌ Loom video download failed: {e}")
+            raise
     
     def transcribe_video(self, video_path: str, company_name: str, original_video_url: str = None) -> List[Dict]:
         """Transcribe video using Whisper with audio conversion for memory optimization"""
@@ -704,12 +684,19 @@ class LoomVideoProcessor:
             # Check video file size before processing
             if os.path.exists(downloaded_file):
                 file_size_mb = os.path.getsize(downloaded_file) / (1024 * 1024)
-                max_size_mb = RENDER_CONFIG.get('MAX_VIDEO_SIZE_MB', 15)
+                
+                # Get configuration settings
+                try:
+                    from render_deployment_config import get_render_optimized_settings
+                    config = get_render_optimized_settings()
+                    max_size_mb = config.get('MAX_VIDEO_SIZE_MB', 300)  # Default to 300MB for 2GB plan
+                except ImportError:
+                    max_size_mb = 300  # Fallback for 2GB RAM plan
                 
                 if file_size_mb > max_size_mb:
                     # Clean up large file
                     os.remove(downloaded_file)
-                    error_msg = f"Video file too large: {file_size_mb:.1f}MB (max: {max_size_mb}MB). Please use a lower quality video or upgrade to Standard plan for larger videos."
+                    error_msg = f"Video file too large: {file_size_mb:.1f}MB (max: {max_size_mb}MB). With 2GB RAM, you can process videos up to {max_size_mb}MB. Consider using a lower quality video or contact support for larger videos."
                     logger.warning(f"⚠️ {error_msg}")
                     return {
                         "success": False,
@@ -718,7 +705,7 @@ class LoomVideoProcessor:
                         "company_name": company_name
                     }
                 
-                logger.info(f"📊 Video file size: {file_size_mb:.1f}MB (within {max_size_mb}MB limit)")
+                logger.info(f"📊 Video file size: {file_size_mb:.1f}MB (within {max_size_mb}MB limit for 2GB RAM)")
             
             # Transcribe video
             chunks = self.transcribe_video(downloaded_file, company_name, loom_url)

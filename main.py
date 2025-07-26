@@ -734,7 +734,7 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
         logger.info(f"📥 Downloading video: {video_url}")
         download_video(video_url, video_filename)
         add_video_url_mapping(video_filename, video_url)
-        logger.info(f"�� Transcribing video: {video_filename}")
+        logger.info(f"📥 Transcribing video: {video_filename}")
         chunks, context = transcribe_video(video_filename, company_name, video_url)
         
         # Clean up video file immediately after transcription to save memory
@@ -938,6 +938,31 @@ async def generate_summary_endpoint(request: GenerateSummaryRequest):
         logger.error(f"Error generating summary: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(e)}")
 
+@app.get("/debug/qa-test/{company_name}")
+async def debug_qa_test(company_name: str, question: str = "What is this video about?"):
+    """Debug endpoint to test Q&A functionality"""
+    try:
+        logger.info(f"🔍 Debug Q&A test for company: {company_name}")
+        logger.info(f"🔍 Question: {question}")
+        
+        result = answer_question(company_name, question)
+        
+        logger.info(f"🔍 Q&A result: {result}")
+        
+        return {
+            "company_name": company_name,
+            "question": question,
+            "result": result,
+            "has_video_url": bool(result.get("video_url")),
+            "video_url": result.get("video_url"),
+            "has_timestamp": bool(result.get("start")),
+            "timestamp": result.get("start")
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Debug Q&A test failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/debug/videos")
 async def debug_videos():
     """Debug endpoint to check video mappings in Supabase"""
@@ -1079,11 +1104,10 @@ def add_video_url_mapping(local_filename, original_url):
             # Loom share URLs can be embedded and played directly
             video_url_for_playback = original_url
             
-            # Upsert by video_name
+            # Upsert by video_name - only include columns that exist in schema
             supabase.table('videos').upsert({
                 'video_name': filename,
                 'video_url': video_url_for_playback,
-                'original_url': original_url,  # Keep original for reference
                 'video_type': 'loom' if 'loom.com' in original_url else 'video'
             }, on_conflict=['video_name']).execute()
             logger.info(f"📝 Upserted video mapping to Supabase: {filename} -> {video_url_for_playback}")

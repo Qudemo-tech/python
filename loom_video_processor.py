@@ -456,11 +456,11 @@ class LoomVideoProcessor:
     def _download_progress_hook(self, d):
         """Progress hook for yt-dlp downloads"""
         if d['status'] == 'downloading':
-            # Log progress every 10% or when memory usage is high
+            # Only log progress at 25%, 50%, 75%, and 100% to reduce noise
             if 'total_bytes' in d and d['total_bytes']:
                 percent = (d['downloaded_bytes'] / d['total_bytes']) * 100
-                if percent % 10 < 1 or self.log_memory("Download progress") > self.max_memory_mb * 0.8:
-                    logger.info(f"📥 Download progress: {percent:.1f}% ({d['downloaded_bytes']}/{d['total_bytes']} bytes)")
+                if percent >= 25 and percent < 26 or percent >= 50 and percent < 51 or percent >= 75 and percent < 76:
+                    logger.info(f"📥 Download progress: {percent:.0f}%")
         elif d['status'] == 'finished':
             logger.info(f"✅ Download completed: {d['filename']}")
         elif d['status'] == 'error':
@@ -722,7 +722,7 @@ class LoomVideoProcessor:
             self.log_memory("After Whisper model load")
             
             # Transcribe audio (much more memory efficient than video)
-            logger.info(f"🎤 Transcribing audio: {audio_path}")
+            logger.info(f"�� Transcribing audio: {audio_path}")
             
             # Add transcription options for faster processing
             transcription_options = {

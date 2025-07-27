@@ -223,8 +223,9 @@ def answer_question(company_name, question):
             ])
             system_prompt = (
                 f"You are a product expert bot with full knowledge of {company_name} derived from video transcripts. "
-                "Use clear, confident, and concise answers—no more than 700 characters. "
-                "Use bullet points or short paragraphs if needed. Do not include inline citations like [source](...)."
+                "Give direct, concise answers in 1-2 sentences maximum. "
+                "No verbose explanations, no timestamp references, no bullet points. "
+                "Just straight, factual answers to the question asked."
             )
             user_prompt = f"Context:\n{context}\n\nQuestion: {question}"
             completion = openai.chat.completions.create(
@@ -291,10 +292,7 @@ def answer_question(company_name, question):
         
         return {
             "answer": clean_answer,
-            "sources": sources,
-            "video_url": video_url,
-            "start": start,
-            "end": end
+            "sources": sources
         }
     except Exception as e:
         logger.error(f"Error in answer_question for {company_name}: {e}")
@@ -613,10 +611,20 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
                         import gc
                         gc.collect()
                         
+                        # Generate a unique video ID
+                        video_id = str(uuid.uuid4())
+                        
+                        # Create transcription text from chunks
+                        transcription = " ".join([chunk["text"] for chunk in chunks])
+                        
                         return {
                             "success": True,
+                            "video_id": video_id,
+                            "transcription": transcription,
+                            "chunks": chunks,
+                            "embeddings": embeddings,
                             "data": {
-                                "video_filename": f"loom_video_{uuid.uuid4().hex[:8]}",
+                                "video_filename": video_id,
                                 "chunks_count": len(chunks),
                                 "message": "Loom video processed successfully"
                             }
@@ -735,10 +743,20 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
                 # Upsert to Pinecone
                 upsert_chunks_to_pinecone(company_name, chunks, embeddings)
                 
+                # Generate a unique video ID
+                video_id = str(uuid.uuid4())
+                
+                # Create transcription text from chunks
+                transcription = " ".join([chunk["text"] for chunk in chunks])
+                
                 return {
                     "success": True,
+                    "video_id": video_id,
+                    "transcription": transcription,
+                    "chunks": chunks,
+                    "embeddings": embeddings,
                     "data": {
-                        "video_filename": f"large_video_chunked_{uuid.uuid4().hex[:8]}",
+                        "video_filename": video_id,
                         "chunks_count": len(chunks),
                         "bucket_name": bucket_name,
                         "context": "Large video processed in chunks",
@@ -792,10 +810,20 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
         # Upsert to Pinecone
         upsert_chunks_to_pinecone(company_name, chunks, embeddings)
         
+        # Generate a unique video ID
+        video_id = str(uuid.uuid4())
+        
+        # Create transcription text from chunks
+        transcription = " ".join([chunk["text"] for chunk in chunks])
+        
         return {
             "success": True,
+            "video_id": video_id,
+            "transcription": transcription,
+            "chunks": chunks,
+            "embeddings": embeddings,
             "data": {
-                "video_filename": video_filename,
+                "video_filename": video_id,
                 "chunks_count": len(chunks),
                 "bucket_name": bucket_name,
                 "context": context
@@ -830,7 +858,7 @@ class ProcessVideoRequest(BaseModel, extra='allow'):
     bucket_name: Optional[str] = None  # Make bucket_name optional
     source: Optional[str] = None
     meeting_link: Optional[str] = None
-    is_youtube: bool = True
+    is_loom: bool = True
 
 class AskQuestionRequest(BaseModel):
     question: str
@@ -1099,6 +1127,35 @@ async def status_check():
         }
     except Exception as e:
         logger.error(f"❌ Status check failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/memory-status")
+async def memory_status():
+    """Get current memory usage status"""
+    try:
+        memory_mb = log_memory_usage()
+        
+        # Get memory thresholds from config
+        try:
+            from render_deployment_config import get_render_optimized_settings
+            config = get_render_optimized_settings()
+            memory_threshold = config.get('memory_fail_threshold', 1900)
+            cleanup_threshold = config.get('memory_cleanup_threshold', 1400)
+        except ImportError:
+            memory_threshold = 1900
+            cleanup_threshold = 1400
+        
+        status = {
+            "memory_mb": memory_mb,
+            "memory_threshold_mb": memory_threshold,
+            "cleanup_threshold_mb": cleanup_threshold,
+            "status": "ok" if memory_mb < cleanup_threshold else "warning" if memory_mb < memory_threshold else "critical",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        return status
+    except Exception as e:
+        logger.error(f"❌ Memory status check failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")

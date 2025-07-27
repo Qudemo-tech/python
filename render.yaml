@@ -6,14 +6,28 @@ services:
     repo: https://github.com/Qudemo-tech/python
     plan: starter
     buildCommand: |
-      # Install system dependencies for video processing
-      apt-get update && apt-get install -y ffmpeg
-      # Install Python dependencies
-      pip install -r requirements-python312.txt
+      # Clear any corrupted cache
+      rm -rf /opt/render/project/src/.git/objects/pack/*.pack || true
+      rm -rf /opt/render/project/src/.git/objects/pack/*.idx || true
+      
+      # Update package lists and install system dependencies
+      apt-get update -qq
+      apt-get install -y -qq ffmpeg curl wget
+      
+      # Verify ffmpeg installation
+      ffmpeg -version || exit 1
+      
+      # Install Python dependencies with retry logic
+      pip install --upgrade pip setuptools wheel
+      pip install -r requirements-python312.txt --no-cache-dir
+      
+      # Verify critical dependencies
+      python -c "import openai, whisper, yt_dlp, fastapi; print('✅ All dependencies installed successfully')"
     startCommand: python main.py
     autoDeployTrigger: commit
     region: oregon
     timeout: 1800  # 30 minutes timeout for video processing
+    healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0
@@ -47,4 +61,8 @@ services:
         value: production
       - key: MAX_MEMORY_MB
         value: "400"
+      - key: RENDER
+        value: "true"
+      - key: PYTHONUNBUFFERED
+        value: "1"
 version: "1"

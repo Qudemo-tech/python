@@ -870,7 +870,7 @@ class LoomVideoProcessor:
             
             if result.returncode != 0:
                 # Check if the error is due to no audio stream
-                if "Output file #0 does not contain any stream" in result.stderr or "No audio stream found" in result.stderr:
+                if "Output file does not contain any stream" in result.stderr or "Output file #0 does not contain any stream" in result.stderr or "No audio stream found" in result.stderr:
                     logger.warning(f"⚠️ No audio stream found in video, creating silent audio file")
                     
                     # Create a silent audio file with the same duration as the video
@@ -882,45 +882,48 @@ class LoomVideoProcessor:
                         ]
                         
                         duration_result = subprocess.run(duration_cmd, capture_output=True, text=True, timeout=30)
-                        if duration_result.returncode == 0:
-                            duration = float(duration_result.stdout.strip())
-                            logger.info(f"🎵 Video duration: {duration:.2f} seconds")
-                            
-                            # Create silent audio with the same duration
-                            silent_cmd = [
-                                'ffmpeg',
-                                '-f', 'lavfi',
-                                '-i', f'anullsrc=channel_layout=mono:sample_rate={sample_rate}',
-                                '-t', str(duration),
-                                '-acodec', codec,
-                                '-ar', str(sample_rate),
-                                '-ac', str(channels),
-                                '-y',
-                                audio_path
-                            ]
-                            
-                            logger.info(f"🎵 Creating silent audio: {' '.join(silent_cmd)}")
-                            silent_result = subprocess.run(silent_cmd, capture_output=True, text=True, timeout=60)
-                            
-                            if silent_result.returncode == 0 and os.path.exists(audio_path):
-                                file_size = os.path.getsize(audio_path)
-                                if file_size > 1024:  # At least 1KB
-                                    logger.info(f"✅ Silent audio created successfully: {audio_path} ({file_size} bytes)")
-                                    logger.info(f"🎵 Silent audio settings: {sample_rate}Hz, {channels} channel(s), {codec}")
-                                    return audio_path
-                                else:
-                                    logger.error(f"❌ Silent audio file too small: {file_size} bytes")
-                                    os.remove(audio_path)
-                                    raise Exception("Silent audio file too small")
-                            else:
-                                logger.error(f"❌ Silent audio creation failed: {silent_result.stderr}")
-                                if os.path.exists(audio_path):
-                                    os.remove(audio_path)
-                                raise Exception(f"Silent audio creation failed: {silent_result.stderr}")
+                        if duration_result.returncode == 0 and duration_result.stdout.strip():
+                            try:
+                                duration = float(duration_result.stdout.strip())
+                                logger.info(f"🎵 Video duration: {duration:.2f} seconds")
+                            except ValueError:
+                                logger.warning(f"⚠️ Invalid duration format: {duration_result.stdout.strip()}, using default 60s")
+                                duration = 60.0
                         else:
-                            logger.error(f"❌ Could not get video duration: {duration_result.stderr}")
-                            raise Exception("Could not get video duration for silent audio")
+                            logger.warning(f"⚠️ Could not get video duration, using default 60s")
+                            duration = 60.0
+                        
+                        # Create silent audio with the same duration
+                        silent_cmd = [
+                            'ffmpeg',
+                            '-f', 'lavfi',
+                            '-i', f'anullsrc=channel_layout=mono:sample_rate={sample_rate}',
+                            '-t', str(duration),
+                            '-acodec', codec,
+                            '-ar', str(sample_rate),
+                            '-ac', str(channels),
+                            '-y',
+                            audio_path
+                        ]
                             
+                        logger.info(f"🎵 Creating silent audio: {' '.join(silent_cmd)}")
+                        silent_result = subprocess.run(silent_cmd, capture_output=True, text=True, timeout=60)
+                            
+                        if silent_result.returncode == 0 and os.path.exists(audio_path):
+                            file_size = os.path.getsize(audio_path)
+                            if file_size > 1024:  # At least 1KB
+                                logger.info(f"✅ Silent audio created successfully: {audio_path} ({file_size} bytes)")
+                                logger.info(f"🎵 Silent audio settings: {sample_rate}Hz, {channels} channel(s), {codec}")
+                                return audio_path
+                            else:
+                                logger.error(f"❌ Silent audio file too small: {file_size} bytes")
+                                os.remove(audio_path)
+                                raise Exception("Silent audio file too small")
+                        else:
+                            logger.error(f"❌ Silent audio creation failed: {silent_result.stderr}")
+                            if os.path.exists(audio_path):
+                                os.remove(audio_path)
+                            raise Exception(f"Silent audio creation failed: {silent_result.stderr}")
                     except Exception as silent_error:
                         logger.error(f"❌ Silent audio creation failed: {silent_error}")
                         if os.path.exists(audio_path):

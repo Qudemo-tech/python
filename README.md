@@ -119,6 +119,11 @@ Process a video for a specific company:
 }
 ```
 
+**Supported Video Platforms:**
+- **Loom**: `https://www.loom.com/share/VIDEO_ID`
+- **Vimeo**: `https://vimeo.com/VIDEO_ID`
+- **YouTube**: `https://youtube.com/watch?v=VIDEO_ID`
+
 ### Ask Question
 ```bash
 POST /ask/{company_name}

@@ -521,7 +521,6 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
         # Initial memory check and cleanup
         initial_memory = log_memory_usage()
         logger.info(f"📥 Starting video processing for company: {company_name}")
-        logger.info(f"📥 Raw request body: {video_url}")
         
         # Get configuration settings
         try:
@@ -552,9 +551,12 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
             if post_cleanup_memory > memory_fail_threshold:
                 raise Exception(f"Memory usage too high after cleanup: {post_cleanup_memory:.1f}MB. Please try again later or use a smaller video.")
         
-        # Check if this is a Loom video first
+        # Check if this is a Loom or Vimeo video first
         try:
             from loom_video_processor import is_loom_url, LoomVideoProcessor
+            from vimeo_video_processor import is_vimeo_url, VimeoVideoProcessor
+            
+            # Process Loom videos
             if is_loom_url(video_url):
                 logger.info(f"🎬 Processing Loom video: {video_url}")
                 
@@ -630,18 +632,128 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
                             }
                         }
                     else:
-                        logger.error(f"❌ Loom video processing failed: {result.get('error', 'Unknown error')}")
-                        raise Exception(f"Loom video processing failed: {result.get('error', 'Unknown error')}")
+                        error_msg = result.get('error', 'Unknown error')
+                        # For Loom videos, return the error directly without raising an exception
+                        # This prevents duplicate logging
+                        return {
+                            "success": False,
+                            "error": error_msg,
+                            "video_url": video_url,
+                            "company_name": company_name
+                        }
                         
                 except Exception as e:
                     logger.error(f"❌ Loom video processing failed: {e}")
                     # Don't fall back to regular download for Loom videos
                     raise Exception(f"Loom video processing failed: {str(e)}. Please check if the video URL is accessible and try again.")
+            
+            # Process Vimeo videos
+            elif is_vimeo_url(video_url):
+                logger.info(f"🎬 Processing Vimeo video: {video_url}")
+                
+                # Use configuration-based memory limit
+                memory_limit = config.get('max_memory_mb', 1500)  # Default to 1.5GB for 2GB plan
+                processor = VimeoVideoProcessor(max_memory_mb=memory_limit)
+                
+                # Check if Vimeo API key is available
+                vimeo_api_key = os.getenv('VIMEO_API_KEY')
+                if not vimeo_api_key:
+                    logger.warning("⚠️ VIMEO_API_KEY not found - using yt-dlp fallback method")
+                
+                try:
+                    result = processor.process_vimeo_video(video_url, company_name)
+                    
+                    if result["success"]:
+                        # Process the chunks for embeddings
+                        chunks = result["chunks"]
+                        texts = [chunk["text"] for chunk in chunks]
+                        embeddings = []
+                        
+                        # Use configuration-based batch size
+                        batch_size = config.get('embedding_batch_size', 5)
+                        
+                        logger.info(f"📦 Processing {len(texts)} chunks in batches of {batch_size}")
+                        
+                        for i in range(0, len(texts), batch_size):
+                            batch = texts[i:i+batch_size]
+                            try:
+                                # Memory check before each batch
+                                current_memory = log_memory_usage()
+                                if current_memory > memory_cleanup_threshold:
+                                    logger.warning(f"⚠️ High memory usage before batch {i//batch_size + 1}: {current_memory:.1f}MB")
+                                
+                                response = openai.embeddings.create(
+                                    input=batch,
+                                    model="text-embedding-3-small"
+                                )
+                                embeddings.extend([e.embedding for e in response.data])
+                                logger.info(f"✅ Processed embedding batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
+                                
+                                # Light cleanup after each batch
+                                import gc
+                                gc.collect()
+                                
+                            except Exception as e:
+                                logger.error(f"❌ Embedding failed at batch {i}-{i+batch_size}: {e}")
+                                raise
+                        
+                        # Upsert to Pinecone
+                        upsert_chunks_to_pinecone(company_name, chunks, embeddings)
+                        
+                        # Final cleanup
+                        import gc
+                        gc.collect()
+                        
+                        # Generate a unique video ID
+                        video_id = str(uuid.uuid4())
+                        
+                        # Create transcription text from chunks
+                        transcription = " ".join([chunk["text"] for chunk in chunks])
+                        
+                        return {
+                            "success": True,
+                            "video_id": video_id,
+                            "transcription": transcription,
+                            "chunks": chunks,
+                            "embeddings": embeddings,
+                            "data": {
+                                "video_filename": video_id,
+                                "chunks_count": len(chunks),
+                                "message": "Vimeo video processed successfully"
+                            }
+                        }
+                    else:
+                        error_msg = result.get('error', 'Unknown error')
+                        # For Vimeo videos, return the error directly without raising an exception
+                        # This prevents duplicate logging
+                        return {
+                            "success": False,
+                            "error": error_msg,
+                            "video_url": video_url,
+                            "company_name": company_name
+                        }
+                        
+                except Exception as e:
+                    error_msg = str(e)
+                    # Only log once for Vimeo/Loom videos to avoid cascading messages
+                    if is_loom_url(video_url) or is_vimeo_url(video_url):
+                        # Don't log here - let the outer exception handler deal with it
+                        raise Exception(error_msg)
+                    else:
+                        logger.error(f"❌ Video processing failed: {error_msg}")
+                        logger.info("🔄 Falling back to standard video processing methods")
+                    
         except ImportError:
-            logger.warning("⚠️ Loom video processor not available - using standard methods")
+            logger.warning("⚠️ Video processors not available - using standard methods")
         except Exception as e:
-            logger.error(f"❌ Loom video processing failed: {e}")
-            logger.info("🔄 Falling back to standard video processing methods")
+            error_msg = str(e)
+            # Only log once for Vimeo/Loom videos to avoid cascading messages
+            if is_loom_url(video_url) or is_vimeo_url(video_url):
+                # Don't log here - let the outer exception handler deal with it
+                raise Exception(error_msg)
+            else:
+                logger.error(f"❌ Video processing failed: {error_msg}")
+                logger.info("🔄 Falling back to standard video processing methods")
         
         # Check if this is a large video that needs chunked processing
         is_large_video = False
@@ -830,7 +942,6 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
             }
         }
     except Exception as e:
-        logger.error(f"❌ Video processing failed: {e}")
         # Clean up video file on error too
         if 'video_filename' in locals() and os.path.exists(video_filename):
             os.remove(video_filename)
@@ -877,34 +988,25 @@ class GenerateSummaryRequest(BaseModel):
 async def process_video_endpoint(company_name: str, request: Request):
     """Process a video for a specific company"""
     try:
-        # Log the raw request for debugging
-        body = await request.body()
-        logger.info(f"📥 Received request for company: {company_name}")
-        logger.info(f"📥 Raw request body: {body}")
-        logger.info(f"📥 Content-Type: {request.headers.get('content-type')}")
-        
-        # Try to parse the JSON body
+        # Parse and validate request
         try:
             json_body = await request.json()
-            logger.info(f"📥 Parsed JSON: {json_body}")
         except Exception as e:
             logger.error(f"❌ Failed to parse JSON: {e}")
             raise HTTPException(status_code=400, detail="Invalid JSON")
         
-        # Try to validate with Pydantic model
         try:
             validated_request = ProcessVideoRequest(**json_body)
-            logger.info(f"📥 Validated request: {validated_request.model_dump()}")
         except ValidationError as e:
             logger.error(f"❌ Validation error: {e}")
-            logger.error(f"❌ Validation details: {e.errors()}")
             raise HTTPException(status_code=422, detail=f"Validation error: {e.errors()}")
         
         # Use provided bucket_name or derive from company_name
         bucket_name = validated_request.bucket_name
         if not bucket_name:
             bucket_name = company_name.lower().replace(' ', '_').replace('-', '_')
-            logger.info(f"📥 Using derived bucket name: {bucket_name}")
+        
+        logger.info(f"📥 Processing video for company: {company_name}")
         
         result = process_video(
             video_url=validated_request.video_url,
@@ -917,12 +1019,13 @@ async def process_video_endpoint(company_name: str, request: Request):
         if result["success"]:
             return result
         else:
+            # Don't log here since process_video already logged the error
             raise HTTPException(status_code=500, detail=result["error"])
             
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error processing video for {company_name}: {e}")
+        logger.error(f"❌ Unexpected error processing video for {company_name}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/ask-question")

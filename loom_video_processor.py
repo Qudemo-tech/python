@@ -62,12 +62,7 @@ class LoomVideoProcessor:
         self.whisper_model = RENDER_CONFIG['whisper_model']
         self.prefer_ytdlp = RENDER_CONFIG['prefer_ytdlp']
         
-        logger.info(f"🎬 LoomVideoProcessor initialized with:")
-        logger.info(f"   Memory limit: {self.max_memory_mb}MB")
-        logger.info(f"   yt-dlp format: {self.ytdlp_format}")
-        logger.info(f"   yt-dlp max filesize: {self.ytdlp_max_filesize}")
-        logger.info(f"   Whisper model: {self.whisper_model}")
-        logger.info(f"   Prefer yt-dlp: {self.prefer_ytdlp}")
+        logger.info(f"🎬 LoomVideoProcessor initialized - Memory: {self.max_memory_mb}MB, Format: {self.ytdlp_format}")
     
     def log_memory(self, stage: str):
         """Log current memory usage and check limits"""

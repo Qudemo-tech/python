@@ -342,7 +342,7 @@ def download_video(video_url, output_filename):
         logger.warning(f"⚠️ This should be handled by LoomVideoProcessor, not fallback download")
         raise Exception("Loom videos should be processed by LoomVideoProcessor. yt-dlp download failed.")
     
-    # If it's a YouTube link, use yt-dlp with enhanced cookie handling
+    # If it's a YouTube link, use yt-dlp with enhanced cookie handling and rate limiting
     if video_url.startswith('http') and ('youtube.com' in video_url or 'youtu.be' in video_url):
         logger.info(f"📥 Downloading video: {video_url}")
         
@@ -361,14 +361,14 @@ def download_video(video_url, output_filename):
             cookies_file = "www.youtube.com_cookies.txt"
             fetch_cookies_from_supabase(cookies_bucket, cookies_file, cookies_path)
         
-        # Enhanced yt-dlp options with multiple strategies
+        # Enhanced yt-dlp options with rate limiting and multiple strategies
         ydl_opts = {
             'format': 'worst[height<=720]',  # Better quality but still reasonable
             'outtmpl': output_filename,
             'quiet': True,
             'max_filesize': '100M',  # Increased limit
-            'retries': 3,
-            'fragment_retries': 3,
+            'retries': 1,  # Reduced retries to avoid rate limiting
+            'fragment_retries': 1,  # Reduced fragment retries
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -378,8 +378,9 @@ def download_video(video_url, output_filename):
                 'Connection': 'keep-alive',
                 'Upgrade-Insecure-Requests': '1',
             },
-            'sleep_interval': 2,
-            'max_sleep_interval': 5,
+            'sleep_interval': 5,  # Increased sleep interval
+            'max_sleep_interval': 10,  # Increased max sleep interval
+            'socket_timeout': 30,  # Increased timeout
         }
         
         # Add cookies if available
@@ -389,50 +390,61 @@ def download_video(video_url, output_filename):
         else:
             logger.info("No cookies file found, attempting download without authentication.")
         
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # First try to extract info to check if video is accessible
-                try:
-                    info = ydl.extract_info(video_url, download=False)
-                    logger.info(f"✅ Video info extracted successfully: {info.get('title', 'Unknown')}")
-                except Exception as info_error:
-                    logger.warning(f"⚠️ Could not extract video info: {info_error}")
-                
-                # Now try to download
-                ydl.download([video_url])
-                logger.info(f"✅ YouTube video downloaded successfully")
-                
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"❌ YouTube download failed: {error_msg}")
-            
-            # Check for specific error types
-            if 'Sign in to confirm you\'re not a bot' in error_msg:
-                raise Exception("This YouTube video requires authentication. Please provide a public video or upload your own file.")
-            elif 'This video is age-restricted' in error_msg:
-                raise Exception("This YouTube video is age-restricted and cannot be processed. Please provide a public video or upload your own file.")
-            elif 'This video is private' in error_msg:
-                raise Exception("This YouTube video is private and cannot be processed. Please provide a public video or upload your own file.")
-            elif 'This video is unavailable' in error_msg:
-                raise Exception("This YouTube video is unavailable. Please provide a different video or upload your own file.")
-            elif 'HTTP Error 403' in error_msg:
-                raise Exception("Access denied to this YouTube video. Please provide a public video or upload your own file.")
-            else:
-                # Generic error - try without cookies as last resort
-                logger.info("🔄 Attempting download without cookies as fallback...")
-                try:
-                    ydl_opts_no_cookies = ydl_opts.copy()
-                    if 'cookiefile' in ydl_opts_no_cookies:
-                        del ydl_opts_no_cookies['cookiefile']
-                    
-                    with yt_dlp.YoutubeDL(ydl_opts_no_cookies) as ydl:
-                        ydl.download([video_url])
-                    logger.info(f"✅ YouTube video downloaded successfully without cookies")
-                except Exception as fallback_error:
-                    logger.error(f"❌ Fallback download also failed: {fallback_error}")
-                    raise Exception(f"YouTube video download failed: {error_msg}")
+        # Try multiple strategies with exponential backoff
+        strategies = [
+            ("with cookies", ydl_opts),
+            ("without cookies", {k: v for k, v in ydl_opts.items() if k != 'cookiefile'}),
+        ]
         
-        return output_filename
+        for strategy_name, strategy_opts in strategies:
+            try:
+                logger.info(f"🔄 Attempting download {strategy_name}...")
+                
+                with yt_dlp.YoutubeDL(strategy_opts) as ydl:
+                    # First try to extract info to check if video is accessible
+                    try:
+                        info = ydl.extract_info(video_url, download=False)
+                        logger.info(f"✅ Video info extracted successfully: {info.get('title', 'Unknown')}")
+                    except Exception as info_error:
+                        error_msg = str(info_error)
+                        if 'HTTP Error 429' in error_msg:
+                            logger.warning(f"⚠️ Rate limited during info extraction: {error_msg}")
+                            # Wait longer before retrying
+                            import time
+                            time.sleep(30)  # Wait 30 seconds before next attempt
+                            continue
+                        else:
+                            logger.warning(f"⚠️ Could not extract video info: {error_msg}")
+                    
+                    # Now try to download
+                    ydl.download([video_url])
+                    logger.info(f"✅ YouTube video downloaded successfully {strategy_name}")
+                    return output_filename
+                    
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(f"❌ YouTube download failed {strategy_name}: {error_msg}")
+                
+                # Check for specific error types
+                if 'HTTP Error 429' in error_msg:
+                    logger.warning(f"⚠️ Rate limited by YouTube, waiting before next attempt...")
+                    import time
+                    time.sleep(60)  # Wait 1 minute before next strategy
+                    continue
+                elif 'Sign in to confirm you\'re not a bot' in error_msg:
+                    logger.warning(f"⚠️ Bot detection, trying next strategy...")
+                    continue
+                elif 'This video is age-restricted' in error_msg:
+                    raise Exception("This YouTube video is age-restricted and cannot be processed. Please provide a public video or upload your own file.")
+                elif 'This video is private' in error_msg:
+                    raise Exception("This YouTube video is private and cannot be processed. Please provide a public video or upload your own file.")
+                elif 'This video is unavailable' in error_msg:
+                    raise Exception("This YouTube video is unavailable. Please provide a different video or upload your own file.")
+                elif 'HTTP Error 403' in error_msg:
+                    raise Exception("Access denied to this YouTube video. Please provide a public video or upload your own file.")
+        
+        # If all strategies failed
+        raise Exception("All download strategies failed. The video may be restricted or YouTube is blocking access due to rate limiting.")
     
     # If it's another HTTP(S) URL, download it directly
     if video_url.startswith('http'):
@@ -1014,6 +1026,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Rate limiting for video processing
+import time
+from collections import defaultdict
+
+# Track last request time per company to prevent rate limiting
+last_request_time = defaultdict(float)
+MIN_REQUEST_INTERVAL = 30  # Minimum 30 seconds between requests per company
+
 # Pydantic models
 class ProcessVideoRequest(BaseModel, extra='allow'):
     video_url: str
@@ -1040,6 +1060,21 @@ class GenerateSummaryRequest(BaseModel):
 async def process_video_endpoint(company_name: str, request: Request):
     """Process a video for a specific company"""
     try:
+        # Rate limiting check
+        current_time = time.time()
+        time_since_last_request = current_time - last_request_time[company_name]
+        
+        if time_since_last_request < MIN_REQUEST_INTERVAL:
+            wait_time = MIN_REQUEST_INTERVAL - time_since_last_request
+            logger.warning(f"⚠️ Rate limiting: {company_name} made request too quickly. Waiting {wait_time:.1f} seconds...")
+            raise HTTPException(
+                status_code=429, 
+                detail=f"Too many requests. Please wait {wait_time:.1f} seconds before trying again."
+            )
+        
+        # Update last request time
+        last_request_time[company_name] = current_time
+        
         # Parse and validate request
         try:
             json_body = await request.json()

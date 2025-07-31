@@ -329,14 +329,43 @@ class UltimateYouTubeBypass:
                     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
                     
                     if result.returncode == 0 and os.path.exists(output_filename) and os.path.getsize(output_filename) > 0:
-                        # Verify it's actually a video file
+                        # Verify it's actually a video file by examining content
                         file_size = os.path.getsize(output_filename)
-                        if file_size < 10000:  # Less than 10KB is probably HTML
-                            logger.warning(f"⚠️ Downloaded file too small ({file_size} bytes), likely HTML")
-                            raise Exception("Downloaded file appears to be HTML, not video")
                         
-                        logger.info(f"✅ Curl download successful ({file_size} bytes)")
-                        return output_filename
+                        try:
+                            with open(output_filename, 'rb') as f:
+                                header = f.read(12)
+                            
+                            # Check for common video file signatures
+                            if header.startswith(b'\x00\x00\x00\x20ftyp'):  # MP4
+                                logger.info(f"✅ Valid MP4 file detected ({file_size} bytes)")
+                                return output_filename
+                            elif header.startswith(b'RIFF'):  # AVI
+                                logger.info(f"✅ Valid AVI file detected ({file_size} bytes)")
+                                return output_filename
+                            elif header.startswith(b'\x1a\x45\xdf\xa3'):  # WebM/MKV
+                                logger.info(f"✅ Valid WebM/MKV file detected ({file_size} bytes)")
+                                return output_filename
+                            elif header.startswith(b'<!DOCTYPE') or header.startswith(b'<html'):
+                                logger.warning(f"⚠️ HTML file detected, not a video")
+                                raise Exception("Downloaded file is HTML, not video")
+                            else:
+                                # Try to validate with ffprobe
+                                try:
+                                    cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', output_filename]
+                                    probe_result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                                    if probe_result.returncode == 0:
+                                        logger.info(f"✅ Valid video file confirmed by ffprobe ({file_size} bytes)")
+                                        return output_filename
+                                    else:
+                                        logger.warning(f"⚠️ ffprobe validation failed: {probe_result.stderr}")
+                                        raise Exception("Downloaded file is not a valid video")
+                                except Exception as e:
+                                    logger.warning(f"⚠️ ffprobe validation error: {e}")
+                                    raise Exception("Downloaded file is not a valid video")
+                        except Exception as e:
+                            logger.error(f"❌ File validation failed: {e}")
+                            raise
                     else:
                         logger.error(f"❌ Curl failed: {result.stderr}")
                         raise Exception(f"Curl download failed: {result.stderr}")
@@ -365,13 +394,43 @@ class UltimateYouTubeBypass:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
                 
                 if result.returncode == 0 and os.path.exists(output_filename) and os.path.getsize(output_filename) > 0:
+                    # Verify it's actually a video file by examining content
                     file_size = os.path.getsize(output_filename)
-                    if file_size < 10000:  # Less than 10KB is probably HTML
-                        logger.warning(f"⚠️ Downloaded file too small ({file_size} bytes), likely HTML")
-                        raise Exception("Downloaded file appears to be HTML, not video")
                     
-                    logger.info(f"✅ Fallback curl download successful ({file_size} bytes)")
-                    return output_filename
+                    try:
+                        with open(output_filename, 'rb') as f:
+                            header = f.read(12)
+                        
+                        # Check for common video file signatures
+                        if header.startswith(b'\x00\x00\x00\x20ftyp'):  # MP4
+                            logger.info(f"✅ Valid MP4 file detected ({file_size} bytes)")
+                            return output_filename
+                        elif header.startswith(b'RIFF'):  # AVI
+                            logger.info(f"✅ Valid AVI file detected ({file_size} bytes)")
+                            return output_filename
+                        elif header.startswith(b'\x1a\x45\xdf\xa3'):  # WebM/MKV
+                            logger.info(f"✅ Valid WebM/MKV file detected ({file_size} bytes)")
+                            return output_filename
+                        elif header.startswith(b'<!DOCTYPE') or header.startswith(b'<html'):
+                            logger.warning(f"⚠️ HTML file detected, not a video")
+                            raise Exception("Downloaded file is HTML, not video")
+                        else:
+                            # Try to validate with ffprobe
+                            try:
+                                cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', output_filename]
+                                probe_result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                                if probe_result.returncode == 0:
+                                    logger.info(f"✅ Valid video file confirmed by ffprobe ({file_size} bytes)")
+                                    return output_filename
+                                else:
+                                    logger.warning(f"⚠️ ffprobe validation failed: {probe_result.stderr}")
+                                    raise Exception("Downloaded file is not a valid video")
+                            except Exception as e:
+                                logger.warning(f"⚠️ ffprobe validation error: {e}")
+                                raise Exception("Downloaded file is not a valid video")
+                    except Exception as e:
+                        logger.error(f"❌ File validation failed: {e}")
+                        raise
                 else:
                     logger.error(f"❌ Fallback curl failed: {result.stderr}")
                     raise Exception(f"Fallback curl download failed: {result.stderr}")

@@ -106,18 +106,20 @@ class FastVideoDownloader:
             'outtmpl': output_filename,
             'quiet': True,
             'no_warnings': True,
-            'retries': 1,  # Allow 1 retry for reliability
-            'fragment_retries': 1,
+            'retries': 2,  # Allow 2 retries for reliability
+            'fragment_retries': 2,
             'http_headers': {
                 'User-Agent': random.choice(self.user_agents),
             },
-            'sleep_interval': 1,  # Minimal sleep
-            'max_sleep_interval': 2,
-            'socket_timeout': 30,  # Longer timeout for reliability
-            'extractor_retries': 1,
+            'sleep_interval': 2,  # Slightly longer sleep
+            'max_sleep_interval': 5,
+            'socket_timeout': 60,  # Much longer timeout for complete downloads
+            'extractor_retries': 2,
             'ignoreerrors': False,
             'no_check_certificate': True,
             'prefer_insecure': True,
+            'buffersize': 1024,  # Larger buffer for better download
+            'http_chunk_size': 10485760,  # 10MB chunks for better reliability
         }
         
         if cookies_path and os.path.exists(cookies_path):
@@ -128,13 +130,56 @@ class FastVideoDownloader:
                 ydl.download([video_url])
                 
                 if os.path.exists(output_filename) and os.path.getsize(output_filename) > 0:
-                    return output_filename
+                    # Additional validation to ensure file is complete
+                    try:
+                        cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', output_filename]
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                        if result.returncode == 0:
+                            logger.info(f"✅ Download completed and validated: {output_filename}")
+                            return output_filename
+                        else:
+                            logger.warning(f"⚠️ Downloaded file validation failed: {result.stderr}")
+                            # Try to repair the file
+                            return self._try_repair_video_file(output_filename)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Post-download validation failed: {e}")
+                        return output_filename  # Return anyway, let the main validation handle it
                     
         except Exception as e:
             logger.error(f"Ultra-fast yt-dlp failed: {e}")
             raise
         
         return None
+    
+    def _try_repair_video_file(self, file_path: str) -> Optional[str]:
+        """Try to repair a corrupted video file using ffmpeg"""
+        try:
+            repaired_path = file_path.replace('.mp4', '_repaired.mp4')
+            cmd = [
+                'ffmpeg', '-i', file_path,
+                '-c', 'copy',  # Copy streams without re-encoding
+                '-fflags', '+genpts',  # Generate presentation timestamps
+                '-movflags', '+faststart',  # Optimize for streaming
+                repaired_path,
+                '-y'
+            ]
+            
+            logger.info(f"🔧 Attempting to repair video file: {file_path}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            
+            if result.returncode == 0 and os.path.exists(repaired_path):
+                # Remove original and rename repaired file
+                os.remove(file_path)
+                os.rename(repaired_path, file_path)
+                logger.info(f"✅ Video file repaired successfully: {file_path}")
+                return file_path
+            else:
+                logger.warning(f"⚠️ Video repair failed: {result.stderr}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Video repair error: {e}")
+            return None
     
     def _strategy_curl_fast(self, video_url: str, output_filename: str, cookies_path: Optional[str] = None) -> Optional[str]:
         """Fast curl download"""

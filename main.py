@@ -354,7 +354,7 @@ def download_video(video_url: str, output_filename: str) -> str:
         else:
             # Strategy 2: Fallback to Supabase cookies
             cookies_bucket = "cookies"
-            cookies_file = "www.youtube.com_cookies.txt"
+            cookies_file = "cookiess.txt"  # Updated to use new cookie file
             fetch_cookies_from_supabase(cookies_bucket, cookies_file, cookies_path)
         
         # Try the fast downloader first (prioritizes speed)
@@ -609,7 +609,7 @@ def download_video(video_url: str, output_filename: str) -> str:
             # Strategy 2: Fallback to Supabase cookies
             cookies_bucket = "cookies"
             cookies_file = "www.vimeo.com_cookies.txt"
-            fetch_cookies_from_supabase(cookies_bucket, cookies_file, cookies_path)
+        fetch_cookies_from_supabase(cookies_bucket, cookies_file, cookies_path)
         
         # Enhanced yt-dlp options with rate limiting and multiple strategies
         ydl_opts = {

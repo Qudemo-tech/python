@@ -1803,4 +1803,5 @@ def get_original_video_url(local_filename):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=5001) 
+    port = int(os.getenv("PORT", 5001))
+    uvicorn.run(app, host="0.0.0.0", port=port) 

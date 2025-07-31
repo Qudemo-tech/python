@@ -52,6 +52,7 @@ class UltimateYouTubeBypass:
             self._strategy_browser_automation,
             self._strategy_curl_download,
             self._strategy_wget_download,
+            self._strategy_ytdlp_final_fallback,  # Add final fallback
         ]
         
         for i, strategy in enumerate(strategies):
@@ -270,34 +271,110 @@ class UltimateYouTubeBypass:
             raise
     
     def _strategy_curl_download(self, video_url: str, output_filename: str, cookies_path: Optional[str] = None) -> Optional[str]:
-        """Download using curl command"""
+        """Download using curl command with proper video extraction"""
         
         try:
+            # First, try to get the actual video URL using yt-dlp info extraction
             user_agent = random.choice(self.user_agents)
-            cmd = [
-                'curl', '-L', '-o', output_filename,
-                '-H', f'User-Agent: {user_agent}',
-                '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                '--connect-timeout', '30',
-                '--max-time', '300',
-                '--retry', '1',
-                '--retry-delay', '5',
-            ]
+            
+            # Use yt-dlp to extract the direct video URL
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': False,
+                'http_headers': {
+                    'User-Agent': user_agent,
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                }
+            }
             
             if cookies_path and os.path.exists(cookies_path):
-                cmd.extend(['-b', cookies_path])
+                ydl_opts['cookiefile'] = cookies_path
             
-            cmd.append(video_url)
-            
-            logger.info(f"🔄 Running curl command: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            
-            if result.returncode == 0 and os.path.exists(output_filename) and os.path.getsize(output_filename) > 0:
-                logger.info(f"✅ Curl download successful")
-                return output_filename
-            else:
-                logger.error(f"❌ Curl failed: {result.stderr}")
-                raise Exception(f"Curl download failed: {result.stderr}")
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    # Extract info to get direct video URL
+                    info = ydl.extract_info(video_url, download=False)
+                    
+                    # Get the best available format
+                    formats = info.get('formats', [])
+                    if not formats:
+                        raise Exception("No video formats found")
+                    
+                    # Sort by quality and pick the best available
+                    formats.sort(key=lambda x: x.get('height', 0) or 0, reverse=True)
+                    best_format = formats[0]
+                    
+                    # Get the direct video URL
+                    direct_url = best_format.get('url')
+                    if not direct_url:
+                        raise Exception("No direct video URL found")
+                    
+                    logger.info(f"🎯 Found direct video URL: {direct_url[:100]}...")
+                    
+                    # Now download using curl with the direct URL
+                    cmd = [
+                        'curl', '-L', '-o', output_filename,
+                        '-H', f'User-Agent: {user_agent}',
+                        '-H', 'Accept: video/webm,video/mp4,video/*;q=0.9,*/*;q=0.8',
+                        '--connect-timeout', '30',
+                        '--max-time', '300',
+                        '--retry', '1',
+                        '--retry-delay', '5',
+                    ]
+                    
+                    cmd.append(direct_url)
+                    
+                    logger.info(f"🔄 Running curl with direct video URL")
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                    
+                    if result.returncode == 0 and os.path.exists(output_filename) and os.path.getsize(output_filename) > 0:
+                        # Verify it's actually a video file
+                        file_size = os.path.getsize(output_filename)
+                        if file_size < 10000:  # Less than 10KB is probably HTML
+                            logger.warning(f"⚠️ Downloaded file too small ({file_size} bytes), likely HTML")
+                            raise Exception("Downloaded file appears to be HTML, not video")
+                        
+                        logger.info(f"✅ Curl download successful ({file_size} bytes)")
+                        return output_filename
+                    else:
+                        logger.error(f"❌ Curl failed: {result.stderr}")
+                        raise Exception(f"Curl download failed: {result.stderr}")
+                        
+            except Exception as yt_error:
+                logger.warning(f"⚠️ yt-dlp extraction failed: {yt_error}")
+                # Fallback to original curl method
+                logger.info("🔄 Falling back to original curl method...")
+                
+                cmd = [
+                    'curl', '-L', '-o', output_filename,
+                    '-H', f'User-Agent: {user_agent}',
+                    '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    '--connect-timeout', '30',
+                    '--max-time', '300',
+                    '--retry', '1',
+                    '--retry-delay', '5',
+                ]
+                
+                if cookies_path and os.path.exists(cookies_path):
+                    cmd.extend(['-b', cookies_path])
+                
+                cmd.append(video_url)
+                
+                logger.info(f"🔄 Running fallback curl command")
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                
+                if result.returncode == 0 and os.path.exists(output_filename) and os.path.getsize(output_filename) > 0:
+                    file_size = os.path.getsize(output_filename)
+                    if file_size < 10000:  # Less than 10KB is probably HTML
+                        logger.warning(f"⚠️ Downloaded file too small ({file_size} bytes), likely HTML")
+                        raise Exception("Downloaded file appears to be HTML, not video")
+                    
+                    logger.info(f"✅ Fallback curl download successful ({file_size} bytes)")
+                    return output_filename
+                else:
+                    logger.error(f"❌ Fallback curl failed: {result.stderr}")
+                    raise Exception(f"Fallback curl download failed: {result.stderr}")
                 
         except Exception as e:
             logger.error(f"❌ Curl strategy failed: {e}")
@@ -334,6 +411,45 @@ class UltimateYouTubeBypass:
                 
         except Exception as e:
             logger.error(f"❌ Wget strategy failed: {e}")
+            raise
+    
+    def _strategy_ytdlp_final_fallback(self, video_url: str, output_filename: str, cookies_path: Optional[str] = None) -> Optional[str]:
+        """Final fallback using yt-dlp with minimal options"""
+        
+        try:
+            logger.info(f"🔄 Attempting final yt-dlp fallback...")
+            
+            # Use the most basic yt-dlp configuration
+            ydl_opts = {
+                'format': 'worst',  # Get the worst quality to ensure it works
+                'outtmpl': output_filename,
+                'quiet': True,
+                'no_warnings': False,
+                'retries': 0,  # No retries to avoid delays
+                'fragment_retries': 0,
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                },
+                'ignoreerrors': False,
+                'no_check_certificate': True,
+                'prefer_insecure': True,
+            }
+            
+            if cookies_path and os.path.exists(cookies_path):
+                ydl_opts['cookiefile'] = cookies_path
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([video_url])
+                
+                if os.path.exists(output_filename) and os.path.getsize(output_filename) > 0:
+                    file_size = os.path.getsize(output_filename)
+                    logger.info(f"✅ Final yt-dlp fallback successful ({file_size} bytes)")
+                    return output_filename
+                else:
+                    raise Exception("Final yt-dlp fallback failed - no file created")
+                    
+        except Exception as e:
+            logger.error(f"❌ Final yt-dlp fallback failed: {e}")
             raise
 
 def test_youtube_bypass():

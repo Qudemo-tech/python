@@ -357,11 +357,23 @@ def download_video(video_url: str, output_filename: str) -> str:
             cookies_file = "www.youtube.com_cookies.txt"
             fetch_cookies_from_supabase(cookies_bucket, cookies_file, cookies_path)
         
-        # Try the fixed downloader first (ensures we get actual video files)
+        # Try the fast downloader first (prioritizes speed)
+        try:
+            from fast_video_downloader import FastVideoDownloader
+            downloader = FastVideoDownloader()
+            logger.info(f"🚀 Using Fast Video Downloader...")
+            result = downloader.download_video(video_url, output_filename, cookies_path)
+            if result and os.path.exists(result) and os.path.getsize(result) > 0:
+                logger.info(f"✅ Fast downloader successful!")
+                return result
+        except Exception as e:
+            logger.warning(f"⚠️ Fast downloader failed: {e}")
+        
+        # Try the fixed downloader as fallback (ensures we get actual video files)
         try:
             from fix_corrupted_downloads import FixedVideoDownloader
             downloader = FixedVideoDownloader()
-            logger.info(f"🚀 Using Fixed Video Downloader...")
+            logger.info(f"🔄 Using Fixed Video Downloader as fallback...")
             result = downloader.download_video(video_url, output_filename, cookies_path)
             if result and os.path.exists(result) and os.path.getsize(result) > 0:
                 logger.info(f"✅ Fixed downloader successful!")

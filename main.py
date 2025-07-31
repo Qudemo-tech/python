@@ -357,7 +357,19 @@ def download_video(video_url: str, output_filename: str) -> str:
             cookies_file = "www.youtube.com_cookies.txt"
             fetch_cookies_from_supabase(cookies_bucket, cookies_file, cookies_path)
         
-        # Try the alternative downloader first (more likely to work with blocked IPs)
+        # Try the fixed downloader first (ensures we get actual video files)
+        try:
+            from fix_corrupted_downloads import FixedVideoDownloader
+            downloader = FixedVideoDownloader()
+            logger.info(f"🚀 Using Fixed Video Downloader...")
+            result = downloader.download_video(video_url, output_filename, cookies_path)
+            if result and os.path.exists(result) and os.path.getsize(result) > 0:
+                logger.info(f"✅ Fixed downloader successful!")
+                return result
+        except Exception as e:
+            logger.warning(f"⚠️ Fixed downloader failed: {e}")
+        
+        # Try the alternative downloader as fallback
         try:
             from youtube_alternative_downloader import AlternativeYouTubeDownloader
             downloader = AlternativeYouTubeDownloader()

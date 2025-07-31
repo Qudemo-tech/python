@@ -2,20 +2,13 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError
 from typing import Optional, List, Dict
-import openai
-import faiss
-import numpy as np
 import json
 import os
 import io
 import re
 import uuid
 from dotenv import load_dotenv
-import pandas as pd
-from sklearn.metrics.pairwise import cosine_similarity
 import logging
-import whisper
-import yt_dlp
 import time
 import random
 import requests
@@ -24,14 +17,22 @@ from fastapi import HTTPException
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from datetime import datetime
-from pinecone import Pinecone
 import urllib.request
 import requests
-from google.cloud import storage
 import tempfile
 import psutil
 import sys
 
+# Defer heavy imports until needed
+# import openai
+# import faiss
+# import numpy as np
+# import pandas as pd
+# from sklearn.metrics.pairwise import cosine_similarity
+# import whisper
+# import yt_dlp
+# from pinecone import Pinecone
+# from google.cloud import storage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,8 +50,9 @@ def log_memory_usage():
 
 load_dotenv()
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
-openai.proxy = None  # Explicitly disable proxy usage
+# Defer OpenAI initialization
+# openai.api_key = os.getenv("OPENAI_API_KEY")
+# openai.proxy = None  # Explicitly disable proxy usage
 
 # --- Resource Loading and Answering Logic ---
 RESOURCE_CACHE = {}
@@ -58,12 +60,48 @@ RESOURCE_CACHE = {}
 # Global video URL mapping
 VIDEO_URL_MAPPING = {}
 
-# Pinecone initialization
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_INDEX = os.getenv("PINECONE_INDEX", "qudemo-index")
+# Defer Pinecone initialization
+# PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+# PINECONE_INDEX = os.getenv("PINECONE_INDEX", "qudemo-index")
+# pc = Pinecone(api_key=PINECONE_API_KEY)
+# index = pc.Index(PINECONE_INDEX)
 
-pc = Pinecone(api_key=PINECONE_API_KEY)
-index = pc.Index(PINECONE_INDEX)
+# Lazy initialization of heavy components
+_pinecone_index = None
+_openai_client = None
+_whisper_model = None
+
+def get_pinecone_index():
+    """Lazy initialization of Pinecone"""
+    global _pinecone_index
+    if _pinecone_index is None:
+        from pinecone import Pinecone
+        PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+        PINECONE_INDEX = os.getenv("PINECONE_INDEX", "qudemo-index")
+        pc = Pinecone(api_key=PINECONE_API_KEY)
+        _pinecone_index = pc.Index(PINECONE_INDEX)
+        logger.info("🔌 Pinecone initialized")
+    return _pinecone_index
+
+def get_openai_client():
+    """Lazy initialization of OpenAI"""
+    global _openai_client
+    if _openai_client is None:
+        import openai
+        openai.api_key = os.getenv("OPENAI_API_KEY")
+        openai.proxy = None
+        _openai_client = openai
+        logger.info("🔌 OpenAI initialized")
+    return _openai_client
+
+def get_whisper_model():
+    """Lazy initialization of Whisper"""
+    global _whisper_model
+    if _whisper_model is None:
+        import whisper
+        _whisper_model = whisper.load_model("tiny")
+        logger.info("🔌 Whisper model loaded")
+    return _whisper_model
 
 # Helper: upsert vectors to Pinecone
 def upsert_chunks_to_pinecone(company_name, chunks, embeddings):
@@ -89,6 +127,7 @@ def upsert_chunks_to_pinecone(company_name, chunks, embeddings):
             logger.info(f"📝 Chunk {i+1}: company={meta['company_name']}, source={meta['source']}, text_length={len(meta['text'])}")
     
     try:
+        index = get_pinecone_index()
         index.upsert(vectors)
         logger.info(f"✅ Successfully stored {len(vectors)} chunks in Pinecone for company: {company_name}")
     except Exception as e:
@@ -99,6 +138,7 @@ def upsert_chunks_to_pinecone(company_name, chunks, embeddings):
 def query_pinecone(company_name, embedding, top_k=6):
     logger.info(f"🔍 Querying Pinecone for company: {company_name}")
     try:
+        index = get_pinecone_index()
         result = index.query(vector=embedding, top_k=top_k, include_metadata=True, filter={"company_name": company_name})
         matches = result["matches"]
         logger.info(f"✅ Found {len(matches)} matches for company: {company_name}")
@@ -185,6 +225,7 @@ def answer_question(company_name, question):
         logger.info(f"QUESTION for {company_name}: {question}")
         # Create embedding for the question
         try:
+            openai = get_openai_client()
             q_embedding = openai.embeddings.create(
                 input=[question],
                 model="text-embedding-3-small",
@@ -210,6 +251,7 @@ def answer_question(company_name, question):
                 snippet = chunk["text"][:500].strip().replace("\n", " ")
                 rerank_prompt += f"{i+1}. [{chunk.get('type', 'video')}] {chunk.get('context','')}\n{snippet}\n\n"
             rerank_prompt += "Which chunk is most relevant to the question above? Just give the number."
+            openai = get_openai_client()
             rerank_response = openai.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[{"role": "user", "content": rerank_prompt}],
@@ -234,6 +276,7 @@ def answer_question(company_name, question):
                 "Just straight, factual answers to the question asked."
             )
             user_prompt = f"Context:\n{context}\n\nQuestion: {question}"
+            openai = get_openai_client()
             completion = openai.chat.completions.create(
                 model="gpt-4-turbo",
                 messages=[
@@ -810,7 +853,7 @@ def transcribe_video(video_path, company_name, original_video_url=None):
         logger.info(f"🎤 Starting transcription of {video_path} (size: {file_size} bytes)")
         
         # Use tiny model to save memory
-        model = whisper.load_model("tiny")
+        model = get_whisper_model()
         result = model.transcribe(video_path, task="translate", verbose=True)
         
         if not result or not result.get("segments"):
@@ -826,6 +869,7 @@ def transcribe_video(video_path, company_name, original_video_url=None):
     try:
         context_input = "\n".join([seg["text"] for seg in result["segments"][:10]])
         context_prompt = f"Summarize the main topic or context of this transcript:\n\n{context_input}"
+        openai = get_openai_client()
         context_resp = openai.chat.completions.create(
             model="gpt-4",
             messages=[
@@ -877,6 +921,7 @@ def build_faiss_index(chunks, bucket_name, company_name):
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i+batch_size]
         try:
+            openai = get_openai_client()
             response = openai.embeddings.create(
                 input=batch,
                 model="text-embedding-3-small"
@@ -989,6 +1034,7 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
                                 if current_memory > memory_cleanup_threshold:
                                     logger.warning(f"⚠️ High memory usage before batch {i//batch_size + 1}: {current_memory:.1f}MB")
                                 
+                                openai = get_openai_client()
                                 response = openai.embeddings.create(
                                     input=batch,
                                     model="text-embedding-3-small"
@@ -1080,6 +1126,7 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
                                 if current_memory > memory_cleanup_threshold:
                                     logger.warning(f"⚠️ High memory usage before batch {i//batch_size + 1}: {current_memory:.1f}MB")
                                 
+                                openai = get_openai_client()
                                 response = openai.embeddings.create(
                                     input=batch,
                                     model="text-embedding-3-small"
@@ -1235,6 +1282,7 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
                         if current_memory > 450:  # 450MB threshold for 512MB plan
                             logger.warning(f"⚠️ High memory usage before batch {i//batch_size + 1}: {current_memory:.1f}MB")
                         
+                        openai = get_openai_client()
                         response = openai.embeddings.create(
                             input=batch,
                             model="text-embedding-3-small"
@@ -1315,6 +1363,7 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i+batch_size]
             try:
+                openai = get_openai_client()
                 response = openai.embeddings.create(
                     input=batch,
                     model="text-embedding-3-small"
@@ -1514,6 +1563,7 @@ async def generate_summary_endpoint(request: GenerateSummaryRequest):
             "Be concise, specific, and focus on actionable insights for the sales team.\n\n"
             f"{qa_text}\n\nSummary:"
         )
+        openai = get_openai_client()
         response = openai.chat.completions.create(
             model="gpt-4-turbo",
             messages=[{"role": "user", "content": prompt}],
@@ -1602,6 +1652,7 @@ async def debug_pinecone_company(company_name: str):
         dummy_embedding = [0.0] * 1536  # OpenAI embedding dimension
         
         # Query Pinecone with a dummy embedding to see what's stored
+        index = get_pinecone_index()
         result = index.query(
             vector=dummy_embedding, 
             top_k=10, 
@@ -1643,6 +1694,7 @@ async def status_check():
         # Check Pinecone index
         try:
             # Get index stats
+            index = get_pinecone_index()
             index_stats = index.describe_index_stats()
             total_vectors = index_stats.get('total_vector_count', 0)
             logger.info(f"📊 Pinecone index stats: {total_vectors} total vectors")

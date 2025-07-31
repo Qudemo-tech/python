@@ -16,8 +16,14 @@ from sklearn.metrics.pairwise import cosine_similarity
 import logging
 import whisper
 import yt_dlp
-from datetime import datetime
+import time
+import random
+import requests
+from collections import defaultdict
+from fastapi import HTTPException
 from supabase import create_client, Client
+from dotenv import load_dotenv
+from datetime import datetime
 from pinecone import Pinecone
 import urllib.request
 import requests
@@ -329,20 +335,10 @@ def fetch_cookies_from_supabase(bucket_name, file_name, destination_path):
 
 
 # Video processing functions
-def download_video(video_url, output_filename):
-    """Download video from URL using yt-dlp, using cookies if available, or handle local file paths."""
-    # If it's a local file path, just return it
-    if os.path.exists(video_url):
-        logger.info(f"Using local file: {video_url}")
-        return video_url
+def download_video(video_url: str, output_filename: str) -> str:
+    """Download video from various sources with ultimate YouTube bypass strategies"""
     
-    # Check if it's a Loom URL
-    if 'loom.com' in video_url:
-        logger.warning(f"⚠️ Loom URL detected in fallback download: {video_url}")
-        logger.warning(f"⚠️ This should be handled by LoomVideoProcessor, not fallback download")
-        raise Exception("Loom videos should be processed by LoomVideoProcessor. yt-dlp download failed.")
-    
-    # If it's a YouTube link, use yt-dlp with enhanced cookie handling and rate limiting
+    # If it's a YouTube link, use ultimate bypass strategies
     if video_url.startswith('http') and ('youtube.com' in video_url or 'youtu.be' in video_url):
         logger.info(f"📥 Downloading video: {video_url}")
         
@@ -359,6 +355,220 @@ def download_video(video_url, output_filename):
             # Strategy 2: Fallback to Supabase cookies
             cookies_bucket = "cookies"
             cookies_file = "www.youtube.com_cookies.txt"
+            fetch_cookies_from_supabase(cookies_bucket, cookies_file, cookies_path)
+        
+        # Try the ultimate bypass solution first
+        try:
+            from ultimate_youtube_bypass import UltimateYouTubeBypass
+            bypass = UltimateYouTubeBypass()
+            logger.info(f"🚀 Using Ultimate YouTube Bypass solution...")
+            result = bypass.download_video(video_url, output_filename, cookies_path)
+            if result and os.path.exists(result) and os.path.getsize(result) > 0:
+                logger.info(f"✅ Ultimate bypass successful!")
+                return result
+        except Exception as e:
+            logger.warning(f"⚠️ Ultimate bypass failed: {e}")
+        
+        # Fallback to original strategies if ultimate bypass fails
+        logger.info(f"🔄 Falling back to original strategies...")
+        
+        # Multiple bypass strategies with different configurations
+        strategies = [
+            {
+                "name": "Browser-like with cookies",
+                "options": {
+                    'format': 'worst[height<=720]',
+                    'outtmpl': output_filename,
+                    'quiet': True,
+                    'no_warnings': False,
+                    'retries': 1,
+                    'fragment_retries': 1,
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.5',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'DNT': '1',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Sec-Fetch-User': '?1',
+                        'Cache-Control': 'max-age=0',
+                    },
+                    'sleep_interval': 10,
+                    'max_sleep_interval': 20,
+                    'socket_timeout': 60,
+                    'extractor_retries': 1,
+                    'ignoreerrors': False,
+                    'no_check_certificate': True,
+                    'prefer_insecure': True,
+                },
+                "use_cookies": True
+            },
+            {
+                "name": "Mobile browser simulation",
+                "options": {
+                    'format': 'worst[height<=480]',
+                    'outtmpl': output_filename,
+                    'quiet': True,
+                    'no_warnings': False,
+                    'retries': 1,
+                    'fragment_retries': 1,
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
+                    },
+                    'sleep_interval': 15,
+                    'max_sleep_interval': 30,
+                    'socket_timeout': 60,
+                    'extractor_retries': 1,
+                    'ignoreerrors': False,
+                    'no_check_certificate': True,
+                },
+                "use_cookies": False
+            },
+            {
+                "name": "Minimal headers approach",
+                "options": {
+                    'format': 'worst[height<=360]',
+                    'outtmpl': output_filename,
+                    'quiet': True,
+                    'no_warnings': False,
+                    'retries': 1,
+                    'fragment_retries': 1,
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    },
+                    'sleep_interval': 20,
+                    'max_sleep_interval': 40,
+                    'socket_timeout': 60,
+                    'extractor_retries': 1,
+                    'ignoreerrors': False,
+                },
+                "use_cookies": False
+            },
+            {
+                "name": "Direct download attempt",
+                "options": {
+                    'format': 'worst',
+                    'outtmpl': output_filename,
+                    'quiet': True,
+                    'no_warnings': False,
+                    'retries': 1,
+                    'fragment_retries': 1,
+                    'sleep_interval': 30,
+                    'max_sleep_interval': 60,
+                    'socket_timeout': 60,
+                    'extractor_retries': 1,
+                    'ignoreerrors': False,
+                },
+                "use_cookies": False
+            }
+        ]
+        
+        # Try each strategy with exponential backoff
+        for i, strategy in enumerate(strategies):
+            try:
+                logger.info(f"🔄 Attempting strategy {i+1}/{len(strategies)}: {strategy['name']}")
+                
+                # Add cookies if strategy requires them
+                ydl_opts = strategy['options'].copy()
+                if strategy['use_cookies'] and os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 0:
+                    ydl_opts['cookiefile'] = cookies_path
+                    logger.info(f"Using cookies for strategy: {strategy['name']}")
+                
+                # Add random delay before each attempt
+                delay = random.uniform(5, 15)
+                logger.info(f"⏳ Waiting {delay:.1f} seconds before attempt...")
+                time.sleep(delay)
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    # First try to extract info to check if video is accessible
+                    try:
+                        logger.info(f"🔍 Extracting video info...")
+                        info = ydl.extract_info(video_url, download=False)
+                        logger.info(f"✅ Video info extracted successfully: {info.get('title', 'Unknown')}")
+                    except Exception as info_error:
+                        error_msg = str(info_error)
+                        if 'HTTP Error 429' in error_msg:
+                            logger.warning(f"⚠️ Rate limited during info extraction: {error_msg}")
+                            # Wait longer before next strategy
+                            wait_time = 60 * (i + 1)  # Exponential backoff
+                            logger.info(f"⏳ Waiting {wait_time} seconds before next strategy...")
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            logger.warning(f"⚠️ Could not extract video info: {error_msg}")
+                    
+                    # Now try to download
+                    logger.info(f"📥 Starting download with strategy: {strategy['name']}")
+                    ydl.download([video_url])
+                    logger.info(f"✅ YouTube video downloaded successfully with strategy: {strategy['name']}")
+                    return output_filename
+                    
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(f"❌ Strategy '{strategy['name']}' failed: {error_msg}")
+                
+                # Check for specific error types
+                if 'HTTP Error 429' in error_msg:
+                    logger.warning(f"⚠️ Rate limited by YouTube, waiting before next strategy...")
+                    wait_time = 120 * (i + 1)  # Longer exponential backoff
+                    logger.info(f"⏳ Waiting {wait_time} seconds before next strategy...")
+                    time.sleep(wait_time)
+                    continue
+                elif 'Sign in to confirm you\'re not a bot' in error_msg:
+                    logger.warning(f"⚠️ Bot detection, trying next strategy...")
+                    continue
+                elif 'This video is age-restricted' in error_msg:
+                    raise Exception("This YouTube video is age-restricted and cannot be processed. Please provide a public video or upload your own file.")
+                elif 'This video is private' in error_msg:
+                    raise Exception("This YouTube video is private and cannot be processed. Please provide a public video or upload your own file.")
+                elif 'This video is unavailable' in error_msg:
+                    logger.warning(f"⚠️ Video unavailable, trying next strategy...")
+                    continue
+                elif 'HTTP Error 403' in error_msg:
+                    logger.warning(f"⚠️ Access denied, trying next strategy...")
+                    continue
+        
+        # If all strategies failed, try one last time with browser automation
+        logger.info(f"🔄 All strategies failed, attempting browser automation...")
+        try:
+            return download_with_browser_automation(video_url, output_filename)
+        except Exception as browser_error:
+            logger.error(f"❌ Browser automation also failed: {browser_error}")
+            raise Exception("All download strategies failed. YouTube is actively blocking this IP. Please try again later or use a different video.")
+
+    # If it's a Loom URL, use yt-dlp with enhanced cookie handling and rate limiting
+    if 'loom.com' in video_url:
+        logger.warning(f"⚠️ Loom URL detected in fallback download: {video_url}")
+        logger.warning(f"⚠️ This should be handled by LoomVideoProcessor, not fallback download")
+        raise Exception("Loom videos should be processed by LoomVideoProcessor. yt-dlp download failed.")
+    
+    # If it's a Vimeo link, use yt-dlp with enhanced cookie handling and rate limiting
+    if video_url.startswith('http') and 'vimeo.com' in video_url:
+        logger.info(f"📥 Downloading Vimeo video: {video_url}")
+        
+        # Strategy 1: Try local cookies first
+        local_cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
+        cookies_path = os.path.join(tempfile.gettempdir(), "cookies.txt")
+        
+        # Copy local cookies to temp directory if they exist
+        if os.path.exists(local_cookies_path):
+            import shutil
+            shutil.copy2(local_cookies_path, cookies_path)
+            logger.info(f"Using local cookies file: {local_cookies_path}")
+        else:
+            # Strategy 2: Fallback to Supabase cookies
+            cookies_bucket = "cookies"
+            cookies_file = "www.vimeo.com_cookies.txt"
             fetch_cookies_from_supabase(cookies_bucket, cookies_file, cookies_path)
         
         # Enhanced yt-dlp options with rate limiting and multiple strategies
@@ -481,6 +691,70 @@ def download_video(video_url, output_filename):
         return output_filename
     
     raise Exception("Invalid video input: must be a file path or a valid URL")
+
+def download_with_browser_automation(video_url: str, output_filename: str) -> str:
+    """Download video using browser automation as last resort"""
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        import urllib.parse
+        
+        logger.info(f"🌐 Starting browser automation for: {video_url}")
+        
+        # Setup Chrome options
+        chrome_options = Options()
+        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--window-size=1920,1080')
+        chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+        
+        # Initialize driver
+        driver = webdriver.Chrome(options=chrome_options)
+        
+        try:
+            # Navigate to video
+            driver.get(video_url)
+            logger.info(f"🌐 Navigated to video page")
+            
+            # Wait for page to load
+            WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located((By.TAG_NAME, "video"))
+            )
+            
+            # Get video source
+            video_element = driver.find_element(By.TAG_NAME, "video")
+            video_src = video_element.get_attribute("src")
+            
+            if video_src:
+                logger.info(f"🎥 Found video source: {video_src}")
+                
+                # Download using requests
+                response = requests.get(video_src, stream=True, timeout=60)
+                response.raise_for_status()
+                
+                with open(output_filename, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                
+                logger.info(f"✅ Video downloaded via browser automation")
+                return output_filename
+            else:
+                raise Exception("No video source found in browser")
+                
+        finally:
+            driver.quit()
+            
+    except ImportError:
+        logger.warning("⚠️ Selenium not available, skipping browser automation")
+        raise Exception("Browser automation not available")
+    except Exception as e:
+        logger.error(f"❌ Browser automation failed: {e}")
+        raise
 
 def transcribe_video(video_path, company_name, original_video_url=None):
     """Transcribe video using Whisper and return chunks"""

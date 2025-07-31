@@ -29,6 +29,7 @@ class FastVideoDownloader:
             self._strategy_ultra_fast,
             self._strategy_curl_fast,
             self._strategy_audio_only,
+            self._strategy_ultimate_bypass,
         ]
         
         for i, strategy in enumerate(strategies):
@@ -99,7 +100,7 @@ class FastVideoDownloader:
             return False
     
     def _strategy_ultra_fast(self, video_url: str, output_filename: str, cookies_path: Optional[str] = None) -> Optional[str]:
-        """Ultra-fast yt-dlp with minimal options but better reliability"""
+        """Ultra-fast yt-dlp with aggressive cookie usage"""
         
         ydl_opts = {
             'format': 'worst[height<=480]/worst',  # Get worst quality but ensure it's complete
@@ -110,6 +111,12 @@ class FastVideoDownloader:
             'fragment_retries': 2,
             'http_headers': {
                 'User-Agent': random.choice(self.user_agents),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
             },
             'sleep_interval': 2,  # Slightly longer sleep
             'max_sleep_interval': 5,
@@ -120,10 +127,24 @@ class FastVideoDownloader:
             'prefer_insecure': True,
             'buffersize': 1024,  # Larger buffer for better download
             'http_chunk_size': 10485760,  # 10MB chunks for better reliability
+            'cookiesfrombrowser': None,  # Disable browser cookies
         }
         
         if cookies_path and os.path.exists(cookies_path):
             ydl_opts['cookiefile'] = cookies_path
+            logger.info(f"🍪 Using cookies from: {cookies_path}")
+            # Also try to read and validate cookies
+            try:
+                with open(cookies_path, 'r') as f:
+                    cookie_content = f.read()
+                    if 'LOGIN_INFO' in cookie_content:
+                        logger.info("✅ LOGIN_INFO cookie found")
+                    if 'SID' in cookie_content:
+                        logger.info("✅ SID cookie found")
+                    if 'HSID' in cookie_content:
+                        logger.info("✅ HSID cookie found")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not validate cookies: {e}")
         
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -276,6 +297,116 @@ class FastVideoDownloader:
         except Exception as e:
             logger.error(f"Audio-only yt-dlp failed: {e}")
             raise
+        
+        return None
+    
+    def _strategy_ultimate_bypass(self, video_url: str, output_filename: str, cookies_path: Optional[str] = None) -> Optional[str]:
+        """Ultimate bypass strategy using browser automation with cookies"""
+        
+        try:
+            # Import selenium only when needed
+            from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            from selenium.webdriver.chrome.service import Service
+            from webdriver_manager.chrome import ChromeDriverManager
+            import time
+            
+            logger.info("🌐 Starting ultimate bypass with browser automation...")
+            
+            # Setup Chrome options
+            chrome_options = Options()
+            chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--window-size=1920,1080")
+            chrome_options.add_argument(f"--user-agent={random.choice(self.user_agents)}")
+            
+            # Add cookies if available
+            if cookies_path and os.path.exists(cookies_path):
+                chrome_options.add_argument(f"--user-data-dir=/tmp/chrome_profile")
+                logger.info("🍪 Browser will use cookies from profile")
+            
+            # Initialize driver
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            
+            try:
+                # Load cookies if available
+                if cookies_path and os.path.exists(cookies_path):
+                    driver.get("https://www.youtube.com")
+                    time.sleep(2)
+                    
+                    # Load cookies from file
+                    with open(cookies_path, 'r') as f:
+                        for line in f:
+                            if line.strip() and not line.startswith('#'):
+                                parts = line.strip().split('\t')
+                                if len(parts) >= 7:
+                                    domain, flag, path, secure, expiry, name, value = parts
+                                    if domain == '.youtube.com':
+                                        cookie = {
+                                            'name': name,
+                                            'value': value,
+                                            'domain': domain,
+                                            'path': path
+                                        }
+                                        try:
+                                            driver.add_cookie(cookie)
+                                        except Exception as e:
+                                            logger.warning(f"⚠️ Could not add cookie {name}: {e}")
+                    
+                    logger.info("🍪 Cookies loaded into browser")
+                
+                # Navigate to video
+                driver.get(video_url)
+                time.sleep(5)
+                
+                # Check if video is accessible
+                try:
+                    # Wait for video player to load
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.TAG_NAME, "video"))
+                    )
+                    logger.info("✅ Video player found")
+                    
+                    # Get video source
+                    video_element = driver.find_element(By.TAG_NAME, "video")
+                    video_src = video_element.get_attribute("src")
+                    
+                    if video_src:
+                        logger.info(f"🎥 Found video source: {video_src[:100]}...")
+                        
+                        # Download using curl
+                        cmd = [
+                            'curl', '-L', '-o', output_filename,
+                            '-H', f'User-Agent: {random.choice(self.user_agents)}',
+                            '--connect-timeout', '30',
+                            '--max-time', '120',
+                            video_src
+                        ]
+                        
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=130)
+                        
+                        if result.returncode == 0 and os.path.exists(output_filename) and os.path.getsize(output_filename) > 0:
+                            logger.info("✅ Ultimate bypass successful!")
+                            return output_filename
+                        else:
+                            logger.error(f"❌ Ultimate bypass download failed: {result.stderr}")
+                    else:
+                        logger.warning("⚠️ No video source found")
+                        
+                except Exception as e:
+                    logger.error(f"❌ Video player not found: {e}")
+                    
+            finally:
+                driver.quit()
+                
+        except Exception as e:
+            logger.error(f"❌ Ultimate bypass failed: {e}")
         
         return None
 

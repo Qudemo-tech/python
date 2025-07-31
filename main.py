@@ -342,9 +342,11 @@ def download_video(video_url, output_filename):
         logger.warning(f"⚠️ This should be handled by LoomVideoProcessor, not fallback download")
         raise Exception("Loom videos should be processed by LoomVideoProcessor. yt-dlp download failed.")
     
-    # If it's a YouTube link, use yt-dlp
+    # If it's a YouTube link, use yt-dlp with enhanced cookie handling
     if video_url.startswith('http') and ('youtube.com' in video_url or 'youtu.be' in video_url):
-        # Use local cookies file if available
+        logger.info(f"📥 Downloading video: {video_url}")
+        
+        # Strategy 1: Try local cookies first
         local_cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
         cookies_path = os.path.join(tempfile.gettempdir(), "cookies.txt")
         
@@ -354,42 +356,82 @@ def download_video(video_url, output_filename):
             shutil.copy2(local_cookies_path, cookies_path)
             logger.info(f"Using local cookies file: {local_cookies_path}")
         else:
-            # Fallback to Supabase if local file doesn't exist
+            # Strategy 2: Fallback to Supabase cookies
             cookies_bucket = "cookies"
             cookies_file = "www.youtube.com_cookies.txt"
             fetch_cookies_from_supabase(cookies_bucket, cookies_file, cookies_path)
         
+        # Enhanced yt-dlp options with multiple strategies
         ydl_opts = {
-            'format': 'worst[height<=480]',  # Use lowest quality to save memory
+            'format': 'worst[height<=720]',  # Better quality but still reasonable
             'outtmpl': output_filename,
             'quiet': True,
-            'max_filesize': '50M',  # Limit file size to 50MB
-            'cookiefile': cookies_path,
+            'max_filesize': '100M',  # Increased limit
+            'retries': 3,
+            'fragment_retries': 3,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            },
+            'sleep_interval': 2,
+            'max_sleep_interval': 5,
         }
+        
+        # Add cookies if available
         if os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 0:
             ydl_opts['cookiefile'] = cookies_path
             logger.info(f"Using cookies file for yt-dlp: {cookies_path}")
         else:
-            logger.info("No cookies file found, downloading without authentication.")
+            logger.info("No cookies file found, attempting download without authentication.")
+        
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                # First try to extract info to check if video is accessible
+                try:
+                    info = ydl.extract_info(video_url, download=False)
+                    logger.info(f"✅ Video info extracted successfully: {info.get('title', 'Unknown')}")
+                except Exception as info_error:
+                    logger.warning(f"⚠️ Could not extract video info: {info_error}")
+                
+                # Now try to download
                 ydl.download([video_url])
+                logger.info(f"✅ YouTube video downloaded successfully")
+                
         except Exception as e:
             error_msg = str(e)
-            # Check for common restriction errors
-            if (
-                'Sign in to confirm you\'re not a bot' in error_msg or
-                'This video is age-restricted' in error_msg or
-                'does not look like a Netscape format cookies file' in error_msg or
-                'This video is private' in error_msg or
-                'HTTP Error 403' in error_msg or
-                'This video is unavailable' in error_msg
-            ):
-                logger.error(f"❌ Video download failed due to YouTube restrictions: {error_msg}")
-                raise Exception("This YouTube video cannot be processed because it is restricted. Please provide a public, unrestricted video or upload your own file.")
+            logger.error(f"❌ YouTube download failed: {error_msg}")
+            
+            # Check for specific error types
+            if 'Sign in to confirm you\'re not a bot' in error_msg:
+                raise Exception("This YouTube video requires authentication. Please provide a public video or upload your own file.")
+            elif 'This video is age-restricted' in error_msg:
+                raise Exception("This YouTube video is age-restricted and cannot be processed. Please provide a public video or upload your own file.")
+            elif 'This video is private' in error_msg:
+                raise Exception("This YouTube video is private and cannot be processed. Please provide a public video or upload your own file.")
+            elif 'This video is unavailable' in error_msg:
+                raise Exception("This YouTube video is unavailable. Please provide a different video or upload your own file.")
+            elif 'HTTP Error 403' in error_msg:
+                raise Exception("Access denied to this YouTube video. Please provide a public video or upload your own file.")
             else:
-                logger.error(f"❌ Video download failed: {error_msg}")
-                raise
+                # Generic error - try without cookies as last resort
+                logger.info("🔄 Attempting download without cookies as fallback...")
+                try:
+                    ydl_opts_no_cookies = ydl_opts.copy()
+                    if 'cookiefile' in ydl_opts_no_cookies:
+                        del ydl_opts_no_cookies['cookiefile']
+                    
+                    with yt_dlp.YoutubeDL(ydl_opts_no_cookies) as ydl:
+                        ydl.download([video_url])
+                    logger.info(f"✅ YouTube video downloaded successfully without cookies")
+                except Exception as fallback_error:
+                    logger.error(f"❌ Fallback download also failed: {fallback_error}")
+                    raise Exception(f"YouTube video download failed: {error_msg}")
+        
         return output_filename
     
     # If it's another HTTP(S) URL, download it directly
@@ -403,8 +445,8 @@ def download_video(video_url, output_filename):
         content_length = r.headers.get('content-length')
         if content_length:
             file_size_mb = int(content_length) / (1024 * 1024)
-            if file_size_mb > 50:  # Limit to 50MB
-                raise Exception(f"File too large: {file_size_mb:.1f}MB (max 50MB)")
+            if file_size_mb > 100:  # Increased limit to 100MB
+                raise Exception(f"File too large: {file_size_mb:.1f}MB (max 100MB)")
         
         with open(output_filename, 'wb') as f:
             for chunk in r.iter_content(chunk_size=8192):

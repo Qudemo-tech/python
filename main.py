@@ -758,9 +758,29 @@ def download_with_browser_automation(video_url: str, output_filename: str) -> st
 
 def transcribe_video(video_path, company_name, original_video_url=None):
     """Transcribe video using Whisper and return chunks"""
-    # Use tiny model to save memory
-    model = whisper.load_model("tiny")
-    result = model.transcribe(video_path, task="translate",verbose=True)
+    try:
+        # Verify video file exists and has content
+        if not os.path.exists(video_path):
+            raise Exception(f"Video file not found: {video_path}")
+        
+        file_size = os.path.getsize(video_path)
+        if file_size == 0:
+            raise Exception(f"Video file is empty: {video_path}")
+        
+        logger.info(f"🎤 Starting transcription of {video_path} (size: {file_size} bytes)")
+        
+        # Use tiny model to save memory
+        model = whisper.load_model("tiny")
+        result = model.transcribe(video_path, task="translate", verbose=True)
+        
+        if not result or not result.get("segments"):
+            raise Exception("Whisper transcription returned no segments")
+        
+        logger.info(f"✅ Transcription completed with {len(result['segments'])} segments")
+        
+    except Exception as e:
+        logger.error(f"❌ Transcription failed: {e}")
+        raise Exception(f"Video transcription failed: {str(e)}")
     
     # Generate context
     try:
@@ -1221,8 +1241,25 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
         logger.info(f"📥 Downloading video: {video_url}")
         download_video(video_url, video_filename)
         add_video_url_mapping(video_filename, video_url)
-        logger.info(f"📥 Transcribing video: {video_filename}")
-        chunks, context = transcribe_video(video_filename, company_name, video_url)
+        
+        # Verify the downloaded file exists and has content
+        if not os.path.exists(video_filename):
+            raise Exception(f"Downloaded video file not found: {video_filename}")
+        
+        file_size = os.path.getsize(video_filename)
+        if file_size == 0:
+            raise Exception(f"Downloaded video file is empty: {video_filename}")
+        
+        logger.info(f"📥 Transcribing video: {video_filename} (size: {file_size} bytes)")
+        
+        try:
+            chunks, context = transcribe_video(video_filename, company_name, video_url)
+        except Exception as e:
+            logger.error(f"❌ Transcription failed: {e}")
+            # Clean up the video file
+            if os.path.exists(video_filename):
+                os.remove(video_filename)
+            raise Exception(f"Video transcription failed: {str(e)}")
         
         # Clean up video file immediately after transcription to save memory
         if os.path.exists(video_filename):

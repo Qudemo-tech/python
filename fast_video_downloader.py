@@ -51,13 +51,14 @@ class FastVideoDownloader:
         raise Exception("All fast download strategies failed.")
     
     def _validate_video_file(self, file_path: str) -> bool:
-        """Quick validation - just check file size and basic header"""
+        """Enhanced validation - check file size, header, and use ffprobe"""
         try:
             if not os.path.exists(file_path):
                 return False
             
             file_size = os.path.getsize(file_path)
             if file_size < 10000:  # Less than 10KB is probably HTML
+                logger.warning(f"⚠️ File too small ({file_size} bytes)")
                 return False
             
             # Quick header check
@@ -66,38 +67,58 @@ class FastVideoDownloader:
             
             # Check for video signatures
             if header.startswith(b'\x00\x00\x00\x20ftyp'):  # MP4
-                return True
+                logger.info(f"✅ MP4 header detected ({file_size} bytes)")
             elif header.startswith(b'RIFF'):  # AVI
-                return True
+                logger.info(f"✅ AVI header detected ({file_size} bytes)")
             elif header.startswith(b'\x1a\x45\xdf\xa3'):  # WebM/MKV
-                return True
+                logger.info(f"✅ WebM/MKV header detected ({file_size} bytes)")
             elif header.startswith(b'<!DOCTYPE') or header.startswith(b'<html'):
+                logger.warning(f"⚠️ HTML file detected")
+                return False
+            else:
+                logger.warning(f"⚠️ Unknown file format")
                 return False
             
-            # If we can't determine, assume it's valid if it's large enough
-            return file_size > 50000  # At least 50KB
+            # Use ffprobe to validate the video file
+            try:
+                cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', file_path]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    logger.info(f"✅ Video file validated by ffprobe ({file_size} bytes)")
+                    return True
+                else:
+                    logger.warning(f"⚠️ ffprobe validation failed: {result.stderr}")
+                    return False
+            except Exception as e:
+                logger.warning(f"⚠️ ffprobe validation error: {e}")
+                # If ffprobe fails, check if file is large enough
+                return file_size > 100000  # At least 100KB for video files
+                
+        except Exception as e:
+            logger.error(f"❌ File validation error: {e}")
+            return False
                 
         except Exception as e:
             logger.error(f"❌ File validation error: {e}")
             return False
     
     def _strategy_ultra_fast(self, video_url: str, output_filename: str, cookies_path: Optional[str] = None) -> Optional[str]:
-        """Ultra-fast yt-dlp with minimal options"""
+        """Ultra-fast yt-dlp with minimal options but better reliability"""
         
         ydl_opts = {
-            'format': 'worst',  # Get worst quality for speed
+            'format': 'worst[height<=480]/worst',  # Get worst quality but ensure it's complete
             'outtmpl': output_filename,
             'quiet': True,
             'no_warnings': True,
-            'retries': 0,  # No retries
-            'fragment_retries': 0,
+            'retries': 1,  # Allow 1 retry for reliability
+            'fragment_retries': 1,
             'http_headers': {
                 'User-Agent': random.choice(self.user_agents),
             },
-            'sleep_interval': 0,  # No sleep
-            'max_sleep_interval': 0,
-            'socket_timeout': 15,  # Short timeout
-            'extractor_retries': 0,
+            'sleep_interval': 1,  # Minimal sleep
+            'max_sleep_interval': 2,
+            'socket_timeout': 30,  # Longer timeout for reliability
+            'extractor_retries': 1,
             'ignoreerrors': False,
             'no_check_certificate': True,
             'prefer_insecure': True,

@@ -97,10 +97,6 @@ class FastVideoDownloader:
         except Exception as e:
             logger.error(f"❌ File validation error: {e}")
             return False
-                
-        except Exception as e:
-            logger.error(f"❌ File validation error: {e}")
-            return False
     
     def _strategy_ultra_fast(self, video_url: str, output_filename: str, cookies_path: Optional[str] = None) -> Optional[str]:
         """Ultra-fast yt-dlp with minimal options but better reliability"""

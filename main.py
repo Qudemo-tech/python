@@ -357,7 +357,19 @@ def download_video(video_url: str, output_filename: str) -> str:
             cookies_file = "www.youtube.com_cookies.txt"
             fetch_cookies_from_supabase(cookies_bucket, cookies_file, cookies_path)
         
-        # Try the ultimate bypass solution first
+        # Try the alternative downloader first (more likely to work with blocked IPs)
+        try:
+            from youtube_alternative_downloader import AlternativeYouTubeDownloader
+            downloader = AlternativeYouTubeDownloader()
+            logger.info(f"🚀 Using Alternative YouTube Downloader...")
+            result = downloader.download_video(video_url, output_filename, cookies_path)
+            if result and os.path.exists(result) and os.path.getsize(result) > 0:
+                logger.info(f"✅ Alternative downloader successful!")
+                return result
+        except Exception as e:
+            logger.warning(f"⚠️ Alternative downloader failed: {e}")
+        
+        # Try the ultimate bypass solution as fallback
         try:
             from ultimate_youtube_bypass import UltimateYouTubeBypass
             bypass = UltimateYouTubeBypass()
@@ -371,6 +383,10 @@ def download_video(video_url: str, output_filename: str) -> str:
         
         # Fallback to original strategies if ultimate bypass fails
         logger.info(f"🔄 Falling back to original strategies...")
+        
+        # Import time module for delays
+        import time
+        import random
         
         # Multiple bypass strategies with different configurations
         strategies = [

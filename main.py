@@ -1371,7 +1371,7 @@ from collections import defaultdict
 
 # Track last request time per company to prevent rate limiting
 last_request_time = defaultdict(float)
-MIN_REQUEST_INTERVAL = 30  # Minimum 30 seconds between requests per company
+MIN_REQUEST_INTERVAL = 5  # Minimum 5 seconds between requests per company (reduced for testing)
 
 # Pydantic models
 class ProcessVideoRequest(BaseModel, extra='allow'):

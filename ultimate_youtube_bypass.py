@@ -59,8 +59,8 @@ class UltimateYouTubeBypass:
             try:
                 logger.info(f"🔄 Attempting strategy {i+1}/{len(strategies)}: {strategy.__name__}")
                 
-                # Random delay between strategies
-                delay = random.uniform(10, 30)
+                # Short delay between strategies (reduced for faster processing)
+                delay = random.uniform(2, 5)
                 logger.info(f"⏳ Waiting {delay:.1f} seconds before strategy...")
                 time.sleep(delay)
                 

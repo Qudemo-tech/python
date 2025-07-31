@@ -41,8 +41,8 @@ class FixedVideoDownloader:
             try:
                 logger.info(f"🔄 Attempting fixed strategy {i+1}/{len(strategies)}: {strategy.__name__}")
                 
-                # Short delay between strategies
-                delay = random.uniform(2, 5)
+                # Minimal delay between strategies (reduced for faster processing)
+                delay = random.uniform(1, 2)
                 logger.info(f"⏳ Waiting {delay:.1f} seconds before strategy...")
                 time.sleep(delay)
                 

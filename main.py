@@ -344,10 +344,20 @@ def download_video(video_url, output_filename):
     
     # If it's a YouTube link, use yt-dlp
     if video_url.startswith('http') and ('youtube.com' in video_url or 'youtu.be' in video_url):
-        cookies_bucket = "cookies"
-        cookies_file = "www.youtube.com_cookies.txt"
+        # Use local cookies file if available
+        local_cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
         cookies_path = os.path.join(tempfile.gettempdir(), "cookies.txt")
-        fetch_cookies_from_supabase(cookies_bucket, cookies_file, cookies_path)
+        
+        # Copy local cookies to temp directory if they exist
+        if os.path.exists(local_cookies_path):
+            import shutil
+            shutil.copy2(local_cookies_path, cookies_path)
+            logger.info(f"Using local cookies file: {local_cookies_path}")
+        else:
+            # Fallback to Supabase if local file doesn't exist
+            cookies_bucket = "cookies"
+            cookies_file = "www.youtube.com_cookies.txt"
+            fetch_cookies_from_supabase(cookies_bucket, cookies_file, cookies_path)
         
         ydl_opts = {
             'format': 'worst[height<=480]',  # Use lowest quality to save memory

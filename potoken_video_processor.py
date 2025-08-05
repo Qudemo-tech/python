@@ -133,7 +133,15 @@ class PoTokenVideoProcessor:
                 "format": "best[ext=mp4]/best",
                 "http_headers": headers,
                 "no_warnings": True,
-                "quiet": True
+                "quiet": True,
+                # Bot detection bypass options
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["android"],
+                        "player_skip": ["webpage"],
+                        "player_params": {"hl": "en", "gl": "US"}
+                    }
+                }
             }
             
             logger.info(f"🔧 yt-dlp options: {ydl_opts}")

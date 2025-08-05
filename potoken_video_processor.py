@@ -13,7 +13,6 @@ import time
 import random
 from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse
-import yt_dlp
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -113,74 +112,11 @@ class PoTokenVideoProcessor:
             logger.error(f"❌ PoToken download error: {e}")
             return None
     
-    def download_with_ytdlp_fallback(self, video_url: str, output_path: str) -> Optional[Dict]:
-        """Fallback to yt-dlp if PoToken fails"""
-        try:
-            logger.info(f"🔄 Using yt-dlp fallback for: {video_url}")
-            
-            # Enhanced yt-dlp configuration
-            ydl_opts = {
-                'format': 'best[height<=720]/best',
-                'outtmpl': output_path.replace('.mp4', '.%(ext)s'),
-                'quiet': False,
-                'no_warnings': False,
-                
-                # Anti-bot headers
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'DNT': '1',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                },
-                
-                # Multiple client approach
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['web', 'android'],
-                        'player_skip': ['webpage'],
-                        'player_params': {'hl': 'en', 'gl': 'US'},
-                    }
-                },
-                
-                # Rate limiting
-                'sleep_interval': random.randint(2, 5),
-                'max_sleep_interval': random.randint(5, 10),
-                'retries': 5,
-                'fragment_retries': 5,
-                
-                # Additional options
-                'nocheckcertificate': True,
-                'ignoreerrors': False,
-                'no_color': True,
-            }
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(video_url, download=True)
-                
-            # Check for downloaded file
-            base_name = output_path.replace('.mp4', '')
-            for ext in ['.mp4', '.webm', '.mkv', '.avi', '.mov', '.flv']:
-                test_file = base_name + ext
-                if os.path.exists(test_file) and os.path.getsize(test_file) > 1000:
-                    return {
-                        'success': True,
-                        'filePath': test_file,
-                        'title': info.get('title', 'Unknown Title'),
-                        'method': 'yt-dlp-fallback'
-                    }
-            
-            raise Exception("No valid file found after download")
-            
-        except Exception as e:
-            logger.error(f"❌ yt-dlp fallback error: {e}")
-            return None
+
     
     def process_video(self, video_url: str, output_filename: str) -> Optional[Dict]:
         """
-        Main video processing method with PoToken integration
+        Main video processing method with PoToken integration ONLY
         
         Args:
             video_url: URL of the video to download
@@ -192,15 +128,15 @@ class PoTokenVideoProcessor:
         try:
             # Validate URL
             if not self.is_youtube_url(video_url):
-                logger.warning(f"⚠️ Non-YouTube URL detected: {video_url}")
-                return self.download_with_ytdlp_fallback(video_url, output_filename)
+                logger.error(f"❌ Non-YouTube URL detected: {video_url}")
+                raise Exception("PoToken processor only supports YouTube videos")
             
             # Check PoToken service availability
             if not self.check_potoken_service():
-                logger.warning("⚠️ PoToken service not available, using yt-dlp fallback")
-                return self.download_with_ytdlp_fallback(video_url, output_filename)
+                logger.error("❌ PoToken service not available")
+                raise Exception("PoToken service is not available. Please ensure Node.js backend is deployed and running.")
             
-            # Try PoToken method first
+            # Try PoToken method ONLY
             logger.info("🚀 Attempting PoToken download...")
             potoken_result = self.download_with_potoken(video_url, output_filename)
             
@@ -212,68 +148,46 @@ class PoTokenVideoProcessor:
                     'bypass_success': True
                 }
             
-            # Fallback to yt-dlp
-            logger.info("🔄 PoToken failed, trying yt-dlp fallback...")
-            fallback_result = self.download_with_ytdlp_fallback(video_url, output_filename)
-            
-            if fallback_result:
-                logger.info("✅ yt-dlp fallback successful")
-                return {
-                    **fallback_result,
-                    'method': 'yt-dlp-fallback',
-                    'bypass_success': False
-                }
-            
-            logger.error("❌ All download methods failed")
-            return None
+            # No fallback - PoToken failed
+            logger.error("❌ PoToken download failed")
+            raise Exception("PoToken download failed. No fallback available.")
             
         except Exception as e:
             logger.error(f"❌ Video processing error: {e}")
-            return None
+            raise e
     
     def get_video_info(self, video_url: str) -> Optional[Dict]:
-        """Get video information using PoToken or fallback"""
+        """Get video information using PoToken ONLY"""
         try:
             if not self.is_youtube_url(video_url):
-                logger.warning(f"⚠️ Non-YouTube URL: {video_url}")
-                return None
+                logger.error(f"❌ Non-YouTube URL: {video_url}")
+                raise Exception("PoToken processor only supports YouTube videos")
             
-            # Try PoToken service first
-            if self.check_potoken_service():
-                response = self.session.get(
-                    f"{self.potoken_service_url}/info",
-                    params={'videoUrl': video_url},
-                    timeout=30
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get('success'):
-                        logger.info("✅ Video info retrieved via PoToken")
-                        return data.get('data')
+            # Check PoToken service availability
+            if not self.check_potoken_service():
+                logger.error("❌ PoToken service not available")
+                raise Exception("PoToken service is not available. Please ensure Node.js backend is deployed and running.")
             
-            # Fallback to yt-dlp
-            logger.info("🔄 Using yt-dlp for video info...")
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': True
-            }
+            # Try PoToken service only
+            response = self.session.get(
+                f"{self.potoken_service_url}/info",
+                params={'videoUrl': video_url},
+                timeout=30
+            )
             
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(video_url, download=False)
-                
-            return {
-                'title': info.get('title'),
-                'duration': info.get('duration'),
-                'uploader': info.get('uploader'),
-                'view_count': info.get('view_count'),
-                'method': 'yt-dlp-fallback'
-            }
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    logger.info("✅ Video info retrieved via PoToken")
+                    return data.get('data')
+            
+            # PoToken failed
+            logger.error("❌ PoToken video info failed")
+            raise Exception("PoToken video info failed. No fallback available.")
             
         except Exception as e:
             logger.error(f"❌ Video info error: {e}")
-            return None
+            raise e
 
 # Example usage and testing
 if __name__ == "__main__":

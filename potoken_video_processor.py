@@ -11,6 +11,7 @@ import requests
 import json
 import time
 import random
+import yt_dlp
 from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -116,12 +117,53 @@ class PoTokenVideoProcessor:
         except Exception as e:
             logger.error(f"❌ PoToken download error: {e}")
             return None
+
+    def download_with_ytdlp_headers(self, video_url: str, output_path: str) -> Optional[Dict]:
+        """Download video using yt-dlp with enhanced headers (Python fallback)"""
+        try:
+            logger.info(f"📥 Downloading with yt-dlp headers: {video_url}")
+            
+            # Enhanced headers as requested
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
+            
+            ydl_opts = {
+                "outtmpl": output_path,
+                "format": "best[ext=mp4]/best",
+                "http_headers": headers,
+                "no_warnings": True,
+                "quiet": True
+            }
+            
+            logger.info(f"🔧 yt-dlp options: {ydl_opts}")
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([video_url])
+            
+            # Check if file was downloaded successfully
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                file_size = os.path.getsize(output_path)
+                logger.info(f"✅ yt-dlp download successful: {output_path} ({file_size} bytes)")
+                return {
+                    'success': True,
+                    'filePath': output_path,
+                    'method': 'yt-dlp-python-headers',
+                    'fileSize': file_size
+                }
+            else:
+                logger.error(f"❌ yt-dlp download failed: file not found or empty")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ yt-dlp download error: {e}")
+            return None
     
 
     
     def process_video(self, video_url: str, output_filename: str) -> Optional[Dict]:
         """
-        Main video processing method with PoToken integration ONLY
+        Main video processing method with PoToken integration and yt-dlp fallback
         
         Args:
             video_url: URL of the video to download
@@ -136,12 +178,7 @@ class PoTokenVideoProcessor:
                 logger.error(f"❌ Non-YouTube URL detected: {video_url}")
                 raise Exception("PoToken processor only supports YouTube videos")
             
-            # Check PoToken service availability
-            if not self.check_potoken_service():
-                logger.error("❌ PoToken service not available")
-                raise Exception("PoToken service is not available. Please ensure Node.js backend is deployed and running.")
-            
-            # Try PoToken method ONLY
+            # Try PoToken method first
             logger.info("🚀 Attempting PoToken download...")
             potoken_result = self.download_with_potoken(video_url, output_filename)
             
@@ -153,9 +190,21 @@ class PoTokenVideoProcessor:
                     'bypass_success': True
                 }
             
-            # No fallback - PoToken failed
-            logger.error("❌ PoToken download failed")
-            raise Exception("PoToken download failed. No fallback available.")
+            # Fallback to Python yt-dlp with headers
+            logger.info("🔄 PoToken failed, trying yt-dlp Python fallback...")
+            ytdlp_result = self.download_with_ytdlp_headers(video_url, output_filename)
+            
+            if ytdlp_result and ytdlp_result.get('success'):
+                logger.info("✅ yt-dlp Python fallback successful")
+                return {
+                    **ytdlp_result,
+                    'method': 'yt-dlp-python-fallback',
+                    'bypass_success': False
+                }
+            
+            # All methods failed
+            logger.error("❌ All download methods failed")
+            raise Exception("Both PoToken and yt-dlp Python fallback failed.")
             
         except Exception as e:
             logger.error(f"❌ Video processing error: {e}")

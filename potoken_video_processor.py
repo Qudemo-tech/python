@@ -137,9 +137,10 @@ class PoTokenVideoProcessor:
                 # Bot detection bypass options
                 "extractor_args": {
                     "youtube": {
-                        "player_client": ["android"],
-                        "player_skip": ["webpage"],
-                        "player_params": {"hl": "en", "gl": "US"}
+                        "player_client": ["android", "web"],
+                        "player_skip": ["webpage", "configs"],
+                        "player_params": {"hl": "en", "gl": "US"},
+                        "skip": ["hls", "dash"]
                     }
                 }
             }

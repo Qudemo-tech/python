@@ -13,6 +13,7 @@ requests>=2.31.0
 
 # Video processing
 yt-dlp>=2023.12.30
+pytubefix>=8.12.0
 
 # Data science (Python 3.12 compatible)
 numpy>=1.24.0

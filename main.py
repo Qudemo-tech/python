@@ -379,13 +379,32 @@ def fetch_cookies_from_supabase(bucket_name, file_name, destination_path):
 
 # Video processing functions
 def download_video(video_url: str, output_filename: str) -> str:
-    """Download video from various sources with ultimate YouTube bypass strategies"""
+    """Download video from various sources with PoToken-enhanced YouTube bypass strategies"""
     
-    # If it's a YouTube link, use ultimate bypass strategies
+    # If it's a YouTube link, use PoToken-enhanced bypass strategies
     if video_url.startswith('http') and ('youtube.com' in video_url or 'youtu.be' in video_url):
-        logger.info(f"📥 Downloading video: {video_url}")
+        logger.info(f"📥 Downloading YouTube video with PoToken: {video_url}")
         
-        # Strategy 1: Try local cookies first
+        # Strategy 1: Try PoToken-enhanced processor first
+        try:
+            from potoken_video_processor import PoTokenVideoProcessor
+            
+            # Get Node.js backend URL from environment
+            node_backend_url = os.getenv('NODE_BACKEND_URL', 'http://localhost:5000')
+            processor = PoTokenVideoProcessor(node_backend_url)
+            
+            logger.info(f"🔐 Using PoToken-enhanced video processor...")
+            result = processor.process_video(video_url, output_filename)
+            
+            if result and result.get('success'):
+                logger.info(f"✅ PoToken download successful! Method: {result.get('method')}")
+                return result.get('filePath', output_filename)
+            else:
+                logger.warning(f"⚠️ PoToken processor failed, trying fallback methods...")
+        except Exception as e:
+            logger.warning(f"⚠️ PoToken processor failed: {e}, trying fallback methods...")
+        
+        # Strategy 2: Try local cookies with existing methods
         local_cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
         cookies_path = os.path.join(tempfile.gettempdir(), "cookies.txt")
         
@@ -395,16 +414,16 @@ def download_video(video_url: str, output_filename: str) -> str:
             shutil.copy2(local_cookies_path, cookies_path)
             logger.info(f"Using local cookies file: {local_cookies_path}")
         else:
-            # Strategy 2: Fallback to Supabase cookies
+            # Strategy 3: Fallback to Supabase cookies
             cookies_bucket = "cookies"
             cookies_file = "cookiess.txt"  # Updated to use new cookie file
             fetch_cookies_from_supabase(cookies_bucket, cookies_file, cookies_path)
         
-        # Try the fast downloader first (prioritizes speed)
+        # Try the fast downloader as fallback (prioritizes speed)
         try:
             from fast_video_downloader import FastVideoDownloader
             downloader = FastVideoDownloader()
-            logger.info(f"🚀 Using Fast Video Downloader...")
+            logger.info(f"🚀 Using Fast Video Downloader as fallback...")
             result = downloader.download_video(video_url, output_filename, cookies_path)
             if result and os.path.exists(result) and os.path.getsize(result) > 0:
                 logger.info(f"✅ Fast downloader successful!")
@@ -448,7 +467,7 @@ def download_video(video_url: str, output_filename: str) -> str:
         except Exception as e:
             logger.warning(f"⚠️ Ultimate bypass failed: {e}")
         
-        # Fallback to original strategies if ultimate bypass fails
+        # Fallback to original strategies if all else fails
         logger.info(f"🔄 Falling back to original strategies...")
         
         # Import time module for delays

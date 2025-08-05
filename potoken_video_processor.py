@@ -28,6 +28,11 @@ class PoTokenVideoProcessor:
         """
         self.node_backend_url = node_backend_url or os.getenv('NODE_BACKEND_URL', 'http://localhost:5000')
         self.potoken_service_url = f"{self.node_backend_url}/api/potoken"
+        
+        # Debug logging to see what URL is being used
+        logger.info(f"🔗 PoToken service URL: {self.potoken_service_url}")
+        logger.info(f"🔗 Node backend URL: {self.node_backend_url}")
+        logger.info(f"🔗 Environment NODE_BACKEND_URL: {os.getenv('NODE_BACKEND_URL', 'NOT_SET')}")
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',

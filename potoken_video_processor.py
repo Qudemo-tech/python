@@ -11,7 +11,6 @@ import requests
 import json
 import time
 import random
-import yt_dlp
 from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -118,70 +117,13 @@ class PoTokenVideoProcessor:
             logger.error(f"❌ PoToken download error: {e}")
             return None
 
-    def download_with_ytdlp_headers(self, video_url: str, output_path: str) -> Optional[Dict]:
-        """Download video using yt-dlp with enhanced headers (Python fallback)"""
-        try:
-            logger.info(f"📥 Downloading with yt-dlp headers: {video_url}")
-            
-            # Enhanced headers with OAuth 2.0 support
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            }
-            
-            # Add OAuth token if available
-            oauth_token = os.getenv('YOUTUBE_OAUTH_TOKEN')
-            if oauth_token:
-                headers["Authorization"] = f"Bearer {oauth_token}"
-                logger.info(f"🔐 Using OAuth token: {oauth_token[:20]}...")
-            else:
-                logger.warning("⚠️ No OAuth token found in environment variables")
-            ydl_opts = {
-                "outtmpl": output_path,
-                "format": "best[ext=mp4]/best",
-                "http_headers": headers,
-                "no_warnings": True,
-                "quiet": True,
-                # OAuth 2.0 authentication (if available)
-                **({"access_token": oauth_token} if oauth_token else {}),
-                # Bot detection bypass options
-                "extractor_args": {
-                    "youtube": {
-                        "player_client": ["android", "web"],
-                        "player_skip": ["webpage", "configs", "js"],
-                        "player_params": {"hl": "en", "gl": "US", "client": "web"},
-                        "skip": ["hls", "dash"]
-                    }
-                }
-            }
-            
-            logger.info(f"🔧 yt-dlp options: {ydl_opts}")
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([video_url])
-            
-            # Check if file was downloaded successfully
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                file_size = os.path.getsize(output_path)
-                logger.info(f"✅ yt-dlp download successful: {output_path} ({file_size} bytes)")
-                return {
-                    'success': True,
-                    'filePath': output_path,
-                    'method': 'yt-dlp-python-headers',
-                    'fileSize': file_size
-                }
-            else:
-                logger.error(f"❌ yt-dlp download failed: file not found or empty")
-                return None
-                
-        except Exception as e:
-            logger.error(f"❌ yt-dlp download error: {e}")
-            return None
+    # VM-only approach - removed yt-dlp fallback methods
     
 
     
     def process_video(self, video_url: str, output_filename: str) -> Optional[Dict]:
         """
-        Main video processing method with PoToken integration and yt-dlp fallback
+        Main video processing method with VM-only PoToken integration
         
         Args:
             video_url: URL of the video to download
@@ -196,33 +138,26 @@ class PoTokenVideoProcessor:
                 logger.error(f"❌ Non-YouTube URL detected: {video_url}")
                 raise Exception("PoToken processor only supports YouTube videos")
             
-            # Try PoToken method first
-            logger.info("🚀 Attempting PoToken download...")
+            # Check PoToken service availability
+            if not self.check_potoken_service():
+                logger.error("❌ PoToken service not available")
+                raise Exception("PoToken service is not available. Please ensure Node.js backend is deployed and running.")
+            
+            # VM-ONLY APPROACH: Only use PoToken (which uses VM)
+            logger.info("🌐 Attempting VM-only PoToken download...")
             potoken_result = self.download_with_potoken(video_url, output_filename)
             
             if potoken_result and potoken_result.get('success'):
-                logger.info("✅ PoToken download successful")
+                logger.info("✅ VM PoToken download successful")
                 return {
                     **potoken_result,
-                    'method': 'potoken',
+                    'method': 'potoken-vm-only',
                     'bypass_success': True
                 }
             
-            # Fallback to Python yt-dlp with headers
-            logger.info("🔄 PoToken failed, trying yt-dlp Python fallback...")
-            ytdlp_result = self.download_with_ytdlp_headers(video_url, output_filename)
-            
-            if ytdlp_result and ytdlp_result.get('success'):
-                logger.info("✅ yt-dlp Python fallback successful")
-                return {
-                    **ytdlp_result,
-                    'method': 'yt-dlp-python-fallback',
-                    'bypass_success': False
-                }
-            
-            # All methods failed
-            logger.error("❌ All download methods failed")
-            raise Exception("Both PoToken and yt-dlp Python fallback failed.")
+            # VM-only approach failed
+            logger.error("❌ VM PoToken download failed")
+            raise Exception("VM PoToken download failed. This is the only available method in VM-only mode.")
             
         except Exception as e:
             logger.error(f"❌ Video processing error: {e}")

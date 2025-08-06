@@ -175,7 +175,6 @@ def fetch_video_urls_from_supabase():
                 video_name = video.get('video_name', '').strip()
                 if video_name:
                     video_mappings[video_name] = video['video_url']
-                    logger.info(f"📝 Mapped {video_name} -> {video['video_url']}")
         
         logger.info(f"📝 Fetched {len(video_mappings)} video mappings from Supabase")
         return video_mappings

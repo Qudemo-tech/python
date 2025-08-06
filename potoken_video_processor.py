@@ -123,23 +123,32 @@ class PoTokenVideoProcessor:
         try:
             logger.info(f"📥 Downloading with yt-dlp headers: {video_url}")
             
-            # Enhanced headers as requested
+            # Enhanced headers with OAuth 2.0 support
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
             }
             
+            # Add OAuth token if available
+            oauth_token = os.getenv('YOUTUBE_OAUTH_TOKEN')
+            if oauth_token:
+                headers["Authorization"] = f"Bearer {oauth_token}"
+                logger.info(f"🔐 Using OAuth token: {oauth_token[:20]}...")
+            else:
+                logger.warning("⚠️ No OAuth token found in environment variables")
             ydl_opts = {
                 "outtmpl": output_path,
                 "format": "best[ext=mp4]/best",
                 "http_headers": headers,
                 "no_warnings": True,
                 "quiet": True,
+                # OAuth 2.0 authentication (if available)
+                **({"access_token": oauth_token} if oauth_token else {}),
                 # Bot detection bypass options
                 "extractor_args": {
                     "youtube": {
                         "player_client": ["android", "web"],
-                        "player_skip": ["webpage", "configs"],
-                        "player_params": {"hl": "en", "gl": "US"},
+                        "player_skip": ["webpage", "configs", "js"],
+                        "player_params": {"hl": "en", "gl": "US", "client": "web"},
                         "skip": ["hls", "dash"]
                     }
                 }

@@ -52,7 +52,8 @@ class PoTokenVideoProcessor:
             if response.status_code == 200:
                 data = response.json()
                 logger.info(f"✅ PoToken service available: {data}")
-                return data.get('nodeAvailable', False)
+                # Check if the service is healthy (status 200 means it's available)
+                return True
             else:
                 logger.warning(f"⚠️ PoToken service health check failed: {response.status_code}")
                 return False

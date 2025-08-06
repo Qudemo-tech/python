@@ -378,29 +378,29 @@ def fetch_cookies_from_supabase(bucket_name, file_name, destination_path):
 
 # Video processing functions
 def download_video(video_url: str, output_filename: str) -> str:
-    """Download video using direct VM access"""
+    """Download video using stealth techniques"""
     
-    # If it's a YouTube link, use direct VM access
+    # If it's a YouTube link, use stealth techniques
     if video_url.startswith('http') and ('youtube.com' in video_url or 'youtu.be' in video_url):
-        logger.info(f"📥 Downloading YouTube video with direct VM: {video_url}")
+        logger.info(f"📥 Downloading YouTube video with stealth: {video_url}")
         
         try:
-            from vm_video_processor import DirectVMVideoProcessor
+            from stealth_video_processor import StealthVideoProcessor
             
-            processor = DirectVMVideoProcessor()
+            processor = StealthVideoProcessor()
             
-            logger.info(f"🌐 Using direct VM video processor...")
+            logger.info(f"🎭 Using stealth video processor...")
             result = processor.process_video(video_url, output_filename)
             
             if result and result.get('success'):
-                logger.info(f"✅ Direct VM download successful!")
+                logger.info(f"✅ Stealth download successful!")
                 return result.get('filePath', output_filename)
             else:
-                raise Exception("Direct VM processor failed")
+                raise Exception("Stealth processor failed")
                 
         except Exception as e:
-            logger.error(f"❌ Direct VM download failed: {e}")
-            raise Exception(f"Direct VM video download failed: {str(e)}")
+            logger.error(f"❌ Stealth download failed: {e}")
+            raise Exception(f"Stealth video download failed: {str(e)}")
     
     # For non-YouTube videos, use yt-dlp directly
     else:

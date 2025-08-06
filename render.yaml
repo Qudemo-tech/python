@@ -12,7 +12,7 @@ services:
       
       # Update package lists and install system dependencies
       apt-get update -qq
-      apt-get install -y -qq ffmpeg curl wget
+      apt-get install -y -qq ffmpeg curl wget google-chrome-stable
       
       # Verify ffmpeg installation
       ffmpeg -version || exit 1

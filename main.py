@@ -378,31 +378,29 @@ def fetch_cookies_from_supabase(bucket_name, file_name, destination_path):
 
 # Video processing functions
 def download_video(video_url: str, output_filename: str) -> str:
-    """Download video using PoToken strategy only"""
+    """Download video using direct VM access"""
     
-    # If it's a YouTube link, use PoToken strategy
+    # If it's a YouTube link, use direct VM access
     if video_url.startswith('http') and ('youtube.com' in video_url or 'youtu.be' in video_url):
-        logger.info(f"📥 Downloading YouTube video with PoToken: {video_url}")
+        logger.info(f"📥 Downloading YouTube video with direct VM: {video_url}")
         
         try:
-            from potoken_video_processor import PoTokenVideoProcessor
+            from vm_video_processor import DirectVMVideoProcessor
             
-            # Get Node.js backend URL from environment
-            node_backend_url = os.getenv('NODE_BACKEND_URL', 'http://localhost:5000')
-            processor = PoTokenVideoProcessor(node_backend_url)
+            processor = DirectVMVideoProcessor()
             
-            logger.info(f"🔐 Using PoToken video processor...")
+            logger.info(f"🌐 Using direct VM video processor...")
             result = processor.process_video(video_url, output_filename)
             
             if result and result.get('success'):
-                logger.info(f"✅ PoToken download successful!")
+                logger.info(f"✅ Direct VM download successful!")
                 return result.get('filePath', output_filename)
             else:
-                raise Exception("PoToken processor failed")
+                raise Exception("Direct VM processor failed")
                 
         except Exception as e:
-            logger.error(f"❌ PoToken download failed: {e}")
-            raise Exception(f"PoToken video download failed: {str(e)}")
+            logger.error(f"❌ Direct VM download failed: {e}")
+            raise Exception(f"Direct VM video download failed: {str(e)}")
     
     # For non-YouTube videos, use yt-dlp directly
     else:

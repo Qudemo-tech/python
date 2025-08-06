@@ -65,6 +65,5 @@ services:
         value: "true"
       - key: PYTHONUNBUFFERED
         value: "1"
-      - key: NODE_BACKEND_URL
-        value: "https://qudemo-node-backend.onrender.com"
+      # NODE_BACKEND_URL removed - using direct VM access
 version: "1"

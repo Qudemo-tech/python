@@ -65,4 +65,6 @@ services:
         value: "true"
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: NODE_BACKEND_URL
+        value: "https://qudemo-node-backend.onrender.com"
 version: "1"

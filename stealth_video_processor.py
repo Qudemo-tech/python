@@ -81,10 +81,19 @@ class StealthVideoProcessor:
             chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
             chrome_options.add_experimental_option('useAutomationExtension', False)
             
-            # Initialize driver
+            # Get Chrome binary path
+            chrome_binary = "/usr/bin/google-chrome"
+            if not os.path.exists(chrome_binary):
+                chrome_binary = "/usr/bin/chromium-browser"
+            
+            # Set Chrome binary location
+            chrome_options.binary_location = chrome_binary
+            
+            # Initialize driver with explicit binary location
             driver = uc.Chrome(
                 options=chrome_options,
-                service=Service(ChromeDriverManager().install())
+                service=Service(ChromeDriverManager().install()),
+                browser_executable_path=chrome_binary
             )
             
             # Apply stealth patches
@@ -246,9 +255,9 @@ class StealthVideoProcessor:
             return None
     
     def download_with_ytdlp_fallback(self, video_url: str, output_path: str) -> Optional[Dict]:
-        """Fallback download using yt-dlp with enhanced headers"""
+        """Fallback download using yt-dlp with enhanced headers and cookies"""
         try:
-            logger.info("📥 Using yt-dlp fallback with enhanced headers...")
+            logger.info("📥 Using yt-dlp fallback with enhanced headers and cookies...")
             
             # Enhanced headers to mimic real browser
             headers = {
@@ -271,6 +280,7 @@ class StealthVideoProcessor:
                 'quiet': True,
                 'no_warnings': True,
                 'http_headers': headers,
+                'cookiesfrombrowser': ('chrome',),  # Try to get cookies from Chrome
                 'extractor_args': {
                     'youtube': {
                         'skip': ['dash', 'live'],
@@ -280,16 +290,51 @@ class StealthVideoProcessor:
                 }
             }
             
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Try with cookies first
+            try:
+                logger.info("🍪 Attempting download with browser cookies...")
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([video_url])
+                
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    file_size = os.path.getsize(output_path)
+                    logger.info(f"✅ Cookie-based download completed: {output_path} ({file_size} bytes)")
+                    return {
+                        'success': True,
+                        'filePath': output_path,
+                        'method': 'cookie-ytdlp',
+                        'fileSize': file_size
+                    }
+            except Exception as cookie_error:
+                logger.warning(f"⚠️ Cookie-based download failed: {cookie_error}")
+            
+            # Fallback to basic download without cookies
+            logger.info("📥 Attempting basic download without cookies...")
+            basic_opts = {
+                'outtmpl': output_path,
+                'format': 'best[ext=mp4]/best',
+                'quiet': True,
+                'no_warnings': True,
+                'http_headers': headers,
+                'extractor_args': {
+                    'youtube': {
+                        'skip': ['dash', 'live'],
+                        'player_client': ['android'],
+                        'player_skip': ['webpage', 'configs'],
+                    }
+                }
+            }
+            
+            with yt_dlp.YoutubeDL(basic_opts) as ydl:
                 ydl.download([video_url])
             
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 file_size = os.path.getsize(output_path)
-                logger.info(f"✅ Fallback download completed: {output_path} ({file_size} bytes)")
+                logger.info(f"✅ Basic download completed: {output_path} ({file_size} bytes)")
                 return {
                     'success': True,
                     'filePath': output_path,
-                    'method': 'fallback-ytdlp',
+                    'method': 'basic-ytdlp',
                     'fileSize': file_size
                 }
             else:
@@ -311,6 +356,84 @@ class StealthVideoProcessor:
             logger.error(f"❌ Failed to create cookie file: {e}")
             return None
     
+    def download_with_alternative_methods(self, video_url: str, output_path: str) -> Optional[Dict]:
+        """Try alternative yt-dlp configurations to bypass bot detection"""
+        alternative_configs = [
+            {
+                'name': 'mobile_client',
+                'opts': {
+                    'outtmpl': output_path,
+                    'format': 'best[ext=mp4]/best',
+                    'quiet': True,
+                    'no_warnings': True,
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Mobile/15E148 Safari/604.1'
+                    },
+                    'extractor_args': {
+                        'youtube': {
+                            'player_client': ['android'],
+                            'player_skip': ['webpage', 'configs'],
+                        }
+                    }
+                }
+            },
+            {
+                'name': 'web_client',
+                'opts': {
+                    'outtmpl': output_path,
+                    'format': 'best[ext=mp4]/best',
+                    'quiet': True,
+                    'no_warnings': True,
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    },
+                    'extractor_args': {
+                        'youtube': {
+                            'player_client': ['web'],
+                            'player_skip': ['configs'],
+                        }
+                    }
+                }
+            },
+            {
+                'name': 'minimal_config',
+                'opts': {
+                    'outtmpl': output_path,
+                    'format': 'best',
+                    'quiet': True,
+                    'no_warnings': True,
+                    'extractor_args': {
+                        'youtube': {
+                            'player_client': ['web'],
+                        }
+                    }
+                }
+            }
+        ]
+        
+        for config in alternative_configs:
+            try:
+                logger.info(f"🔄 Trying alternative method: {config['name']}")
+                
+                with yt_dlp.YoutubeDL(config['opts']) as ydl:
+                    ydl.download([video_url])
+                
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    file_size = os.path.getsize(output_path)
+                    logger.info(f"✅ {config['name']} method successful: {output_path} ({file_size} bytes)")
+                    return {
+                        'success': True,
+                        'filePath': output_path,
+                        'method': f'alternative-{config["name"]}',
+                        'fileSize': file_size
+                    }
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ {config['name']} method failed: {e}")
+                continue
+        
+        return None
+
     def process_video(self, video_url: str, output_filename: str) -> Optional[Dict]:
         """
         Main video processing method with stealth techniques
@@ -341,8 +464,8 @@ class StealthVideoProcessor:
                     'bypass_success': True
                 }
             
-            # If stealth fails, try fallback
-            logger.warning("⚠️ Stealth download failed, trying fallback...")
+            # If stealth fails, try fallback with cookies
+            logger.warning("⚠️ Stealth download failed, trying fallback with cookies...")
             fallback_result = self.download_with_ytdlp_fallback(video_url, output_filename)
             
             if fallback_result and fallback_result.get('success'):
@@ -350,6 +473,18 @@ class StealthVideoProcessor:
                 return {
                     **fallback_result,
                     'method': 'fallback',
+                    'bypass_success': True
+                }
+            
+            # Try alternative methods
+            logger.warning("⚠️ Fallback failed, trying alternative methods...")
+            alternative_result = self.download_with_alternative_methods(video_url, output_filename)
+            
+            if alternative_result and alternative_result.get('success'):
+                logger.info("✅ Alternative method successful")
+                return {
+                    **alternative_result,
+                    'method': 'alternative',
                     'bypass_success': True
                 }
             

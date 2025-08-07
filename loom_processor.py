@@ -77,32 +77,70 @@ class LoomVideoProcessor:
             if len(path_parts) >= 2:
                 video_id = path_parts[-1]  # Last part is usually the video ID
                 
-                # Construct API URL for Loom video
-                api_url = f"https://www.loom.com/api/campaigns/sessions/{video_id}/transcoded-video"
-                
-                logger.info(f"🔗 Fetching video from Loom API: {api_url}")
-                
-                # Fetch video info
-                response = requests.get(api_url, timeout=30)
-                response.raise_for_status()
-                
-                video_data = response.json()
-                
-                # Extract relevant info
-                video_info = {
-                    'video_id': video_id,
-                    'title': video_data.get('title', 'Unknown'),
-                    'duration': video_data.get('duration', 0),
-                    'video_url': video_data.get('url'),
-                    'thumbnail_url': video_data.get('thumbnailUrl')
+                            # Try different Loom API endpoints
+            api_urls = [
+                f"https://www.loom.com/api/campaigns/sessions/{video_id}/transcoded-video",
+                f"https://www.loom.com/api/sessions/{video_id}",
+                f"https://www.loom.com/api/v2/sessions/{video_id}"
+            ]
+            
+            video_data = None
+            for api_url in api_urls:
+                try:
+                    logger.info(f"🔗 Trying Loom API: {api_url}")
+                    response = requests.get(api_url, timeout=30)
+                    if response.status_code == 200:
+                        video_data = response.json()
+                        logger.info(f"✅ Success with API: {api_url}")
+                        break
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed with API {api_url}: {e}")
+                    continue
+            
+            if not video_data:
+                # Fallback: try to extract info from the share page
+                logger.info("🔄 Trying fallback method - extracting from share page")
+                try:
+                    share_response = requests.get(loom_url, timeout=30)
+                    if share_response.status_code == 200:
+                        # Look for video data in the page
+                        import re
+                        content = share_response.text
+                        
+                        # Try to find video URL in the page
+                        video_url_match = re.search(r'"videoUrl":"([^"]+)"', content)
+                        title_match = re.search(r'"title":"([^"]+)"', content)
+                        
+                        if video_url_match:
+                            video_data = {
+                                'url': video_url_match.group(1),
+                                'title': title_match.group(1) if title_match else 'Unknown',
+                                'duration': 0
+                            }
+                            logger.info("✅ Extracted video data from share page")
+                except Exception as e:
+                    logger.error(f"❌ Fallback method failed: {e}")
+            
+            if not video_data:
+                # Create a minimal video data structure for processing
+                logger.warning("⚠️ Could not extract video data, using minimal structure")
+                video_data = {
+                    'url': loom_url,
+                    'title': f'Loom Video - {video_id}',
+                    'duration': 0
                 }
-                
-                logger.info(f"✅ Loom video info extracted: {video_info['title']}")
-                return video_info
-                
-            else:
-                logger.error("❌ Invalid Loom URL format")
-                return None
+            
+            # Extract relevant info
+            video_info = {
+                'video_id': video_id,
+                'title': video_data.get('title', 'Unknown'),
+                'duration': video_data.get('duration', 0),
+                'video_url': video_data.get('url'),
+                'thumbnail_url': video_data.get('thumbnailUrl')
+            }
+            
+            logger.info(f"✅ Loom video info extracted: {video_info['title']}")
+            return video_info
                 
         except Exception as e:
             logger.error(f"❌ Failed to extract Loom video info: {e}")

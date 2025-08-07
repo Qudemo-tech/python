@@ -107,17 +107,46 @@ class LoomVideoProcessor:
                         import re
                         content = share_response.text
                         
-                        # Try to find video URL in the page
-                        video_url_match = re.search(r'"videoUrl":"([^"]+)"', content)
-                        title_match = re.search(r'"title":"([^"]+)"', content)
+                        # Try multiple patterns to find video URL
+                        video_url_patterns = [
+                            r'"videoUrl":"([^"]+)"',
+                            r'"url":"([^"]*\.mp4[^"]*)"',
+                            r'"video_url":"([^"]+)"',
+                            r'"src":"([^"]*\.mp4[^"]*)"',
+                            r'https://[^"]*\.mp4[^"]*'
+                        ]
                         
-                        if video_url_match:
+                        video_url = None
+                        for pattern in video_url_patterns:
+                            match = re.search(pattern, content)
+                            if match:
+                                video_url = match.group(1) if match.groups() else match.group(0)
+                                if video_url.startswith('http'):
+                                    break
+                        
+                        # Try to find title
+                        title_patterns = [
+                            r'"title":"([^"]+)"',
+                            r'"name":"([^"]+)"',
+                            r'<title>([^<]+)</title>'
+                        ]
+                        
+                        title = None
+                        for pattern in title_patterns:
+                            match = re.search(pattern, content)
+                            if match:
+                                title = match.group(1)
+                                break
+                        
+                        if video_url:
                             video_data = {
-                                'url': video_url_match.group(1),
-                                'title': title_match.group(1) if title_match else 'Unknown',
+                                'url': video_url,
+                                'title': title if title else 'Unknown',
                                 'duration': 0
                             }
-                            logger.info("✅ Extracted video data from share page")
+                            logger.info(f"✅ Extracted video data from share page: {video_url}")
+                        else:
+                            logger.warning("⚠️ No video URL found in share page")
                 except Exception as e:
                     logger.error(f"❌ Fallback method failed: {e}")
             
@@ -160,14 +189,37 @@ class LoomVideoProcessor:
         try:
             logger.info(f"📥 Downloading Loom video to: {output_path}")
             
-            response = requests.get(video_url, stream=True, timeout=60)
+            # Add headers to mimic browser request
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            }
+            
+            response = requests.get(video_url, stream=True, timeout=60, headers=headers)
             response.raise_for_status()
             
+            # Check if we got a video file
+            content_type = response.headers.get('content-type', '')
+            if not any(video_type in content_type.lower() for video_type in ['video', 'mp4', 'webm', 'ogg']):
+                logger.warning(f"⚠️ Response doesn't appear to be a video file: {content_type}")
+            
+            # Download the file
             with open(output_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
             
-            logger.info(f"✅ Loom video downloaded successfully")
+            # Verify the file is valid
+            import os
+            file_size = os.path.getsize(output_path)
+            if file_size < 1024:  # Less than 1KB
+                logger.error(f"❌ Downloaded file is too small: {file_size} bytes")
+                return False
+            
+            logger.info(f"✅ Loom video downloaded successfully: {file_size} bytes")
             return True
             
         except Exception as e:
@@ -388,6 +440,34 @@ class LoomVideoProcessor:
                 temp_video_path = temp_file.name
             
             download_success = self.download_loom_video(video_info['video_url'], temp_video_path)
+            if not download_success:
+                # Try yt-dlp as fallback
+                logger.info("🔄 Trying yt-dlp fallback for video download")
+                try:
+                    import subprocess
+                    import sys
+                    
+                    # Try to use yt-dlp if available
+                    cmd = [
+                        sys.executable, '-m', 'yt_dlp',
+                        '--format', 'best[ext=mp4]/best',
+                        '--output', temp_video_path,
+                        video_url
+                    ]
+                    
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                    
+                    if result.returncode == 0:
+                        logger.info("✅ Video downloaded successfully with yt-dlp")
+                        download_success = True
+                    else:
+                        logger.error(f"❌ yt-dlp failed: {result.stderr}")
+                        raise Exception("Failed to download video with yt-dlp")
+                        
+                except Exception as e:
+                    logger.error(f"❌ yt-dlp fallback failed: {e}")
+                    raise Exception("Failed to download video")
+            
             if not download_success:
                 raise Exception("Failed to download video")
             

@@ -166,7 +166,7 @@ def answer_question(company_name, question):
             
             response = openai.chat.completions.create(
                 model="gpt-3.5-turbo",
-                messages=[
+            messages=[
                     {"role": "system", "content": "You are a helpful assistant that answers questions based on video transcriptions. Be concise and accurate."},
                     {"role": "user", "content": prompt}
                 ],
@@ -432,7 +432,7 @@ async def generate_summary_endpoint(request: GenerateSummaryRequest):
                 'success': False,
                 'error': f"Summary generation failed: {str(e)}"
             }
-        
+            
     except Exception as e:
         logger.error(f"❌ Summary endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -201,6 +201,10 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
     try:
         logger.info(f"🎯 Processing video: {video_url}")
         
+        # Generate a unique video ID
+        video_id = str(uuid.uuid4())
+        logger.info(f"🎬 Generated video ID: {video_id}")
+        
         # Check if it's a YouTube URL
         if 'youtube.com' in video_url or 'youtu.be' in video_url:
             logger.info("📺 YouTube video detected, using Gemini transcription")
@@ -211,6 +215,7 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
                     logger.info(f"✅ YouTube video processed successfully with Gemini")
                     return {
                         'success': True,
+                        'video_id': video_id,
                         'method': 'gemini_transcription',
                         'title': result.get('title', 'Unknown'),
                         'chunks_created': result.get('chunks_created', 0),
@@ -234,6 +239,7 @@ def process_video(video_url, company_name, bucket_name, source=None, meeting_lin
                     logger.info(f"✅ Loom video processed successfully")
                     return {
                         'success': True,
+                        'video_id': video_id,
                         'method': 'loom_transcription',
                         'title': result.get('title', 'Unknown'),
                         'chunks_created': result.get('chunks_created', 0),

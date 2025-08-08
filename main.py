@@ -32,10 +32,7 @@ from qa_system import (
 from health_checks import (
     get_system_status,
     get_memory_status,
-    get_health_check,
-    get_debug_videos,
-    get_debug_qa_test,
-    get_debug_chunks
+    get_health_check
 )
 
 # Configure logging
@@ -209,21 +206,7 @@ async def health_check():
     """Health check endpoint"""
     return get_health_check()
 
-# Debug Endpoints
-@app.get("/debug/videos")
-async def debug_videos():
-    """Debug endpoint to show video mappings"""
-    return get_debug_videos()
 
-@app.get("/debug/qa-test/{company_name}")
-async def debug_qa_test(company_name: str, question: str = "What is this video about?"):
-    """Debug endpoint to test Q&A functionality"""
-    return get_debug_qa_test(company_name, question)
-
-@app.get("/debug/chunks/{company_name}")
-async def debug_chunks(company_name: str, question: str = "spotlight feature"):
-    """Debug endpoint to inspect raw Pinecone chunks"""
-    return get_debug_chunks(company_name, question)
 
 # Startup and shutdown events are now handled by the lifespan event handler above
 

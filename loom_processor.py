@@ -256,6 +256,18 @@ class LoomVideoProcessor:
             }
             
             logger.info(f"✅ Transcription completed: {transcription_data['word_count']} words")
+            logger.info(f"🌐 Language: {transcription_data.get('language', 'Unknown')}")
+            
+            # Log the full transcription content
+            transcription_text = transcription_data.get('transcription', '')
+            if transcription_text:
+                logger.info("📄 FULL TRANSCRIPTION CONTENT:")
+                logger.info("=" * 80)
+                logger.info(transcription_text[:2000] + ("..." if len(transcription_text) > 2000 else ""))
+                logger.info("=" * 80)
+                if len(transcription_text) > 2000:
+                    logger.info(f"📄 (Showing first 2000 characters of {len(transcription_text)} total)")
+            
             return transcription_data
             
         except Exception as e:

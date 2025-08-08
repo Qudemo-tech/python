@@ -1,0 +1,34 @@
+YouTube Video URL: https://www.youtube.com/watch?v=WA4N_3Fdk2A
+
+Title: YouTube Video
+Duration: Unknown
+Language: en
+Word Count: 697
+Method: gemini_fileData_analysis
+
+--- TRANSCRIPTION ---
+(Music intro)
+
+Hey everyone, welcome back to the channel. Today we're gonna be talking about something super exciting, and that is building a tiny house on wheels.  Specifically, we're gonna be focusing on the electrical system, which is probably one of the most important parts of building a tiny house.  Getting it right is crucial for comfort and safety.
+
+So let's dive right in. Now, before we get started, I want to preface this by saying that I'm not an electrician, and this is not a substitute for professional advice.  This is just my experience and what I did on my own tiny house build. Always, always, always consult with a qualified electrician before you start any electrical work.
+
+Okay, so the first thing we need to do is plan out our electrical system. This involves figuring out where all our appliances and lights are going to be, and how much power each one is going to need.  It's a good idea to make a detailed plan, maybe even a diagram, so you can visualize everything and make sure you have enough capacity.  We'll be using a 12 volt system for our tiny house, primarily because it's more efficient for off-grid living. However, you can certainly use a 120 volt system if you're connected to the grid.  We’ll be using a combination of solar panels, batteries, and an inverter to power our tiny house.  We'll go into detail about each of these components later.
+
+Next, we need to choose our wiring. I chose 12 gauge wire for most of the circuits in our tiny house, as it's rated for up to 20 amps. This is more than sufficient for our needs.  Make sure you use the correct gauge wire for your specific needs.  You don't want to use wire that's too thin, otherwise you risk overheating and fire hazards.
+
+Once you've got your wiring chosen, you can start running the wires. This is probably the most time-consuming part of the process.  Make sure you use wire connectors, and secure the wires properly.  We used zip ties to keep everything neat and organized. Neatness is super important, especially if you plan on opening up your walls again at some point.
+
+Next up is installing your electrical panel.  This is where all the wires from your appliances and lights will come together.  There are different types of panels available, so make sure to choose one that's appropriate for your needs.  We used a 12 volt panel, and we made sure to get it professionally inspected before using it.  Remember always to turn off the power before working on any electrical components. Safety first!
+
+After the panel, we'll install the outlets, switches, and lights.  Make sure you're using the correct type of outlets and switches for your system.  We used standard 12 volt outlets and switches, and we made sure to label everything clearly. Labeling is important, so you know where everything goes.
+
+Then we'll install the solar panels.  This part will vary depending on your setup, but the basic idea is to mount the panels on your roof and connect them to a charge controller.  The charge controller regulates the power going into your batteries.  We used a MPPT charge controller, as they are more efficient than PWM controllers.
+
+Next, we'll connect the batteries.  Make sure to connect the batteries in the correct configuration, and to use the correct type of connectors. Again, safety is paramount.  We use deep cycle batteries, specifically designed for this kind of application.
+
+Finally, we'll install the inverter. This is the component that converts the 12 volt DC power from your batteries into 120 volt AC power that your appliances need.  We chose an inverter that’s powerful enough to handle all of our appliances, and we made sure to adequately vent the inverter, as they can produce a lot of heat.
+
+And there you have it, a basic overview of how to install an electrical system in a tiny house on wheels.  Remember this is just a guide, and you need to always consult with a qualified electrician.  Safety is crucial, and it’s never worth cutting corners when it comes to electricity.
+
+(Music outro)

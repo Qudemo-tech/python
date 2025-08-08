@@ -201,24 +201,27 @@ class LoomVideoProcessor:
             
             response = requests.get(video_url, stream=True, timeout=60, headers=headers)
             response.raise_for_status()
-            
-            # Check if we got a video file
-            content_type = response.headers.get('content-type', '')
-            if not any(video_type in content_type.lower() for video_type in ['video', 'mp4', 'webm', 'ogg']):
-                logger.warning(f"⚠️ Response doesn't appear to be a video file: {content_type}")
-            
+
+            # Check if we got a video file. Loom share pages return text/html; treat that as failure
+            content_type = response.headers.get('content-type', '').lower()
+            is_video_like = any(t in content_type for t in ['video', 'mp4', 'webm', 'ogg', 'application/octet-stream'])
+            if not is_video_like:
+                logger.warning(f"⚠️ Response doesn't appear to be a video file (content-type: {content_type}). Will use yt-dlp fallback.")
+                return False
+
             # Download the file
             with open(output_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            
+                    if chunk:
+                        f.write(chunk)
+
             # Verify the file is valid
             import os
             file_size = os.path.getsize(output_path)
             if file_size < 1024:  # Less than 1KB
                 logger.error(f"❌ Downloaded file is too small: {file_size} bytes")
                 return False
-            
+
             logger.info(f"✅ Loom video downloaded successfully: {file_size} bytes")
             return True
             
@@ -446,24 +449,50 @@ class LoomVideoProcessor:
                 try:
                     import subprocess
                     import sys
-                    
-                    # Try to use yt-dlp if available
+
+                    # Ensure parent dir exists and remove any empty pre-created file
+                    os.makedirs(os.path.dirname(temp_video_path), exist_ok=True)
+                    try:
+                        if os.path.exists(temp_video_path) and os.path.getsize(temp_video_path) == 0:
+                            os.remove(temp_video_path)
+                            logger.info("🧹 Removed empty temp file before yt-dlp download")
+                    except Exception:
+                        pass
+
+                    # Use yt-dlp to download the best available format and merge to mp4 if needed
                     cmd = [
                         sys.executable, '-m', 'yt_dlp',
-                        '--format', 'best[ext=mp4]/best',
+                        '--no-warnings',
+                        '--retries', '3', '--fragment-retries', '3',
+                        '--restrict-filenames',
+                        '--merge-output-format', 'mp4',
+                        '--force-overwrites',
+                        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        '--referer', 'https://www.loom.com/',
+                        '--add-header', 'Origin: https://www.loom.com',
+                        '--add-header', 'Sec-Fetch-Mode: navigate',
                         '--output', temp_video_path,
                         video_url
                     ]
-                    
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-                    
-                    if result.returncode == 0:
+
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+
+                    # yt-dlp may append extension; normalize to expected path
+                    if result.returncode == 0 and not os.path.exists(temp_video_path):
+                        candidate_mp4 = temp_video_path if temp_video_path.endswith('.mp4') else f"{temp_video_path}.mp4"
+                        if os.path.exists(candidate_mp4):
+                            try:
+                                os.replace(candidate_mp4, temp_video_path)
+                            except Exception:
+                                pass
+
+                    if result.returncode == 0 and os.path.exists(temp_video_path) and os.path.getsize(temp_video_path) > 1024:
                         logger.info("✅ Video downloaded successfully with yt-dlp")
                         download_success = True
                     else:
-                        logger.error(f"❌ yt-dlp failed: {result.stderr}")
+                        logger.error(f"❌ yt-dlp failed (code {result.returncode}): {result.stderr or result.stdout}")
                         raise Exception("Failed to download video with yt-dlp")
-                        
+
                 except Exception as e:
                     logger.error(f"❌ yt-dlp fallback failed: {e}")
                     raise Exception("Failed to download video")

@@ -24,6 +24,7 @@ pinecone>=3.0.0
 # AI/ML
 openai>=1.0.0
 openai-whisper>=20231117
+yt-dlp>=2024.4.9
 
 # Google Gemini API
 google-generativeai>=0.3.0

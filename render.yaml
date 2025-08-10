@@ -1,0 +1,69 @@
+# Exported from Render on 2025-07-14T11:53:59Z
+services:
+  - type: web
+    name: python
+    runtime: python
+    repo: https://github.com/Qudemo-tech/python
+    plan: starter
+    buildCommand: |
+      # Clear any corrupted cache
+      rm -rf /opt/render/project/src/.git/objects/pack/*.pack || true
+      rm -rf /opt/render/project/src/.git/objects/pack/*.idx || true
+      
+      # Update package lists and install system dependencies
+      apt-get update -qq
+      apt-get install -y -qq ffmpeg curl wget
+      
+      # Verify ffmpeg installation
+      ffmpeg -version || exit 1
+      
+      # Install Python dependencies with retry logic
+      pip install --upgrade pip setuptools wheel
+      pip install -r requirements-python312.txt --no-cache-dir
+      
+      # Verify critical dependencies
+      python -c "import openai, whisper, yt_dlp, fastapi; print('✅ All dependencies installed successfully')"
+    startCommand: python main.py
+    autoDeployTrigger: commit
+    region: oregon
+    timeout: 1800  # 30 minutes timeout for video processing
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: PINECONE_INDEX
+        sync: false
+      - key: PINECONE_ENV
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: GCS_BUCKET_NAME
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: GOOGLE_CLOUD_PROJECT_ID
+        sync: false
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PORT
+        sync: false
+      - key: LOOM_API_KEY
+        sync: false
+      - key: NODE_ENV
+        value: production
+      - key: MAX_MEMORY_MB
+        value: "400"
+      - key: RENDER
+        value: "true"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # NODE_BACKEND_URL removed - using direct VM access
+version: "1"

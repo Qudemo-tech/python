@@ -266,7 +266,6 @@ async def force_cleanup():
     except Exception as e:
         return {"error": str(e)}
 
-
 # Startup and shutdown events are now handled by the lifespan event handler above
 
 # Main entry point

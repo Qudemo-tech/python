@@ -50,6 +50,9 @@ class LoomVideoProcessor:
         self.memory_threshold = 1800  # MB - trigger cleanup at 1.8GB
         self.max_video_size = 100 * 1024 * 1024  # 100MB max video size
         
+        # Use tiny model for tutorial videos (perfect balance of speed, memory, and accuracy)
+        self.model_strategy = "tiny"
+        
         logger.info("🔧 Initializing Loom Video Processor (Memory Optimized)...")
     
     def check_memory_usage(self) -> float:
@@ -82,7 +85,7 @@ class LoomVideoProcessor:
             logger.error(f"❌ Memory cleanup failed: {e}")
     
     def get_whisper_model(self):
-        """Lazy load Whisper model with memory management"""
+        """Lazy load Whisper tiny model (perfect for tutorial videos)"""
         if self._whisper_model is None:
             # Check memory before loading
             memory_mb = self.check_memory_usage()
@@ -90,19 +93,19 @@ class LoomVideoProcessor:
                 logger.warning(f"⚠️ High memory usage ({memory_mb:.1f}MB) before loading Whisper")
                 self.cleanup_memory()
             
-            logger.info("🎤 Loading Whisper model (base)...")
+            logger.info("🎤 Loading Whisper model (tiny) - perfect for tutorial videos...")
             try:
-                self._whisper_model = whisper.load_model("base")
-                logger.info("✅ Whisper model loaded successfully")
+                self._whisper_model = whisper.load_model("tiny")
+                logger.info("✅ Whisper model (tiny) loaded successfully")
                 
                 # Check memory after loading
                 memory_mb = self.check_memory_usage()
                 logger.info(f"💾 Memory after Whisper load: {memory_mb:.1f} MB")
                 
             except Exception as e:
-                logger.error(f"❌ Failed to load Whisper model: {e}")
+                logger.error(f"❌ Failed to load Whisper model (tiny): {e}")
                 raise
-        return self._whisper_model
+                return self._whisper_model
     
     def is_loom_url(self, url: str) -> bool:
         """Check if URL is a Loom URL"""

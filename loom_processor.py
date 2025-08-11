@@ -517,98 +517,28 @@ class LoomVideoProcessor:
             if file_size_mb > 50:
                 logger.warning(f"⚠️ Large video file ({file_size_mb:.1f}MB), transcription may be slow")
             
-            # Transcribe video with memory monitoring and timeout
+            # Transcribe video with memory monitoring
             logger.info("🎤 Starting Whisper transcription...")
             
-            # Set transcription timeout based on video length
-            import subprocess
+            # Check memory before transcription
+            memory_mb = self.check_memory_usage()
+            if memory_mb > self.memory_threshold:
+                logger.warning(f"⚠️ High memory before transcription ({memory_mb:.1f}MB), performing cleanup")
+                self.cleanup_memory()
+            
+            # Simple transcription without complex threading
             try:
-                # Get video duration using ffprobe
-                duration_cmd = [
-                    'ffprobe', '-v', 'quiet', '-show_entries', 'format=duration', 
-                    '-of', 'default=noprint_wrappers=1:nokey=1', video_path
-                ]
-                duration_result = subprocess.run(duration_cmd, capture_output=True, text=True, timeout=30)
-                if duration_result.returncode == 0:
-                    duration = float(duration_result.stdout.strip())
-                    # Set timeout: 2x video duration + 60s buffer, max 300s
-                    transcription_timeout = min(duration * 2 + 60, 300)
-                    logger.info(f"⏱️ Video duration: {duration:.1f}s, transcription timeout: {transcription_timeout:.1f}s")
-                else:
-                    transcription_timeout = 300  # Default 5 minutes
-                    logger.warning(f"⚠️ Could not determine video duration, using default timeout: {transcription_timeout}s")
+                result = model.transcribe(
+                    video_path,
+                    word_timestamps=True,  # Enable word-level timestamps for precision
+                    verbose=False
+                )
+                logger.info("✅ Transcription completed successfully")
             except Exception as e:
-                transcription_timeout = 300  # Default 5 minutes
-                logger.warning(f"⚠️ Error getting video duration, using default timeout: {transcription_timeout}s")
-            
-            # Use threading to implement timeout for transcription
-            import threading
-            import time
-            
-            transcription_result = None
-            transcription_error = None
-            transcription_completed = threading.Event()
-            
-            def transcribe_with_timeout():
-                nonlocal transcription_result, transcription_error
+                logger.error(f"❌ Standard transcription failed: {e}")
+                # Try lightweight transcription as fallback
+                logger.info("🎤 Attempting lightweight transcription...")
                 try:
-                    # Check memory before starting transcription
-                    memory_mb = self.check_memory_usage()
-                    if memory_mb > self.memory_threshold:
-                        logger.warning(f"⚠️ High memory before transcription ({memory_mb:.1f}MB), performing cleanup")
-                        self.cleanup_memory()
-                    
-                    transcription_result = model.transcribe(
-                        video_path,
-                        word_timestamps=True,  # Enable word-level timestamps for precision
-                        verbose=False
-                    )
-                    transcription_completed.set()
-                except Exception as e:
-                    transcription_error = e
-                    transcription_completed.set()
-            
-            # Start transcription in separate thread
-            transcription_thread = threading.Thread(target=transcribe_with_timeout)
-            transcription_thread.start()
-            
-            # Monitor transcription progress
-            start_time = time.time()
-            last_progress_time = start_time
-            
-            # Wait for completion or timeout with progress monitoring
-            while not transcription_completed.is_set():
-                if time.time() - start_time > transcription_timeout:
-                    break
-                
-                # Check progress every 10 seconds
-                if time.time() - last_progress_time > 10:
-                    elapsed = time.time() - start_time
-                    memory_mb = self.check_memory_usage()
-                    logger.info(f"⏱️ Transcription in progress... Elapsed: {elapsed:.1f}s, Memory: {memory_mb:.1f}MB")
-                    last_progress_time = time.time()
-                
-                time.sleep(1)  # Check every second
-            
-            if transcription_completed.is_set():
-                if transcription_error:
-                    raise transcription_error
-                result = transcription_result
-                logger.info(f"✅ Transcription completed in thread")
-            else:
-                # Timeout occurred - try lightweight transcription
-                logger.warning(f"⚠️ Standard transcription timed out after {transcription_timeout}s, trying lightweight mode...")
-                
-                # Try lightweight transcription with reduced settings
-                try:
-                    logger.info("🎤 Attempting lightweight transcription...")
-                    
-                    # Clean up memory before lightweight attempt
-                    memory_mb = self.check_memory_usage()
-                    if memory_mb > self.memory_threshold:
-                        logger.warning(f"⚠️ High memory before lightweight transcription ({memory_mb:.1f}MB), performing cleanup")
-                        self.cleanup_memory()
-                    
                     result = model.transcribe(
                         video_path,
                         word_timestamps=False,  # Disable word timestamps to save memory
@@ -616,9 +546,9 @@ class LoomVideoProcessor:
                         fp16=False  # Disable fp16 to save memory
                     )
                     logger.info("✅ Lightweight transcription completed")
-                except Exception as e:
-                    logger.error(f"❌ Lightweight transcription also failed: {e}")
-                    raise Exception(f"Both standard and lightweight transcription failed. Standard timeout: {transcription_timeout}s, lightweight error: {e}")
+                except Exception as e2:
+                    logger.error(f"❌ Lightweight transcription also failed: {e2}")
+                    raise Exception(f"Both standard and lightweight transcription failed. Standard error: {e}, lightweight error: {e2}")
             
             # Check memory after transcription
             memory_mb = self.check_memory_usage()
@@ -658,15 +588,35 @@ class LoomVideoProcessor:
             logger.info(f"🌐 Language: {transcription_data.get('language', 'Unknown')}")
             logger.info(f"📊 Enhanced segments created: {len(enhanced_segments)}")
             
-            # Log the full transcription content (truncated for memory)
+            # Log the full transcription content with detailed breakdown
             transcription_text = transcription_data.get('transcription', '')
             if transcription_text:
-                logger.info("📄 TRANSCRIPTION PREVIEW:")
+                logger.info("📄 FULL TRANSCRIPTION:")
                 logger.info("=" * 80)
-                logger.info(transcription_text[:1000] + ("..." if len(transcription_text) > 1000 else ""))
+                logger.info(transcription_text)
                 logger.info("=" * 80)
-                if len(transcription_text) > 1000:
-                    logger.info(f"📄 (Showing first 1000 characters of {len(transcription_text)} total)")
+                logger.info(f"📊 Total transcription length: {len(transcription_text)} characters")
+                logger.info(f"📊 Total words: {transcription_data['word_count']}")
+            
+            # Log detailed segment information
+            segments = transcription_data.get('segments', [])
+            if segments:
+                logger.info("⏰ TRANSCRIPTION SEGMENTS WITH TIMESTAMPS:")
+                logger.info("=" * 80)
+                for i, segment in enumerate(segments, 1):
+                    start_time = segment.get('start', 0)
+                    end_time = segment.get('end', 0)
+                    text = segment.get('text', '').strip()
+                    
+                    # Format timestamps as MM:SS
+                    start_formatted = f"{int(start_time//60):02d}:{int(start_time%60):02d}"
+                    end_formatted = f"{int(end_time//60):02d}:{int(end_time%60):02d}"
+                    
+                    logger.info(f"Segment {i:2d} [{start_formatted} → {end_formatted}] ({end_time-start_time:.1f}s):")
+                    logger.info(f"  \"{text}\"")
+                    logger.info("")
+                logger.info("=" * 80)
+                logger.info(f"📊 Total segments: {len(segments)}")
             
             # Cleanup memory after transcription
             self.cleanup_memory()
@@ -991,6 +941,26 @@ class LoomVideoProcessor:
                 if not chunks:
                     raise Exception("Failed to create chunks")
                 
+                # Log detailed chunk information
+                logger.info(f"✅ Created {len(chunks)} timestamped chunks")
+                logger.info("📦 TRANSCRIPTION CHUNKS WITH TIMESTAMPS:")
+                logger.info("=" * 80)
+                for i, chunk in enumerate(chunks, 1):
+                    start_time = chunk.get('start', 0)
+                    end_time = chunk.get('end', 0)
+                    text = chunk.get('text', '').strip()
+                    
+                    # Format timestamps as MM:SS
+                    start_formatted = f"{int(start_time//60):02d}:{int(start_time%60):02d}"
+                    end_formatted = f"{int(end_time//60):02d}:{int(end_time%60):02d}"
+                    
+                    logger.info(f"Chunk {i:2d} [{start_formatted} → {end_formatted}] ({end_time-start_time:.1f}s):")
+                    logger.info(f"  \"{text}\"")
+                    logger.info("")
+                logger.info("=" * 80)
+                logger.info(f"📊 Total chunks: {len(chunks)}")
+                logger.info(f"📊 Average chunk duration: {sum(chunk.get('end', 0) - chunk.get('start', 0) for chunk in chunks) / len(chunks):.1f}s")
+                
                 # Check memory before embeddings
                 memory_mb = self.check_memory_usage()
                 if memory_mb > self.memory_threshold:
@@ -1175,6 +1145,16 @@ class LoomVideoProcessor:
                 
                 logger.info(f"✅ Lightweight transcription completed: {transcription_data['word_count']} words")
                 
+                # Log full transcription for lightweight mode
+                transcription_text = transcription_data.get('transcription', '')
+                if transcription_text:
+                    logger.info("📄 FULL TRANSCRIPTION (LIGHTWEIGHT MODE):")
+                    logger.info("=" * 80)
+                    logger.info(transcription_text)
+                    logger.info("=" * 80)
+                    logger.info(f"📊 Total transcription length: {len(transcription_text)} characters")
+                    logger.info(f"📊 Total words: {transcription_data['word_count']}")
+                
                 # Check memory after transcription
                 memory_mb = self.check_memory_usage()
                 logger.info(f"💾 Memory after transcription: {memory_mb:.1f} MB")
@@ -1205,6 +1185,18 @@ class LoomVideoProcessor:
                         break
                 
                 logger.info(f"📄 Created {len(chunks)} simple chunks")
+                
+                # Log detailed chunk information for lightweight mode
+                logger.info("📦 SIMPLE CHUNKS (LIGHTWEIGHT MODE):")
+                logger.info("=" * 80)
+                for i, chunk in enumerate(chunks, 1):
+                    text = chunk.get('text', '').strip()
+                    logger.info(f"Chunk {i:2d} (No timestamps):")
+                    logger.info(f"  \"{text}\"")
+                    logger.info("")
+                logger.info("=" * 80)
+                logger.info(f"📊 Total chunks: {len(chunks)}")
+                logger.info(f"📊 Average chunk size: {sum(len(chunk.get('text', '')) for chunk in chunks) / len(chunks):.0f} characters")
                 
                 # Check memory before embeddings
                 memory_mb = self.check_memory_usage()

@@ -514,13 +514,108 @@ class LoomVideoProcessor:
             if file_size_mb > 50:
                 logger.warning(f"⚠️ Large video file ({file_size_mb:.1f}MB), transcription may be slow")
             
-            # Transcribe video with memory monitoring
+            # Transcribe video with memory monitoring and timeout
             logger.info("🎤 Starting Whisper transcription...")
-            result = model.transcribe(
-                video_path,
-                word_timestamps=True,  # Enable word-level timestamps for precision
-                verbose=False
-            )
+            
+            # Set transcription timeout based on video length
+            import subprocess
+            try:
+                # Get video duration using ffprobe
+                duration_cmd = [
+                    'ffprobe', '-v', 'quiet', '-show_entries', 'format=duration', 
+                    '-of', 'default=noprint_wrappers=1:nokey=1', video_path
+                ]
+                duration_result = subprocess.run(duration_cmd, capture_output=True, text=True, timeout=30)
+                if duration_result.returncode == 0:
+                    duration = float(duration_result.stdout.strip())
+                    # Set timeout: 2x video duration + 60s buffer, max 300s
+                    transcription_timeout = min(duration * 2 + 60, 300)
+                    logger.info(f"⏱️ Video duration: {duration:.1f}s, transcription timeout: {transcription_timeout:.1f}s")
+                else:
+                    transcription_timeout = 300  # Default 5 minutes
+                    logger.warning(f"⚠️ Could not determine video duration, using default timeout: {transcription_timeout}s")
+            except Exception as e:
+                transcription_timeout = 300  # Default 5 minutes
+                logger.warning(f"⚠️ Error getting video duration, using default timeout: {transcription_timeout}s")
+            
+            # Use threading to implement timeout for transcription
+            import threading
+            import time
+            
+            transcription_result = None
+            transcription_error = None
+            transcription_completed = threading.Event()
+            
+            def transcribe_with_timeout():
+                nonlocal transcription_result, transcription_error
+                try:
+                    # Check memory before starting transcription
+                    memory_mb = self.check_memory_usage()
+                    if memory_mb > self.memory_threshold:
+                        logger.warning(f"⚠️ High memory before transcription ({memory_mb:.1f}MB), performing cleanup")
+                        self.cleanup_memory()
+                    
+                    transcription_result = model.transcribe(
+                        video_path,
+                        word_timestamps=True,  # Enable word-level timestamps for precision
+                        verbose=False
+                    )
+                    transcription_completed.set()
+                except Exception as e:
+                    transcription_error = e
+                    transcription_completed.set()
+            
+            # Start transcription in separate thread
+            transcription_thread = threading.Thread(target=transcribe_with_timeout)
+            transcription_thread.start()
+            
+            # Monitor transcription progress
+            start_time = time.time()
+            last_progress_time = start_time
+            
+            # Wait for completion or timeout with progress monitoring
+            while not transcription_completed.is_set():
+                if time.time() - start_time > transcription_timeout:
+                    break
+                
+                # Check progress every 10 seconds
+                if time.time() - last_progress_time > 10:
+                    elapsed = time.time() - start_time
+                    memory_mb = self.check_memory_usage()
+                    logger.info(f"⏱️ Transcription in progress... Elapsed: {elapsed:.1f}s, Memory: {memory_mb:.1f}MB")
+                    last_progress_time = time.time()
+                
+                time.sleep(1)  # Check every second
+            
+            if transcription_completed.is_set():
+                if transcription_error:
+                    raise transcription_error
+                result = transcription_result
+                logger.info(f"✅ Transcription completed in thread")
+            else:
+                # Timeout occurred - try lightweight transcription
+                logger.warning(f"⚠️ Standard transcription timed out after {transcription_timeout}s, trying lightweight mode...")
+                
+                # Try lightweight transcription with reduced settings
+                try:
+                    logger.info("🎤 Attempting lightweight transcription...")
+                    
+                    # Clean up memory before lightweight attempt
+                    memory_mb = self.check_memory_usage()
+                    if memory_mb > self.memory_threshold:
+                        logger.warning(f"⚠️ High memory before lightweight transcription ({memory_mb:.1f}MB), performing cleanup")
+                        self.cleanup_memory()
+                    
+                    result = model.transcribe(
+                        video_path,
+                        word_timestamps=False,  # Disable word timestamps to save memory
+                        verbose=False,
+                        fp16=False  # Disable fp16 to save memory
+                    )
+                    logger.info("✅ Lightweight transcription completed")
+                except Exception as e:
+                    logger.error(f"❌ Lightweight transcription also failed: {e}")
+                    raise Exception(f"Both standard and lightweight transcription failed. Standard timeout: {transcription_timeout}s, lightweight error: {e}")
             
             # Check memory after transcription
             memory_mb = self.check_memory_usage()

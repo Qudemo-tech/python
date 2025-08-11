@@ -66,15 +66,15 @@ class LoomVideoProcessor:
             logger.error(f"❌ Failed to check memory: {e}")
             return 0.0
     
-    def cleanup_memory(self):
+    def cleanup_memory(self, preserve_whisper: bool = False):
         """Force garbage collection and memory cleanup"""
         try:
             logger.info("🧹 Performing memory cleanup...")
             gc.collect()
             
-            # Clear Whisper model if memory is high
+            # Clear Whisper model if memory is high (unless preserve_whisper is True)
             memory_mb = self.check_memory_usage()
-            if memory_mb > self.memory_threshold and self._whisper_model:
+            if memory_mb > self.memory_threshold and self._whisper_model and not preserve_whisper:
                 logger.warning(f"⚠️ High memory usage ({memory_mb:.1f}MB), clearing Whisper model")
                 del self._whisper_model
                 self._whisper_model = None
@@ -105,7 +105,10 @@ class LoomVideoProcessor:
             except Exception as e:
                 logger.error(f"❌ Failed to load Whisper model (tiny): {e}")
                 raise
-                return self._whisper_model
+        else:
+            logger.info(f"🎤 Using existing Whisper model: {type(self._whisper_model).__name__}")
+        
+        return self._whisper_model
     
     def is_loom_url(self, url: str) -> bool:
         """Check if URL is a Loom URL"""
@@ -524,10 +527,17 @@ class LoomVideoProcessor:
             memory_mb = self.check_memory_usage()
             if memory_mb > self.memory_threshold:
                 logger.warning(f"⚠️ High memory before transcription ({memory_mb:.1f}MB), performing cleanup")
-                self.cleanup_memory()
+                self.cleanup_memory(preserve_whisper=True)  # Preserve Whisper model during transcription
             
             # Simple transcription without complex threading
             try:
+                # Ensure model is available
+                if model is None:
+                    logger.warning("⚠️ Model is None, reloading...")
+                    model = self.get_whisper_model()
+                
+                logger.info(f"🎤 Model status before transcription: {type(model).__name__ if model else 'None'}")
+                
                 result = model.transcribe(
                     video_path,
                     word_timestamps=True,  # Enable word-level timestamps for precision
@@ -539,6 +549,11 @@ class LoomVideoProcessor:
                 # Try lightweight transcription as fallback
                 logger.info("🎤 Attempting lightweight transcription...")
                 try:
+                    # Ensure model is still available
+                    if model is None:
+                        logger.warning("⚠️ Model was cleared, reloading...")
+                        model = self.get_whisper_model()
+                    
                     result = model.transcribe(
                         video_path,
                         word_timestamps=False,  # Disable word timestamps to save memory
@@ -618,15 +633,15 @@ class LoomVideoProcessor:
                 logger.info("=" * 80)
                 logger.info(f"📊 Total segments: {len(segments)}")
             
-            # Cleanup memory after transcription
-            self.cleanup_memory()
+            # Cleanup memory after transcription (preserve Whisper model)
+            self.cleanup_memory(preserve_whisper=True)
             
             return transcription_data
             
         except Exception as e:
             logger.error(f"❌ Transcription failed: {e}")
-            # Cleanup on error
-            self.cleanup_memory()
+            # Cleanup on error (preserve Whisper model for retry)
+            self.cleanup_memory(preserve_whisper=True)
             return None
     
     def chunk_transcription(

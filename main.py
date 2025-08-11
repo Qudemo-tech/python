@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from dotenv import load_dotenv
+from datetime import datetime
 
 # Load environment variables from .env file
 load_dotenv()
@@ -206,6 +207,64 @@ async def health_check():
     """Health check endpoint"""
     return get_health_check()
 
+@app.get("/memory-debug")
+async def memory_debug():
+    """Detailed memory debugging endpoint"""
+    try:
+        import psutil
+        import gc
+        
+        # Get process info
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        memory_mb = memory_info.rss / 1024 / 1024
+        
+        # Get system memory
+        system_memory = psutil.virtual_memory()
+        
+        # Force garbage collection
+        gc.collect()
+        
+        # Get memory after GC
+        memory_after_gc = process.memory_info().rss / 1024 / 1024
+        
+        return {
+            "process_memory_mb": memory_mb,
+            "memory_after_gc_mb": memory_after_gc,
+            "memory_freed_mb": memory_mb - memory_after_gc,
+            "system_total_mb": system_memory.total / 1024 / 1024,
+            "system_available_mb": system_memory.available / 1024 / 1024,
+            "system_percent": system_memory.percent,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/force-cleanup")
+async def force_cleanup():
+    """Force memory cleanup"""
+    try:
+        import gc
+        import psutil
+        
+        # Get memory before cleanup
+        process = psutil.Process()
+        memory_before = process.memory_info().rss / 1024 / 1024
+        
+        # Force garbage collection
+        gc.collect()
+        
+        # Get memory after cleanup
+        memory_after = process.memory_info().rss / 1024 / 1024
+        
+        return {
+            "memory_before_mb": memory_before,
+            "memory_after_mb": memory_after,
+            "memory_freed_mb": memory_before - memory_after,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # Startup and shutdown events are now handled by the lifespan event handler above

@@ -2,12 +2,15 @@
 """
 Loom Video Processor
 Handles Loom video processing with transcription and vector storage
+Optimized for Render's 2GB memory constraint
 """
 
 import os
 import logging
 import time
 import json
+import gc
+import psutil
 from typing import Dict, Optional, List
 import requests
 import tempfile
@@ -40,17 +43,65 @@ class LoomVideoProcessor:
         self.pc = Pinecone(api_key=pinecone_api_key)
         self.default_index_name = os.getenv("PINECONE_INDEX", "qudemo-core")
         
-        # Initialize Whisper model (lazy loading)
+        # Initialize Whisper model (lazy loading with memory management)
         self._whisper_model = None
         
-        logger.info("🔧 Initializing Loom Video Processor...")
+        # Memory management
+        self.memory_threshold = 1800  # MB - trigger cleanup at 1.8GB
+        self.max_video_size = 100 * 1024 * 1024  # 100MB max video size
+        
+        logger.info("🔧 Initializing Loom Video Processor (Memory Optimized)...")
+    
+    def check_memory_usage(self) -> float:
+        """Check current memory usage and log it"""
+        try:
+            process = psutil.Process()
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            logger.info(f"💾 Current memory usage: {memory_mb:.1f} MB")
+            return memory_mb
+        except Exception as e:
+            logger.error(f"❌ Failed to check memory: {e}")
+            return 0.0
+    
+    def cleanup_memory(self):
+        """Force garbage collection and memory cleanup"""
+        try:
+            logger.info("🧹 Performing memory cleanup...")
+            gc.collect()
+            
+            # Clear Whisper model if memory is high
+            memory_mb = self.check_memory_usage()
+            if memory_mb > self.memory_threshold and self._whisper_model:
+                logger.warning(f"⚠️ High memory usage ({memory_mb:.1f}MB), clearing Whisper model")
+                del self._whisper_model
+                self._whisper_model = None
+                gc.collect()
+            
+            logger.info("✅ Memory cleanup completed")
+        except Exception as e:
+            logger.error(f"❌ Memory cleanup failed: {e}")
     
     def get_whisper_model(self):
-        """Lazy load Whisper model"""
+        """Lazy load Whisper model with memory management"""
         if self._whisper_model is None:
-            logger.info("🎤 Loading Whisper model...")
-            self._whisper_model = whisper.load_model("base")
-            logger.info("✅ Whisper model loaded")
+            # Check memory before loading
+            memory_mb = self.check_memory_usage()
+            if memory_mb > self.memory_threshold:
+                logger.warning(f"⚠️ High memory usage ({memory_mb:.1f}MB) before loading Whisper")
+                self.cleanup_memory()
+            
+            logger.info("🎤 Loading Whisper model (base)...")
+            try:
+                self._whisper_model = whisper.load_model("base")
+                logger.info("✅ Whisper model loaded successfully")
+                
+                # Check memory after loading
+                memory_mb = self.check_memory_usage()
+                logger.info(f"💾 Memory after Whisper load: {memory_mb:.1f} MB")
+                
+            except Exception as e:
+                logger.error(f"❌ Failed to load Whisper model: {e}")
+                raise
         return self._whisper_model
     
     def is_loom_url(self, url: str) -> bool:
@@ -178,7 +229,7 @@ class LoomVideoProcessor:
     
     def download_loom_video(self, video_url: str, output_path: str) -> bool:
         """
-        Download Loom video to local file
+        Download Loom video to local file with progressive quality fallback
         
         Args:
             video_url: Direct video URL
@@ -190,6 +241,10 @@ class LoomVideoProcessor:
         try:
             logger.info(f"📥 Downloading Loom video to: {output_path}")
             
+            # Check memory before download
+            memory_mb = self.check_memory_usage()
+            logger.info(f"💾 Memory before download: {memory_mb:.1f} MB")
+            
             # Add headers to mimic browser request
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -199,6 +254,18 @@ class LoomVideoProcessor:
                 'Connection': 'keep-alive',
                 'Upgrade-Insecure-Requests': '1',
             }
+            
+            # First, check content length to estimate file size
+            head_response = requests.head(video_url, timeout=30, headers=headers)
+            content_length = head_response.headers.get('content-length')
+            if content_length:
+                file_size_mb = int(content_length) / 1024 / 1024
+                logger.info(f"📊 Estimated file size: {file_size_mb:.1f} MB")
+                
+                # Check if file is too large for our memory constraints
+                if file_size_mb > 100:  # 100MB limit
+                    logger.warning(f"⚠️ File too large ({file_size_mb:.1f}MB), will use yt-dlp for optimized download")
+                    return False
             
             response = requests.get(video_url, stream=True, timeout=60, headers=headers)
             response.raise_for_status()
@@ -210,11 +277,20 @@ class LoomVideoProcessor:
                 logger.warning(f"⚠️ Response doesn't appear to be a video file (content-type: {content_type}). Will use yt-dlp fallback.")
                 return False
 
-            # Download the file
+            # Download the file with progress monitoring
+            downloaded_size = 0
             with open(output_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
+                        downloaded_size += len(chunk)
+                        
+                        # Check memory every 10MB downloaded
+                        if downloaded_size % (10 * 1024 * 1024) == 0:
+                            memory_mb = self.check_memory_usage()
+                            if memory_mb > self.memory_threshold:
+                                logger.warning(f"⚠️ High memory during download ({memory_mb:.1f}MB), stopping download")
+                                return False
 
             # Verify the file is valid
             import os
@@ -224,10 +300,144 @@ class LoomVideoProcessor:
                 return False
 
             logger.info(f"✅ Loom video downloaded successfully: {file_size} bytes")
+            
+            # Check memory after download
+            memory_mb = self.check_memory_usage()
+            logger.info(f"💾 Memory after download: {memory_mb:.1f} MB")
+            
             return True
             
         except Exception as e:
             logger.error(f"❌ Failed to download Loom video: {e}")
+            return False
+
+    def download_loom_video_with_quality_fallback(self, video_url: str, output_path: str) -> bool:
+        """
+        Download Loom video with progressive quality fallback (480p -> 720p -> 1080p)
+        
+        Args:
+            video_url: Loom share URL
+            output_path: Local path to save video
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            logger.info(f"📥 Downloading Loom video with quality fallback: {video_url}")
+            
+            # Check memory before download
+            memory_mb = self.check_memory_usage()
+            logger.info(f"💾 Memory before download: {memory_mb:.1f} MB")
+            
+            # Quality levels to try in order (lowest to highest)
+            quality_formats = [
+                "worst[height<=480]",      # 480p or lower
+                "worst[height<=720]",      # 720p or lower
+                "worst[height<=1080]",     # 1080p or lower
+                "worst"                    # Any available format
+            ]
+            
+            quality_names = ["480p", "720p", "1080p", "any"]
+            
+            for i, (format_spec, quality_name) in enumerate(zip(quality_formats, quality_names)):
+                try:
+                    logger.info(f"🎬 Attempting download with {quality_name} quality (attempt {i+1}/{len(quality_formats)})")
+                    
+                    # Check memory before each attempt
+                    memory_mb = self.check_memory_usage()
+                    if memory_mb > self.memory_threshold:
+                        logger.warning(f"⚠️ High memory before {quality_name} download ({memory_mb:.1f}MB), skipping")
+                        continue
+                    
+                    # Use yt-dlp with specific quality
+                    import subprocess
+                    import sys
+                    import os
+                    
+                    # Ensure parent dir exists
+                    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                    
+                    # Remove existing file if it exists
+                    if os.path.exists(output_path):
+                        try:
+                            os.remove(output_path)
+                            logger.info("🧹 Removed existing file before download")
+                        except Exception:
+                            pass
+                    
+                    # Build yt-dlp command with quality specification
+                    cmd = [
+                        sys.executable, '-m', 'yt_dlp',
+                        '--no-warnings',
+                        '--retries', '2', '--fragment-retries', '2',
+                        '--restrict-filenames',
+                        '--merge-output-format', 'mp4',
+                        '--force-overwrites',
+                        '--format', format_spec,
+                        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        '--referer', 'https://www.loom.com/',
+                        '--add-header', 'Origin: https://www.loom.com',
+                        '--add-header', 'Sec-Fetch-Mode: navigate',
+                        '--output', output_path,
+                        video_url
+                    ]
+                    
+                    logger.info(f"🔧 yt-dlp command: {' '.join(cmd[:8])}... --format {format_spec} ...")
+                    
+                    # Run yt-dlp with timeout
+                    timeout = 180 if i == 0 else 120  # Longer timeout for first attempt
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+                    
+                    # Handle yt-dlp output
+                    if result.returncode == 0 and not os.path.exists(output_path):
+                        candidate_mp4 = output_path if output_path.endswith('.mp4') else f"{output_path}.mp4"
+                        if os.path.exists(candidate_mp4):
+                            try:
+                                os.replace(candidate_mp4, output_path)
+                                logger.info("📁 Renamed downloaded file to expected path")
+                            except Exception:
+                                pass
+                    
+                    # Check if download was successful
+                    if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
+                        file_size_mb = os.path.getsize(output_path) / 1024 / 1024
+                        logger.info(f"✅ Successfully downloaded with {quality_name} quality: {file_size_mb:.1f} MB")
+                        
+                        # Check memory after successful download
+                        memory_mb = self.check_memory_usage()
+                        logger.info(f"💾 Memory after {quality_name} download: {memory_mb:.1f} MB")
+                        
+                        return True
+                    else:
+                        error_msg = result.stderr or result.stdout
+                        logger.warning(f"⚠️ {quality_name} download failed (code {result.returncode}): {error_msg[:200]}...")
+                        
+                        # Clean up failed download
+                        if os.path.exists(output_path):
+                            try:
+                                os.remove(output_path)
+                            except Exception:
+                                pass
+                        
+                        # If this was the last attempt, log the full error
+                        if i == len(quality_formats) - 1:
+                            logger.error(f"❌ All quality levels failed. Full error: {error_msg}")
+                        
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"⚠️ {quality_name} download timed out after {timeout}s")
+                except Exception as e:
+                    logger.warning(f"⚠️ {quality_name} download failed with exception: {e}")
+                
+                # Small delay between attempts
+                if i < len(quality_formats) - 1:
+                    import time
+                    time.sleep(2)
+            
+            logger.error("❌ All quality levels failed for video download")
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to download Loom video with quality fallback: {e}")
             return False
     
     def validate_and_enhance_timestamps(self, segments: List[Dict]) -> List[Dict]:
@@ -274,7 +484,7 @@ class LoomVideoProcessor:
 
     def transcribe_video(self, video_path: str) -> Optional[Dict]:
         """
-        Transcribe video using Whisper with enhanced timestamp precision
+        Transcribe video using Whisper with memory management
         
         Args:
             video_path: Path to video file
@@ -285,15 +495,36 @@ class LoomVideoProcessor:
         try:
             logger.info(f"🎤 Transcribing video: {video_path}")
             
+            # Check memory before transcription
+            memory_mb = self.check_memory_usage()
+            logger.info(f"💾 Memory before transcription: {memory_mb:.1f} MB")
+            
+            if memory_mb > self.memory_threshold:
+                logger.warning(f"⚠️ High memory before transcription ({memory_mb:.1f}MB), performing cleanup")
+                self.cleanup_memory()
+            
             # Load Whisper model
             model = self.get_whisper_model()
             
-            # Transcribe video with detailed segments for better timestamp precision
+            # Check file size and warn if large
+            import os
+            file_size_mb = os.path.getsize(video_path) / 1024 / 1024
+            logger.info(f"📊 Video file size: {file_size_mb:.1f} MB")
+            
+            if file_size_mb > 50:
+                logger.warning(f"⚠️ Large video file ({file_size_mb:.1f}MB), transcription may be slow")
+            
+            # Transcribe video with memory monitoring
+            logger.info("🎤 Starting Whisper transcription...")
             result = model.transcribe(
                 video_path,
                 word_timestamps=True,  # Enable word-level timestamps for precision
                 verbose=False
             )
+            
+            # Check memory after transcription
+            memory_mb = self.check_memory_usage()
+            logger.info(f"💾 Memory after transcription: {memory_mb:.1f} MB")
             
             # Process segments to ensure precise timestamps (similar to YouTube API)
             enhanced_segments = []
@@ -329,20 +560,25 @@ class LoomVideoProcessor:
             logger.info(f"🌐 Language: {transcription_data.get('language', 'Unknown')}")
             logger.info(f"📊 Enhanced segments created: {len(enhanced_segments)}")
             
-            # Log the full transcription content
+            # Log the full transcription content (truncated for memory)
             transcription_text = transcription_data.get('transcription', '')
             if transcription_text:
-                logger.info("📄 FULL TRANSCRIPTION CONTENT:")
+                logger.info("📄 TRANSCRIPTION PREVIEW:")
                 logger.info("=" * 80)
-                logger.info(transcription_text[:2000] + ("..." if len(transcription_text) > 2000 else ""))
+                logger.info(transcription_text[:1000] + ("..." if len(transcription_text) > 1000 else ""))
                 logger.info("=" * 80)
-                if len(transcription_text) > 2000:
-                    logger.info(f"📄 (Showing first 2000 characters of {len(transcription_text)} total)")
+                if len(transcription_text) > 1000:
+                    logger.info(f"📄 (Showing first 1000 characters of {len(transcription_text)} total)")
+            
+            # Cleanup memory after transcription
+            self.cleanup_memory()
             
             return transcription_data
             
         except Exception as e:
             logger.error(f"❌ Transcription failed: {e}")
+            # Cleanup on error
+            self.cleanup_memory()
             return None
     
     def chunk_transcription(
@@ -587,7 +823,7 @@ class LoomVideoProcessor:
     
     def process_video(self, video_url: str, company_name: str) -> Optional[Dict]:
         """
-        Complete Loom video processing pipeline
+        Complete Loom video processing pipeline with memory management
         
         Args:
             video_url: Loom video URL
@@ -599,6 +835,10 @@ class LoomVideoProcessor:
         try:
             logger.info(f"🎯 Processing Loom video: {video_url}")
             
+            # Initial memory check
+            memory_mb = self.check_memory_usage()
+            logger.info(f"💾 Initial memory: {memory_mb:.1f} MB")
+            
             # Step 1: Extract video info
             video_info = self.extract_loom_video_info(video_url)
             if not video_info:
@@ -608,69 +848,34 @@ class LoomVideoProcessor:
             with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_file:
                 temp_video_path = temp_file.name
             
+            # Try direct download first, then quality fallback
             download_success = self.download_loom_video(video_info['video_url'], temp_video_path)
             if not download_success:
-                # Try yt-dlp as fallback
-                logger.info("🔄 Trying yt-dlp fallback for video download")
-                try:
-                    import subprocess
-                    import sys
-
-                    # Ensure parent dir exists and remove any empty pre-created file
-                    os.makedirs(os.path.dirname(temp_video_path), exist_ok=True)
-                    try:
-                        if os.path.exists(temp_video_path) and os.path.getsize(temp_video_path) == 0:
-                            os.remove(temp_video_path)
-                            logger.info("🧹 Removed empty temp file before yt-dlp download")
-                    except Exception:
-                        pass
-
-                    # Use yt-dlp to download the best available format and merge to mp4 if needed
-                    cmd = [
-                        sys.executable, '-m', 'yt_dlp',
-                        '--no-warnings',
-                        '--retries', '3', '--fragment-retries', '3',
-                        '--restrict-filenames',
-                        '--merge-output-format', 'mp4',
-                        '--force-overwrites',
-                        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        '--referer', 'https://www.loom.com/',
-                        '--add-header', 'Origin: https://www.loom.com',
-                        '--add-header', 'Sec-Fetch-Mode: navigate',
-                        '--output', temp_video_path,
-                        video_url
-                    ]
-
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-
-                    # yt-dlp may append extension; normalize to expected path
-                    if result.returncode == 0 and not os.path.exists(temp_video_path):
-                        candidate_mp4 = temp_video_path if temp_video_path.endswith('.mp4') else f"{temp_video_path}.mp4"
-                        if os.path.exists(candidate_mp4):
-                            try:
-                                os.replace(candidate_mp4, temp_video_path)
-                            except Exception:
-                                pass
-
-                    if result.returncode == 0 and os.path.exists(temp_video_path) and os.path.getsize(temp_video_path) > 1024:
-                        logger.info("✅ Video downloaded successfully with yt-dlp")
-                        download_success = True
-                    else:
-                        logger.error(f"❌ yt-dlp failed (code {result.returncode}): {result.stderr or result.stdout}")
-                        raise Exception("Failed to download video with yt-dlp")
-
-                except Exception as e:
-                    logger.error(f"❌ yt-dlp fallback failed: {e}")
-                    raise Exception("Failed to download video")
+                # Use quality fallback download
+                logger.info("🔄 Trying quality fallback download")
+                download_success = self.download_loom_video_with_quality_fallback(video_url, temp_video_path)
+                
+                if not download_success:
+                    raise Exception("Failed to download video with all methods")
             
             if not download_success:
                 raise Exception("Failed to download video")
             
             try:
+                # Check memory before transcription
+                memory_mb = self.check_memory_usage()
+                if memory_mb > self.memory_threshold:
+                    logger.warning(f"⚠️ High memory before transcription ({memory_mb:.1f}MB), performing cleanup")
+                    self.cleanup_memory()
+                
                 # Step 3: Transcribe video
                 transcription_data = self.transcribe_video(temp_video_path)
                 if not transcription_data:
                     raise Exception("Failed to transcribe video")
+                
+                # Check memory after transcription
+                memory_mb = self.check_memory_usage()
+                logger.info(f"💾 Memory after transcription: {memory_mb:.1f} MB")
                 
                 # Step 4: Chunk the transcription
                 transcription = transcription_data.get('transcription', '')
@@ -679,8 +884,8 @@ class LoomVideoProcessor:
                 segments = transcription_data.get('segments', [])
                 
                 # Use smaller chunks for Loom videos for better timestamp precision
-                chunk_size = 800  # Reduced from 1000
-                max_chunk_duration = 45  # Reduced from 60 seconds
+                chunk_size = 600  # Further reduced for memory optimization
+                max_chunk_duration = 30  # Further reduced for memory optimization
                 
                 chunks = self.chunk_transcription(transcription, segments=segments, 
                                                 chunk_size=chunk_size, 
@@ -688,10 +893,20 @@ class LoomVideoProcessor:
                 if not chunks:
                     raise Exception("Failed to create chunks")
                 
+                # Check memory before embeddings
+                memory_mb = self.check_memory_usage()
+                if memory_mb > self.memory_threshold:
+                    logger.warning(f"⚠️ High memory before embeddings ({memory_mb:.1f}MB), performing cleanup")
+                    self.cleanup_memory()
+                
                 # Step 5: Create embeddings
                 embeddings = self.create_embeddings([c['text'] if isinstance(c, dict) else str(c) for c in chunks])
                 if not embeddings or len(embeddings) != len(chunks):
                     raise Exception("Failed to create embeddings")
+                
+                # Check memory before storage
+                memory_mb = self.check_memory_usage()
+                logger.info(f"💾 Memory before storage: {memory_mb:.1f} MB")
                 
                 # Step 6: Store in Pinecone
                 storage_success = self.store_in_pinecone(
@@ -703,16 +918,19 @@ class LoomVideoProcessor:
                     total = len(chunks)
                     with_ts = sum(1 for c in chunks if float(c.get('start', 0.0)) > 0.0 or float(c.get('end', 0.0)) > 0.0)
                     logger.info(f"🧪 Timestamp chunk check (Loom - {company_name}): {with_ts}/{total} chunks have timestamps")
-                    for i, c in enumerate(chunks[: min(5, total)]):
+                    for i, c in enumerate(chunks[: min(3, total)]):  # Reduced logging
                         s = float(c.get('start', 0.0))
                         e = float(c.get('end', 0.0))
-                        t = (c.get('text') or '')[:120].replace('\n', ' ')
+                        t = (c.get('text') or '')[:80].replace('\n', ' ')  # Reduced text length
                         logger.info(f"    #{i+1}: [{s:.2f} → {e:.2f}] {t}")
                 except Exception:
                     pass
                 
                 if not storage_success:
                     raise Exception("Failed to store in Pinecone")
+                
+                # Final memory cleanup
+                self.cleanup_memory()
                 
                 # Return success result
                 result = {
@@ -738,8 +956,13 @@ class LoomVideoProcessor:
                 except:
                     pass
                 
+                # Final memory cleanup
+                self.cleanup_memory()
+                
         except Exception as e:
             logger.error(f"❌ Loom video processing failed: {e}")
+            # Cleanup on error
+            self.cleanup_memory()
             return None
     
     def search_similar_chunks(self, company_name: str, query: str, top_k: int = 5) -> List[Dict]:
@@ -788,3 +1011,182 @@ class LoomVideoProcessor:
         except Exception as e:
             logger.error(f"❌ Search failed: {e}")
             return []
+
+    def process_video_lightweight(self, video_url: str, company_name: str) -> Optional[Dict]:
+        """
+        Lightweight Loom video processing for low memory situations
+        
+        Args:
+            video_url: Loom video URL
+            company_name: Company name for organization
+            
+        Returns:
+            Dict with processing results or None if failed
+        """
+        try:
+            logger.info(f"🎯 Processing Loom video (LIGHTWEIGHT MODE): {video_url}")
+            
+            # Check memory - if too high, fail early
+            memory_mb = self.check_memory_usage()
+            if memory_mb > 1900:  # Very high threshold
+                raise Exception(f"Memory too high ({memory_mb:.1f}MB) for lightweight processing")
+            
+            # Step 1: Extract video info (minimal)
+            video_info = self.extract_loom_video_info(video_url)
+            if not video_info:
+                raise Exception("Failed to extract video info")
+            
+            # Step 2: Use yt-dlp directly for optimized download
+            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_file:
+                temp_video_path = temp_file.name
+            
+            logger.info("🔄 Using quality fallback for lightweight download")
+            download_success = self.download_loom_video_with_quality_fallback(video_url, temp_video_path)
+            
+            if not download_success:
+                raise Exception("Failed to download video with quality fallback")
+            
+            try:
+                # Check memory before transcription
+                memory_mb = self.check_memory_usage()
+                if memory_mb > 1800:
+                    logger.warning(f"⚠️ High memory before transcription ({memory_mb:.1f}MB), performing cleanup")
+                    self.cleanup_memory()
+                
+                # Step 3: Transcribe video with minimal settings
+                logger.info("🎤 Starting lightweight transcription...")
+                
+                # Load Whisper model if not loaded
+                model = self.get_whisper_model()
+                
+                # Use minimal transcription settings
+                result = model.transcribe(
+                    temp_video_path,
+                    word_timestamps=False,  # Disable word timestamps to save memory
+                    verbose=False,
+                    fp16=False  # Disable fp16 to save memory
+                )
+                
+                # Create minimal transcription data
+                transcription_data = {
+                    'transcription': result['text'],
+                    'segments': [],  # No segments to save memory
+                    'language': result.get('language', 'en'),
+                    'word_count': len(result['text'].split())
+                }
+                
+                logger.info(f"✅ Lightweight transcription completed: {transcription_data['word_count']} words")
+                
+                # Check memory after transcription
+                memory_mb = self.check_memory_usage()
+                logger.info(f"💾 Memory after transcription: {memory_mb:.1f} MB")
+                
+                # Step 4: Create simple chunks (no timestamps)
+                transcription = transcription_data.get('transcription', '')
+                if not transcription:
+                    raise Exception("Empty transcription")
+                
+                # Simple character-based chunking
+                chunks = []
+                chunk_size = 500  # Very small chunks
+                overlap = 50
+                pos = 0
+                
+                while pos < len(transcription):
+                    end = pos + chunk_size
+                    if end < len(transcription):
+                        for i in range(end, max(pos + chunk_size - 100, pos), -1):
+                            if transcription[i] in '.!?':
+                                end = i + 1
+                                break
+                    text_chunk = transcription[pos:end].strip()
+                    if text_chunk:
+                        chunks.append({'text': text_chunk, 'start': 0.0, 'end': 0.0})
+                    pos = end - overlap
+                    if pos >= len(transcription):
+                        break
+                
+                logger.info(f"📄 Created {len(chunks)} simple chunks")
+                
+                # Check memory before embeddings
+                memory_mb = self.check_memory_usage()
+                if memory_mb > 1800:
+                    logger.warning(f"⚠️ High memory before embeddings ({memory_mb:.1f}MB), performing cleanup")
+                    self.cleanup_memory()
+                
+                # Step 5: Create embeddings in smaller batches
+                embeddings = []
+                batch_size = 50  # Smaller batch size
+                
+                for i in range(0, len(chunks), batch_size):
+                    batch = chunks[i:i + batch_size]
+                    batch_texts = [c['text'] for c in batch]
+                    
+                    try:
+                        response = openai.embeddings.create(
+                            input=batch_texts,
+                            model="text-embedding-3-small"
+                        )
+                        batch_embeddings = [e.embedding for e in response.data]
+                        embeddings.extend(batch_embeddings)
+                        
+                        logger.info(f"✅ Created embeddings for batch {i//batch_size + 1}")
+                        
+                        # Check memory after each batch
+                        memory_mb = self.check_memory_usage()
+                        if memory_mb > 1800:
+                            logger.warning(f"⚠️ High memory after batch {i//batch_size + 1}, performing cleanup")
+                            self.cleanup_memory()
+                        
+                    except Exception as e:
+                        logger.error(f"❌ Batch embedding failed: {e}")
+                        # Create zero embeddings for failed batch
+                        zero_embedding = [0.0] * 1536
+                        embeddings.extend([zero_embedding] * len(batch))
+                
+                if not embeddings or len(embeddings) != len(chunks):
+                    raise Exception("Failed to create embeddings")
+                
+                # Step 6: Store in Pinecone
+                storage_success = self.store_in_pinecone(
+                    company_name, video_url, video_info, transcription_data, chunks, embeddings
+                )
+                
+                if not storage_success:
+                    raise Exception("Failed to store in Pinecone")
+                
+                # Final memory cleanup
+                self.cleanup_memory()
+                
+                # Return success result
+                result = {
+                    'success': True,
+                    'video_url': video_url,
+                    'company_name': company_name,
+                    'title': video_info.get('title', 'Unknown'),
+                    'chunks_created': len(chunks),
+                    'vectors_stored': len(embeddings),
+                    'word_count': transcription_data.get('word_count', 'Unknown'),
+                    'language': transcription_data.get('language', 'Unknown'),
+                    'method': 'loom_transcription_lightweight'
+                }
+                
+                logger.info(f"✅ Loom video processing completed successfully (lightweight mode)")
+                return result
+                
+            finally:
+                # Clean up temporary file
+                try:
+                    os.unlink(temp_video_path)
+                    logger.info("🧹 Cleaned up temporary video file")
+                except:
+                    pass
+                
+                # Final memory cleanup
+                self.cleanup_memory()
+                
+        except Exception as e:
+            logger.error(f"❌ Loom video processing failed (lightweight): {e}")
+            # Cleanup on error
+            self.cleanup_memory()
+            return None

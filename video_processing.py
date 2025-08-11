@@ -75,10 +75,20 @@ def initialize_processors():
 
 def process_video(video_url: str, company_name: str, bucket_name: Optional[str] = None, 
                  source: Optional[str] = None, meeting_link: Optional[str] = None):
-    """Process a video URL and store in Pinecone"""
+    """Process a video URL and store in Pinecone with memory management"""
     try:
         logger.info(f"🎬 Processing video: {video_url}")
         logger.info(f"🏢 Company: {company_name}")
+        
+        # Check memory before processing
+        try:
+            import psutil
+            process = psutil.Process()
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            logger.info(f"💾 Memory before processing: {memory_mb:.1f} MB")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not check memory: {e}")
+            memory_mb = 0
         
         # Determine if it's a Loom video
         is_loom = "loom.com" in video_url.lower()
@@ -87,11 +97,20 @@ def process_video(video_url: str, company_name: str, bucket_name: Optional[str] 
             if not loom_processor:
                 raise Exception("Loom processor not initialized")
             
-            logger.info("🎬 Processing with Loom processor...")
-            result = loom_processor.process_video(
-                video_url=video_url,
-                company_name=company_name
-            )
+            # Choose processing mode based on memory
+            if memory_mb > 1500:  # High memory usage
+                logger.warning(f"⚠️ High memory usage ({memory_mb:.1f}MB), using lightweight mode")
+                logger.info("🎬 Processing with Loom processor (LIGHTWEIGHT MODE)...")
+                result = loom_processor.process_video_lightweight(
+                    video_url=video_url,
+                    company_name=company_name
+                )
+            else:
+                logger.info("🎬 Processing with Loom processor (STANDARD MODE)...")
+                result = loom_processor.process_video(
+                    video_url=video_url,
+                    company_name=company_name
+                )
         else:
             if not gemini_processor:
                 raise Exception("Gemini processor not initialized")

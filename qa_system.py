@@ -67,7 +67,7 @@ def query_pinecone(company_name: str, embedding: List[float], top_k: int = 6):
     """Query Pinecone for relevant chunks"""
     try:
         # Use a single shared index with per-company namespace
-        index_name = os.getenv("PINECONE_INDEX", "qudemo-core")
+        index_name = os.getenv("PINECONE_INDEX", "qudemo-demo")
         logger.info(f"🔍 Querying Pinecone index: {index_name}")
 
         existing_indexes = [index.name for index in pc.list_indexes()]
@@ -76,19 +76,10 @@ def query_pinecone(company_name: str, embedding: List[float], top_k: int = 6):
         if index_name not in existing_indexes:
             logger.warning(f"⚠️ Index {index_name} not found. Available indexes: {existing_indexes}")
             
-            # Try to find the best fallback index
-            preferred_indexes = ['qudemo-index', 'qudemo-core', 'qudemo-demo', 'qudemo-test']
-            fallback_index = None
-            
-            for preferred in preferred_indexes:
-                if preferred in existing_indexes:
-                    fallback_index = preferred
-                    break
-            
-            if not fallback_index and existing_indexes:
+            # Try to find the best fallback index - prioritize existing indexes
+            if existing_indexes:
+                # Use the first available index
                 fallback_index = existing_indexes[0]
-            
-            if fallback_index:
                 logger.warning(f"⚠️ Falling back to existing index: {fallback_index}")
                 index_name = fallback_index
             else:
@@ -100,11 +91,48 @@ def query_pinecone(company_name: str, embedding: List[float], top_k: int = 6):
         
         logger.info(f"🔍 Querying namespace: {namespace} in index: {index_name}")
 
-        matches = index.query(
-            vector=embedding,
-            top_k=top_k,
-            include_metadata=True
-        , namespace=namespace).matches
+        # First, let's check what's in this namespace
+        try:
+            stats = index.describe_index_stats()
+            logger.info(f"🔍 Index stats: {stats}")
+            
+            # Check if namespace exists and has data
+            if 'namespaces' in stats and namespace in stats['namespaces']:
+                namespace_stats = stats['namespaces'][namespace]
+                logger.info(f"🔍 Namespace '{namespace}' stats: {namespace_stats}")
+            else:
+                logger.warning(f"⚠️ Namespace '{namespace}' not found in index stats")
+                logger.info(f"🔍 Available namespaces: {list(stats.get('namespaces', {}).keys())}")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not get index stats: {e}")
+
+        # First try with namespace
+        try:
+            matches = index.query(
+                vector=embedding,
+                top_k=top_k,
+                include_metadata=True,
+                namespace=namespace
+            ).matches
+            logger.info(f"✅ Found {len(matches)} matches with namespace '{namespace}'")
+        except Exception as e:
+            logger.warning(f"⚠️ Query with namespace '{namespace}' failed: {e}")
+            # Try without namespace to see what's available
+            try:
+                matches = index.query(
+                    vector=embedding,
+                    top_k=top_k,
+                    include_metadata=True
+                ).matches
+                logger.warning(f"⚠️ Found {len(matches)} matches without namespace (all data)")
+                
+                # Filter by company in metadata
+                company_matches = [m for m in matches if m.metadata.get('company', '').lower() == company_name.lower()]
+                logger.info(f"🔍 Filtered to {len(company_matches)} matches for company '{company_name}'")
+                matches = company_matches
+            except Exception as e2:
+                logger.error(f"❌ Query without namespace also failed: {e2}")
+                matches = []
         logger.info(f"✅ Found {len(matches)} matches for company: {company_name}")
         
         # Debug: Log the first match metadata to see what we're getting

@@ -72,10 +72,17 @@ class LoomVideoProcessor:
             logger.info("🧹 Performing memory cleanup...")
             gc.collect()
             
-            # With 8GB RAM, we can keep Whisper model loaded for better performance
-            # Only clear if memory is critically high (above 6.5GB) and preserve_whisper is False
+            # More aggressive memory cleanup
             memory_mb = self.check_memory_usage()
-            if memory_mb > 6500 and self._whisper_model and not preserve_whisper:
+            
+            # If memory is very high (>2500MB), clear Whisper model even if preserve_whisper is True
+            if memory_mb > 2500 and self._whisper_model:
+                logger.warning(f"⚠️ High memory usage ({memory_mb:.1f}MB), clearing Whisper model for aggressive cleanup")
+                del self._whisper_model
+                self._whisper_model = None
+                gc.collect()
+            # Original logic for very high memory
+            elif memory_mb > 6500 and self._whisper_model and not preserve_whisper:
                 logger.warning(f"⚠️ Critical memory usage ({memory_mb:.1f}MB), clearing Whisper model")
                 del self._whisper_model
                 self._whisper_model = None
@@ -542,12 +549,15 @@ class LoomVideoProcessor:
                     model = self.get_whisper_model()
                 
                 logger.info(f"🎤 Model status before transcription: {type(model).__name__ if model else 'None'}")
+                logger.info("🎤 Starting Whisper transcription...")
                 
                 result = model.transcribe(
                     video_path,
-                    word_timestamps=True,  # Enable word-level timestamps for precision
+                    word_timestamps=False,  # Disable word timestamps for faster processing
                     verbose=False,
-                    fp16=False  # Explicitly disable FP16 for CPU compatibility
+                    fp16=False,  # Explicitly disable FP16 for CPU compatibility
+                    condition_on_previous_text=False,  # Disable for faster processing
+                    temperature=0.0  # Use greedy decoding for speed
                 )
                 logger.info("✅ Transcription completed successfully")
             except Exception as e:
@@ -842,6 +852,7 @@ class LoomVideoProcessor:
             # Get index and namespace per company
             index = self.pc.Index(index_name)
             namespace = company_name.lower().replace(' ', '-')
+            logger.info(f"🔍 Storing data in namespace: '{namespace}' in index: '{index_name}'")
             
             # Prepare vectors for upsert
             vectors = []
@@ -1125,7 +1136,7 @@ class LoomVideoProcessor:
             
             # Check memory - if too high, fail early
             memory_mb = self.check_memory_usage()
-            if memory_mb > 1900:  # Very high threshold
+            if memory_mb > 2800:  # Increased from 1900MB to 2800MB
                 raise Exception(f"Memory too high ({memory_mb:.1f}MB) for lightweight processing")
             
             # Step 1: Extract video info (minimal)
@@ -1146,7 +1157,7 @@ class LoomVideoProcessor:
             try:
                 # Check memory before transcription
                 memory_mb = self.check_memory_usage()
-                if memory_mb > 1800:
+                if memory_mb > 2500:  # Increased from 1800MB to 2500MB
                     logger.warning(f"⚠️ High memory before transcription ({memory_mb:.1f}MB), performing cleanup")
                     self.cleanup_memory(preserve_whisper=True)
                 
@@ -1229,7 +1240,7 @@ class LoomVideoProcessor:
                 
                 # Check memory before embeddings
                 memory_mb = self.check_memory_usage()
-                if memory_mb > 1800:
+                if memory_mb > 2500:  # Increased from 1800MB to 2500MB
                     logger.warning(f"⚠️ High memory before embeddings ({memory_mb:.1f}MB), performing cleanup")
                     self.cleanup_memory(preserve_whisper=True)
                 
@@ -1253,7 +1264,7 @@ class LoomVideoProcessor:
                         
                         # Check memory after each batch
                         memory_mb = self.check_memory_usage()
-                        if memory_mb > 1800:
+                        if memory_mb > 2500:  # Increased from 1800MB to 2500MB
                             logger.warning(f"⚠️ High memory after batch {i//batch_size + 1}, performing cleanup")
                             self.cleanup_memory(preserve_whisper=True)
                         

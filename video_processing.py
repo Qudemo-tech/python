@@ -132,11 +132,25 @@ def process_video(video_url: str, company_name: str, bucket_name: Optional[str] 
         
     except Exception as e:
         logger.error(f"❌ Video processing failed: {e}")
+        
+        # Provide more specific error messages
+        error_message = str(e)
+        if "API request failed" in error_message:
+            error_message = "Transcription service temporarily unavailable. Please try again in a few minutes."
+        elif "Failed to extract transcription" in error_message:
+            error_message = "Unable to extract video transcription. The video may not have captions or may be private."
+        elif "timeout" in error_message.lower():
+            error_message = "Request timed out. Please try again."
+        
         return {
             "success": False,
-            "error": str(e),
+            "error": error_message,
             "company_name": company_name,
-            "video_url": video_url
+            "video_url": video_url,
+            "details": {
+                "original_error": str(e),
+                "suggestion": "Try again in a few minutes or use a different video"
+            }
         }
 
 def add_video_url_mapping(local_filename: str, original_url: str):

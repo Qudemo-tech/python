@@ -23,19 +23,26 @@ except ImportError:
 def get_youtube_transcript(video_id, languages=None):
     """Get YouTube transcript with version compatibility"""
     try:
+        # Debug: Check what methods are available
+        logger.info(f"🔍 Available YouTubeTranscriptApi methods: {dir(YouTubeTranscriptApi)}")
+        
+        # Try the correct method for newer versions
         if languages:
             return YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
         else:
             return YouTubeTranscriptApi.get_transcript(video_id)
     except AttributeError:
-        # Fallback for older versions
+        # Try alternative method names for different versions
         try:
+            # Try list_transcripts method
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
             if languages:
-                return YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
+                transcript = transcript_list.find_transcript(languages)
             else:
-                return YouTubeTranscriptApi.get_transcript(video_id)
+                transcript = transcript_list.find_generated_transcript(['en']) or transcript_list.find_manually_created_transcript(['en'])
+            return transcript.fetch()
         except Exception as e:
-            logger.error(f"❌ YouTube Transcript API version compatibility issue: {e}")
+            logger.error(f"❌ YouTube Transcript API alternative method failed: {e}")
             return None
     except Exception as e:
         logger.error(f"❌ YouTube Transcript API error: {e}")
@@ -277,10 +284,17 @@ class GeminiTranscriptionProcessor:
 
             # Try English first, then auto
             try:
+                logger.info(f"🔍 Attempting to get transcript for video: {video_id}")
                 transcript = get_youtube_transcript(video_id, languages=['en'])
                 if transcript is None:
                     logger.info("ℹ️ English transcript not found, trying auto-generated")
                     transcript = get_youtube_transcript(video_id)
+                
+                if transcript:
+                    logger.info(f"✅ Successfully retrieved transcript with {len(transcript)} segments")
+                else:
+                    logger.warning("⚠️ No transcript retrieved")
+                    
             except Exception as e:
                 logger.warning(f"⚠️ YouTube transcript API error: {e}")
                 return None

@@ -74,11 +74,19 @@ class GeminiTranscriptionProcessor:
             total = len(chunks)
             with_ts = sum(1 for c in chunks if float(c.get('start', 0.0)) > 0.0 or float(c.get('end', 0.0)) > 0.0)
             logger.info(f"🧪 Timestamp chunk check{(' - ' + label) if label else ''}: {with_ts}/{total} chunks have timestamps")
-            for i, c in enumerate(chunks[: min(5, total)]):
-                s = float(c.get('start', 0.0))
-                e = float(c.get('end', 0.0))
-                t = (c.get('text') or '')[:120].replace('\n', ' ')
-                logger.info(f"    #{i+1}: [{s:.2f} → {e:.2f}] {t}")
+            
+            if with_ts > 0:
+                logger.info("✅ Timestamps found - chunks will provide timestamped Q&A")
+                for i, c in enumerate(chunks[: min(5, total)]):
+                    s = float(c.get('start', 0.0))
+                    e = float(c.get('end', 0.0))
+                    t = (c.get('text') or '')[:120].replace('\n', ' ')
+                    logger.info(f"    #{i+1}: [{s:.2f} → {e:.2f}] {t}")
+            else:
+                logger.warning("⚠️ No timestamps found - Q&A will not include timestamps")
+                for i, c in enumerate(chunks[: min(5, total)]):
+                    t = (c.get('text') or '')[:120].replace('\n', ' ')
+                    logger.info(f"    #{i+1}: [NO TIMESTAMP] {t}")
         except Exception:
             pass
     
@@ -491,23 +499,62 @@ class GeminiTranscriptionProcessor:
             logger.info(f"📄 Created {len(chunks)} timestamped chunks from segments")
             return chunks
 
-        # Fallback: parse inline [HH:MM:SS] timestamps if present in the text
+        # Fallback: parse inline timestamps if present in the text
         import re
-        pattern = re.compile(r"\[(\d{2}):(\d{2}):(\d{2})\]\s*(.+)")
-        matches = pattern.findall(transcription)
-        if matches:
-            parsed: List[Dict] = []
-            for idx, (hh, mm, ss, sent) in enumerate(matches):
-                start = int(hh) * 3600 + int(mm) * 60 + int(ss)
-                # End at next start or start + heuristic duration
-                if idx + 1 < len(matches):
-                    nhh, nmm, nss, _ = matches[idx + 1]
-                    end = int(nhh) * 3600 + int(nmm) * 60 + int(nss)
-                else:
-                    end = start + min(max(len(sent) // 15, 3), 20)
-                parsed.append({'text': sent.strip(), 'start': float(start), 'end': float(end)})
-            logger.info(f"📄 Created {len(parsed)} chunks from inline timestamps")
-            return parsed
+        
+        # Log the first few lines to debug timestamp format
+        first_lines = transcription[:500].split('\n')[:5]
+        logger.info(f"🔍 Debug: First 5 lines of transcription:")
+        for i, line in enumerate(first_lines):
+            logger.info(f"  Line {i+1}: {line}")
+        
+        # Try different timestamp formats: [HH:MM:SS], [MM:SS], [SS]
+        patterns = [
+            r"\[(\d{2}):(\d{2}):(\d{2})\]\s*(.+)",  # [HH:MM:SS]
+            r"\[(\d{2}):(\d{2})\]\s*(.+)",           # [MM:SS]
+            r"\[(\d+)\]\s*(.+)"                       # [SS]
+        ]
+        
+        for pattern_str in patterns:
+            pattern = re.compile(pattern_str)
+            matches = pattern.findall(transcription)
+            logger.info(f"🔍 Pattern '{pattern_str}' found {len(matches)} matches")
+            if matches:
+                parsed: List[Dict] = []
+                for idx, match in enumerate(matches):
+                    if len(match) == 4:  # [HH:MM:SS] format
+                        hh, mm, ss, sent = match
+                        start = int(hh) * 3600 + int(mm) * 60 + int(ss)
+                    elif len(match) == 3:  # [MM:SS] format
+                        mm, ss, sent = match
+                        start = int(mm) * 60 + int(ss)
+                    elif len(match) == 2:  # [SS] format
+                        ss, sent = match
+                        start = int(ss)
+                    else:
+                        continue
+                    
+                    # End at next start or start + heuristic duration
+                    if idx + 1 < len(matches):
+                        next_match = matches[idx + 1]
+                        if len(next_match) == 4:  # [HH:MM:SS] format
+                            nhh, nmm, nss, _ = next_match
+                            end = int(nhh) * 3600 + int(nmm) * 60 + int(nss)
+                        elif len(next_match) == 3:  # [MM:SS] format
+                            nmm, nss, _ = next_match
+                            end = int(nmm) * 60 + int(nss)
+                        elif len(next_match) == 2:  # [SS] format
+                            nss, _ = next_match
+                            end = int(nss)
+                        else:
+                            end = start + min(max(len(sent) // 15, 3), 20)
+                    else:
+                        end = start + min(max(len(sent) // 15, 3), 20)
+                    
+                    parsed.append({'text': sent.strip(), 'start': float(start), 'end': float(end)})
+                
+                logger.info(f"📄 Created {len(parsed)} chunks from inline timestamps (format: {pattern_str})")
+                return parsed
 
         # Final fallback: character-based chunks without timestamps
         fallback_chunks: List[Dict] = []

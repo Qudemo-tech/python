@@ -11,7 +11,13 @@ import json
 from typing import Dict, Optional, List
 from urllib.parse import urlparse
 import google.generativeai as genai
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+try:
+    from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+except ImportError:
+    # Fallback for different versions
+    from youtube_transcript_api import YouTubeTranscriptApi
+    TranscriptsDisabled = Exception
+    NoTranscriptFound = Exception
 from pinecone import Pinecone, ServerlessSpec
 import numpy as np
 import openai
@@ -46,7 +52,7 @@ class GeminiTranscriptionProcessor:
         
         # Initialize Pinecone
         self.pc = Pinecone(api_key=pinecone_api_key)
-        self.default_index_name = os.getenv("PINECONE_INDEX", "qudemo-core")
+        self.default_index_name = os.getenv("PINECONE_INDEX", "qudemo-demo")
         
         logger.info("🔧 Initializing Gemini Transcription Processor...")
 
@@ -227,10 +233,19 @@ class GeminiTranscriptionProcessor:
 
             # Try English first, then auto
             try:
-                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-            except (TranscriptsDisabled, NoTranscriptFound):
-                logger.info("ℹ️ English transcript not found, trying auto-generated")
-                transcript = YouTubeTranscriptApi.get_transcript(video_id)
+                # Handle different API versions
+                try:
+                    transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+                except AttributeError:
+                    # Fallback for older versions
+                    transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+            except (TranscriptsDisabled, NoTranscriptFound, Exception) as e:
+                logger.info(f"ℹ️ English transcript not found, trying auto-generated: {e}")
+                try:
+                    transcript = YouTubeTranscriptApi.get_transcript(video_id)
+                except AttributeError:
+                    logger.warning("⚠️ YouTube transcript API not available")
+                    return None
 
             segments: List[Dict] = []
             for item in transcript:

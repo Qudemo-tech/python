@@ -41,7 +41,7 @@ class LoomVideoProcessor:
         
         # Initialize Pinecone
         self.pc = Pinecone(api_key=pinecone_api_key)
-        self.default_index_name = os.getenv("PINECONE_INDEX", "qudemo-core")
+        self.default_index_name = os.getenv("PINECONE_INDEX", "qudemo-demo")
         
         # Initialize Whisper model (lazy loading with memory management)
         self._whisper_model = None

@@ -205,7 +205,27 @@ async def memory_status():
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return get_health_check()
+    try:
+        status = get_health_check()
+        
+        # Add Whisper model status
+        try:
+            from video_processing import loom_processor
+            if loom_processor:
+                whisper_loaded = loom_processor.is_whisper_loaded()
+                status['whisper_model_loaded'] = whisper_loaded
+                status['whisper_model_status'] = 'loaded' if whisper_loaded else 'not_loaded'
+            else:
+                status['whisper_model_loaded'] = False
+                status['whisper_model_status'] = 'processor_not_initialized'
+        except Exception as e:
+            status['whisper_model_loaded'] = False
+            status['whisper_model_status'] = f'error: {str(e)}'
+        
+        return status
+    except Exception as e:
+        logger.error(f"❌ Health check error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/memory-debug")
 async def memory_debug():

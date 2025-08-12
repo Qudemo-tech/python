@@ -47,11 +47,11 @@ class LoomVideoProcessor:
         self._whisper_model = None
         
         # Memory management
-        self.memory_threshold = 1800  # MB - trigger cleanup at 1.8GB
+        self.memory_threshold = 6000  # MB - trigger cleanup at 6GB (leaving 2GB buffer for 8GB RAM)
         self.max_video_size = 100 * 1024 * 1024  # 100MB max video size
         
-        # Use tiny model for tutorial videos (perfect balance of speed, memory, and accuracy)
-        self.model_strategy = "tiny"
+        # Use small model for tutorial videos (excellent accuracy, perfect for longer videos on 8GB RAM)
+        self.model_strategy = "small"
         
         logger.info("🔧 Initializing Loom Video Processor (Memory Optimized)...")
     
@@ -66,16 +66,17 @@ class LoomVideoProcessor:
             logger.error(f"❌ Failed to check memory: {e}")
             return 0.0
     
-    def cleanup_memory(self, preserve_whisper: bool = False):
+    def cleanup_memory(self, preserve_whisper: bool = True):
         """Force garbage collection and memory cleanup"""
         try:
             logger.info("🧹 Performing memory cleanup...")
             gc.collect()
             
-            # Clear Whisper model if memory is high (unless preserve_whisper is True)
+            # With 8GB RAM, we can keep Whisper model loaded for better performance
+            # Only clear if memory is critically high (above 6.5GB) and preserve_whisper is False
             memory_mb = self.check_memory_usage()
-            if memory_mb > self.memory_threshold and self._whisper_model and not preserve_whisper:
-                logger.warning(f"⚠️ High memory usage ({memory_mb:.1f}MB), clearing Whisper model")
+            if memory_mb > 6500 and self._whisper_model and not preserve_whisper:
+                logger.warning(f"⚠️ Critical memory usage ({memory_mb:.1f}MB), clearing Whisper model")
                 del self._whisper_model
                 self._whisper_model = None
                 gc.collect()
@@ -85,30 +86,34 @@ class LoomVideoProcessor:
             logger.error(f"❌ Memory cleanup failed: {e}")
     
     def get_whisper_model(self):
-        """Lazy load Whisper tiny model (perfect for tutorial videos)"""
+        """Load Whisper small model once and keep it loaded for better performance"""
         if self._whisper_model is None:
             # Check memory before loading
             memory_mb = self.check_memory_usage()
             if memory_mb > self.memory_threshold:
                 logger.warning(f"⚠️ High memory usage ({memory_mb:.1f}MB) before loading Whisper")
-                self.cleanup_memory()
+                self.cleanup_memory(preserve_whisper=True)
             
-            logger.info("🎤 Loading Whisper model (tiny) - perfect for tutorial videos...")
+            logger.info("🎤 Loading Whisper model (small) - excellent accuracy for tutorial videos...")
             try:
-                self._whisper_model = whisper.load_model("tiny")
-                logger.info("✅ Whisper model (tiny) loaded successfully")
+                self._whisper_model = whisper.load_model("small")
+                logger.info("✅ Whisper model (small) loaded successfully")
                 
                 # Check memory after loading
                 memory_mb = self.check_memory_usage()
                 logger.info(f"💾 Memory after Whisper load: {memory_mb:.1f} MB")
                 
             except Exception as e:
-                logger.error(f"❌ Failed to load Whisper model (tiny): {e}")
+                logger.error(f"❌ Failed to load Whisper model (small): {e}")
                 raise
         else:
             logger.info(f"🎤 Using existing Whisper model: {type(self._whisper_model).__name__}")
         
         return self._whisper_model
+    
+    def is_whisper_loaded(self) -> bool:
+        """Check if Whisper model is currently loaded"""
+        return self._whisper_model is not None
     
     def is_loom_url(self, url: str) -> bool:
         """Check if URL is a Loom URL"""
@@ -541,7 +546,8 @@ class LoomVideoProcessor:
                 result = model.transcribe(
                     video_path,
                     word_timestamps=True,  # Enable word-level timestamps for precision
-                    verbose=False
+                    verbose=False,
+                    fp16=False  # Explicitly disable FP16 for CPU compatibility
                 )
                 logger.info("✅ Transcription completed successfully")
             except Exception as e:
@@ -898,6 +904,10 @@ class LoomVideoProcessor:
         try:
             logger.info(f"🎯 Processing Loom video: {video_url}")
             
+            # Check Whisper model status
+            whisper_loaded = self.is_whisper_loaded()
+            logger.info(f"🎤 Whisper model loaded: {whisper_loaded}")
+            
             # Initial memory check
             memory_mb = self.check_memory_usage()
             logger.info(f"💾 Initial memory: {memory_mb:.1f} MB")
@@ -929,7 +939,7 @@ class LoomVideoProcessor:
                 memory_mb = self.check_memory_usage()
                 if memory_mb > self.memory_threshold:
                     logger.warning(f"⚠️ High memory before transcription ({memory_mb:.1f}MB), performing cleanup")
-                    self.cleanup_memory()
+                    self.cleanup_memory(preserve_whisper=True)
                 
                 # Step 3: Transcribe video
                 transcription_data = self.transcribe_video(temp_video_path)
@@ -980,7 +990,7 @@ class LoomVideoProcessor:
                 memory_mb = self.check_memory_usage()
                 if memory_mb > self.memory_threshold:
                     logger.warning(f"⚠️ High memory before embeddings ({memory_mb:.1f}MB), performing cleanup")
-                    self.cleanup_memory()
+                    self.cleanup_memory(preserve_whisper=True)
                 
                 # Step 5: Create embeddings
                 embeddings = self.create_embeddings([c['text'] if isinstance(c, dict) else str(c) for c in chunks])
@@ -1013,7 +1023,7 @@ class LoomVideoProcessor:
                     raise Exception("Failed to store in Pinecone")
                 
                 # Final memory cleanup
-                self.cleanup_memory()
+                self.cleanup_memory(preserve_whisper=True)
                 
                 # Return success result
                 result = {
@@ -1040,12 +1050,12 @@ class LoomVideoProcessor:
                     pass
                 
                 # Final memory cleanup
-                self.cleanup_memory()
+                self.cleanup_memory(preserve_whisper=True)
                 
         except Exception as e:
             logger.error(f"❌ Loom video processing failed: {e}")
             # Cleanup on error
-            self.cleanup_memory()
+            self.cleanup_memory(preserve_whisper=True)
             return None
     
     def search_similar_chunks(self, company_name: str, query: str, top_k: int = 5) -> List[Dict]:
@@ -1109,6 +1119,10 @@ class LoomVideoProcessor:
         try:
             logger.info(f"🎯 Processing Loom video (LIGHTWEIGHT MODE): {video_url}")
             
+            # Check Whisper model status
+            whisper_loaded = self.is_whisper_loaded()
+            logger.info(f"🎤 Whisper model loaded (lightweight): {whisper_loaded}")
+            
             # Check memory - if too high, fail early
             memory_mb = self.check_memory_usage()
             if memory_mb > 1900:  # Very high threshold
@@ -1134,7 +1148,7 @@ class LoomVideoProcessor:
                 memory_mb = self.check_memory_usage()
                 if memory_mb > 1800:
                     logger.warning(f"⚠️ High memory before transcription ({memory_mb:.1f}MB), performing cleanup")
-                    self.cleanup_memory()
+                    self.cleanup_memory(preserve_whisper=True)
                 
                 # Step 3: Transcribe video with minimal settings
                 logger.info("🎤 Starting lightweight transcription...")
@@ -1217,7 +1231,7 @@ class LoomVideoProcessor:
                 memory_mb = self.check_memory_usage()
                 if memory_mb > 1800:
                     logger.warning(f"⚠️ High memory before embeddings ({memory_mb:.1f}MB), performing cleanup")
-                    self.cleanup_memory()
+                    self.cleanup_memory(preserve_whisper=True)
                 
                 # Step 5: Create embeddings in smaller batches
                 embeddings = []
@@ -1241,7 +1255,7 @@ class LoomVideoProcessor:
                         memory_mb = self.check_memory_usage()
                         if memory_mb > 1800:
                             logger.warning(f"⚠️ High memory after batch {i//batch_size + 1}, performing cleanup")
-                            self.cleanup_memory()
+                            self.cleanup_memory(preserve_whisper=True)
                         
                     except Exception as e:
                         logger.error(f"❌ Batch embedding failed: {e}")
@@ -1261,7 +1275,7 @@ class LoomVideoProcessor:
                     raise Exception("Failed to store in Pinecone")
                 
                 # Final memory cleanup
-                self.cleanup_memory()
+                self.cleanup_memory(preserve_whisper=True)
                 
                 # Return success result
                 result = {
@@ -1288,10 +1302,10 @@ class LoomVideoProcessor:
                     pass
                 
                 # Final memory cleanup
-                self.cleanup_memory()
+                self.cleanup_memory(preserve_whisper=True)
                 
         except Exception as e:
             logger.error(f"❌ Loom video processing failed (lightweight): {e}")
             # Cleanup on error
-            self.cleanup_memory()
+            self.cleanup_memory(preserve_whisper=True)
             return None

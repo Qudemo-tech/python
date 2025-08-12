@@ -166,21 +166,45 @@ class GeminiTranscriptionProcessor:
                     raise Exception(f"API request failed with status {response.status_code}: {response.text}")
                 
             except Exception as e:
-                # Fallback to text-only approach if video processing fails
-                logger.warning(f"⚠️ Using fallback text-only approach: {e}")
-                prompt = f"""
-                Please extract the full transcription from this YouTube video: {video_url}
-                
-                Transcribe only the spoken words from this YouTube video. Do not include any summaries, descriptions, or additional text. Just provide the raw, continuous transcription.
-                """
-                
-                # Call Gemini API
-                response = self.model.generate_content(prompt)
+                # Fallback to YouTube Transcript API if Gemini fails
+                logger.warning(f"⚠️ Gemini API failed, trying YouTube Transcript API: {e}")
+                try:
+                    # Try YouTube Transcript API as fallback
+                    segments = self.fetch_youtube_segments(video_url)
+                    if segments:
+                        # Combine all segments into one transcription
+                        transcription_text = " ".join([segment.get('text', '') for segment in segments])
+                        
+                        logger.info("✅ YouTube Transcript API fallback successful")
+                        
+                        # Create result structure
+                        result_dict = {
+                            "title": "YouTube Video",
+                            "transcription": transcription_text,
+                            "summary": "",
+                            "duration": "Unknown",
+                            "language": "en",
+                            "word_count": len(transcription_text.split()),
+                            "method": "youtube_transcript_api_fallback",
+                            "segments": segments
+                        }
+                        
+                        # Log the transcription
+                        logger.info(f"✅ Transcription extracted successfully via YouTube API")
+                        logger.info(f"📝 Word count: {len(transcription_text.split())}")
+                        logger.info(f"🔧 Method: youtube_transcript_api_fallback")
+                        
+                        # Save transcript to file for logging purposes
+                        self._save_transcript_to_file(video_url, transcription_text, result_dict)
+                        
+                        return result_dict
+                    else:
+                        raise Exception("YouTube Transcript API also failed")
+                except Exception as fallback_error:
+                    logger.error(f"❌ Both Gemini and YouTube Transcript API failed: {fallback_error}")
+                    return None
             
             # Response handling is now done directly in the try block above
-            else:
-                logger.error("❌ Empty response from Gemini")
-                return None
                 
         except Exception as e:
             logger.error(f"❌ Gemini transcription failed: {e}")

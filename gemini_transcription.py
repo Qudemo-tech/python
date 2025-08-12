@@ -23,29 +23,13 @@ except ImportError:
 def get_youtube_transcript(video_id, languages=None):
     """Get YouTube transcript with version compatibility"""
     try:
-        # Debug: Check what methods are available
-        logger.info(f"🔍 Available YouTubeTranscriptApi methods: {dir(YouTubeTranscriptApi)}")
-        
         # Try the correct method for newer versions
         if languages:
             return YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
         else:
             return YouTubeTranscriptApi.get_transcript(video_id)
-    except AttributeError:
-        # Try alternative method names for different versions
-        try:
-            # Try list_transcripts method
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            if languages:
-                transcript = transcript_list.find_transcript(languages)
-            else:
-                transcript = transcript_list.find_generated_transcript(['en']) or transcript_list.find_manually_created_transcript(['en'])
-            return transcript.fetch()
-        except Exception as e:
-            logger.error(f"❌ YouTube Transcript API alternative method failed: {e}")
-            return None
     except Exception as e:
-        logger.error(f"❌ YouTube Transcript API error: {e}")
+        # Silently fail - this is just a fallback
         return None
 from pinecone import Pinecone, ServerlessSpec
 import numpy as np
@@ -202,7 +186,6 @@ class GeminiTranscriptionProcessor:
                 
             except Exception as e:
                 # Fallback to YouTube Transcript API if Gemini fails
-                logger.warning(f"⚠️ Gemini API failed, trying YouTube Transcript API: {e}")
                 try:
                     # Try YouTube Transcript API as fallback
                     segments = self.fetch_youtube_segments(video_url)
@@ -256,7 +239,6 @@ class GeminiTranscriptionProcessor:
             logger.error(f"❌ Gemini transcription failed: {e}")
             
             # Try YouTube transcript as fallback
-            logger.info("🔄 Trying YouTube transcript as fallback...")
             try:
                 youtube_result = self.fetch_youtube_segments(video_url)
                 if youtube_result:
@@ -284,19 +266,11 @@ class GeminiTranscriptionProcessor:
 
             # Try English first, then auto
             try:
-                logger.info(f"🔍 Attempting to get transcript for video: {video_id}")
                 transcript = get_youtube_transcript(video_id, languages=['en'])
                 if transcript is None:
-                    logger.info("ℹ️ English transcript not found, trying auto-generated")
                     transcript = get_youtube_transcript(video_id)
-                
-                if transcript:
-                    logger.info(f"✅ Successfully retrieved transcript with {len(transcript)} segments")
-                else:
-                    logger.warning("⚠️ No transcript retrieved")
                     
             except Exception as e:
-                logger.warning(f"⚠️ YouTube transcript API error: {e}")
                 return None
 
             segments: List[Dict] = []
@@ -311,7 +285,7 @@ class GeminiTranscriptionProcessor:
             logger.info(f"✅ Retrieved {len(segments)} timestamped segments from YouTube API")
             return segments
         except Exception as e:
-            logger.warning(f"⚠️ Failed to fetch YouTube transcript segments: {e}")
+            # Silently fail - this is just a fallback
             return None
     
     def _save_transcript_to_file(self, video_url: str, transcription_text: str, result: Dict):
@@ -638,7 +612,7 @@ class GeminiTranscriptionProcessor:
                     if 'max serverless indexes' in msg.lower() or 'forbidden' in msg.lower():
                         if existing_indexes:
                             fallback = existing_indexes[0]
-                            logger.warning(f"⚠️ Index quota reached; falling back to existing index: {fallback}")
+                            logger.info(f"ℹ️ Using existing index: {fallback}")
                             index_name = fallback
                         else:
                             logger.error("❌ No existing Pinecone indexes available to fallback to.")

@@ -97,9 +97,9 @@ def process_video(video_url: str, company_name: str, bucket_name: Optional[str] 
             if not loom_processor:
                 raise Exception("Loom processor not initialized")
             
-            # Choose processing mode based on memory
-            if memory_mb > 1500:  # High memory usage
-                logger.warning(f"⚠️ High memory usage ({memory_mb:.1f}MB), using lightweight mode")
+            # Choose processing mode based on memory - increased threshold to allow timestamps
+            if memory_mb > 2800:  # Increased from 1500MB to 2800MB to allow timestamps
+                logger.warning(f"⚠️ Very high memory usage ({memory_mb:.1f}MB), using lightweight mode")
                 logger.info("🎬 Processing with Loom processor (LIGHTWEIGHT MODE)...")
                 result = loom_processor.process_video_lightweight(
                     video_url=video_url,

@@ -1167,18 +1167,20 @@ class LoomVideoProcessor:
                 # Load Whisper model if not loaded
                 model = self.get_whisper_model()
                 
-                # Use minimal transcription settings
+                # Use transcription settings that preserve timestamps
                 result = model.transcribe(
                     temp_video_path,
                     word_timestamps=False,  # Disable word timestamps to save memory
                     verbose=False,
-                    fp16=False  # Disable fp16 to save memory
+                    fp16=False,  # Disable fp16 to save memory
+                    condition_on_previous_text=False,  # Disable for faster processing
+                    temperature=0.0  # Use greedy decoding for speed
                 )
                 
-                # Create minimal transcription data
+                # Create transcription data with segments for timestamps
                 transcription_data = {
                     'transcription': result['text'],
-                    'segments': [],  # No segments to save memory
+                    'segments': result.get('segments', []),  # Keep segments for timestamps
                     'language': result.get('language', 'en'),
                     'word_count': len(result['text'].split())
                 }
@@ -1199,44 +1201,107 @@ class LoomVideoProcessor:
                 memory_mb = self.check_memory_usage()
                 logger.info(f"💾 Memory after transcription: {memory_mb:.1f} MB")
                 
-                # Step 4: Create simple chunks (no timestamps)
+                # Step 4: Create chunks with timestamps from segments
                 transcription = transcription_data.get('transcription', '')
+                segments = transcription_data.get('segments', [])
+                
                 if not transcription:
                     raise Exception("Empty transcription")
                 
-                # Simple character-based chunking
+                # Create timestamped chunks from segments
                 chunks = []
-                chunk_size = 500  # Very small chunks
-                overlap = 50
-                pos = 0
-                
-                while pos < len(transcription):
-                    end = pos + chunk_size
-                    if end < len(transcription):
-                        for i in range(end, max(pos + chunk_size - 100, pos), -1):
-                            if transcription[i] in '.!?':
-                                end = i + 1
-                                break
-                    text_chunk = transcription[pos:end].strip()
-                    if text_chunk:
-                        chunks.append({'text': text_chunk, 'start': 0.0, 'end': 0.0})
-                    pos = end - overlap
-                    if pos >= len(transcription):
-                        break
-                
-                logger.info(f"📄 Created {len(chunks)} simple chunks")
+                if segments:
+                    # Use segments to create timestamped chunks
+                    current_chunk = []
+                    current_start = 0.0
+                    current_end = 0.0
+                    chunk_duration = 30.0  # 30-second chunks
+                    
+                    for segment in segments:
+                        segment_start = float(segment.get('start', 0.0))
+                        segment_end = float(segment.get('end', 0.0))
+                        segment_text = segment.get('text', '').strip()
+                        
+                        if not segment_text:
+                            continue
+                        
+                        # If this segment starts a new chunk
+                        if not current_chunk or (segment_start - current_start) >= chunk_duration:
+                            # Save previous chunk if it exists
+                            if current_chunk:
+                                chunk_text = ' '.join(current_chunk)
+                                chunks.append({
+                                    'text': chunk_text,
+                                    'start': current_start,
+                                    'end': current_end
+                                })
+                            
+                            # Start new chunk
+                            current_chunk = [segment_text]
+                            current_start = segment_start
+                            current_end = segment_end
+                        else:
+                            # Add to current chunk
+                            current_chunk.append(segment_text)
+                            current_end = segment_end
+                    
+                    # Add final chunk
+                    if current_chunk:
+                        chunk_text = ' '.join(current_chunk)
+                        chunks.append({
+                            'text': chunk_text,
+                            'start': current_start,
+                            'end': current_end
+                        })
+                    
+                    logger.info(f"📄 Created {len(chunks)} timestamped chunks from segments")
+                else:
+                    # Fallback to simple character-based chunking (no timestamps)
+                    chunk_size = 500  # Very small chunks
+                    overlap = 50
+                    pos = 0
+                    
+                    while pos < len(transcription):
+                        end = pos + chunk_size
+                        if end < len(transcription):
+                            for i in range(end, max(pos + chunk_size - 100, pos), -1):
+                                if transcription[i] in '.!?':
+                                    end = i + 1
+                                    break
+                        text_chunk = transcription[pos:end].strip()
+                        if text_chunk:
+                            chunks.append({'text': text_chunk, 'start': 0.0, 'end': 0.0})
+                        pos = end - overlap
+                        if pos >= len(transcription):
+                            break
+                    
+                    logger.info(f"📄 Created {len(chunks)} simple chunks (no timestamps)")
                 
                 # Log detailed chunk information for lightweight mode
-                logger.info("📦 SIMPLE CHUNKS (LIGHTWEIGHT MODE):")
-                logger.info("=" * 80)
-                for i, chunk in enumerate(chunks, 1):
-                    text = chunk.get('text', '').strip()
-                    logger.info(f"Chunk {i:2d} (No timestamps):")
-                    logger.info(f"  \"{text}\"")
-                    logger.info("")
-                logger.info("=" * 80)
-                logger.info(f"📊 Total chunks: {len(chunks)}")
-                logger.info(f"📊 Average chunk size: {sum(len(chunk.get('text', '')) for chunk in chunks) / len(chunks):.0f} characters")
+                if segments:
+                    logger.info("📦 TIMESTAMPED CHUNKS (LIGHTWEIGHT MODE):")
+                    logger.info("=" * 80)
+                    for i, chunk in enumerate(chunks, 1):
+                        text = chunk.get('text', '').strip()
+                        start = chunk.get('start', 0.0)
+                        end = chunk.get('end', 0.0)
+                        logger.info(f"Chunk {i:2d} [{start:.2f}s → {end:.2f}s]:")
+                        logger.info(f"  \"{text}\"")
+                        logger.info("")
+                    logger.info("=" * 80)
+                    logger.info(f"📊 Total chunks: {len(chunks)}")
+                    logger.info(f"📊 Average chunk duration: {sum(chunk.get('end', 0.0) - chunk.get('start', 0.0) for chunk in chunks) / len(chunks):.1f}s")
+                else:
+                    logger.info("📦 SIMPLE CHUNKS (LIGHTWEIGHT MODE - NO TIMESTAMPS):")
+                    logger.info("=" * 80)
+                    for i, chunk in enumerate(chunks, 1):
+                        text = chunk.get('text', '').strip()
+                        logger.info(f"Chunk {i:2d} (No timestamps):")
+                        logger.info(f"  \"{text}\"")
+                        logger.info("")
+                    logger.info("=" * 80)
+                    logger.info(f"📊 Total chunks: {len(chunks)}")
+                    logger.info(f"📊 Average chunk size: {sum(len(chunk.get('text', '')) for chunk in chunks) / len(chunks):.0f} characters")
                 
                 # Check memory before embeddings
                 memory_mb = self.check_memory_usage()
@@ -1284,6 +1349,15 @@ class LoomVideoProcessor:
                 
                 if not storage_success:
                     raise Exception("Failed to store in Pinecone")
+                
+                # Log timestamp verification
+                chunks_with_timestamps = sum(1 for c in chunks if float(c.get('start', 0.0)) > 0.0 or float(c.get('end', 0.0)) > 0.0)
+                logger.info(f"🧪 Timestamp chunk check (Loom lightweight - {company_name}): {chunks_with_timestamps}/{len(chunks)} chunks have timestamps")
+                for i, c in enumerate(chunks[:min(3, len(chunks))]):
+                    s = float(c.get('start', 0.0))
+                    e = float(c.get('end', 0.0))
+                    t = (c.get('text') or '')[:80].replace('\n', ' ')
+                    logger.info(f"    #{i+1}: [{s:.2f} → {e:.2f}] {t}")
                 
                 # Final memory cleanup
                 self.cleanup_memory(preserve_whisper=True)

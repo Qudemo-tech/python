@@ -877,7 +877,7 @@ class LoomVideoProcessor:
                         'duration': video_info.get('duration', 'Unknown'),
                         'language': transcription_data.get('language', 'Unknown'),
                         'word_count': transcription_data.get('word_count', 'Unknown'),
-                        'source_type': 'loom_video'
+                        'source_type': 'video'
                     }
                 }
                 

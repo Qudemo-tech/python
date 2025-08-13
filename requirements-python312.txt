@@ -33,5 +33,11 @@ google-generativeai>=0.3.0
 # Utilities
 psutil>=5.9.0
 
+# Web scraping and document processing
+beautifulsoup4>=4.12.0
+PyPDF2>=3.0.0
+python-docx>=0.8.11
+docx2txt>=0.8
+
 # Cloud storage
 google-cloud-storage>=2.10.0 

@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 # Global clients
 pc = None
 
+# Default Pinecone index name
+default_index_name = os.getenv("PINECONE_INDEX", "qudemo-demo")
+
 class AskQuestionRequest(BaseModel):
     question: str
     company_name: str
@@ -446,3 +449,43 @@ def generate_summary(questions_and_answers: List[Dict[str, str]],
             'success': False,
             'error': f"Summary generation failed: {str(e)}"
         }
+
+def answer_question_with_enhanced_fallback(company_name: str, question: str, use_enhanced: bool = True) -> Dict:
+    """Answer question with optional enhanced Q&A fallback"""
+    try:
+        # Try enhanced Q&A first if requested and available
+        if use_enhanced:
+            try:
+                from enhanced_qa import EnhancedQA
+                import os
+                
+                openai_api_key = os.getenv("OPENAI_API_KEY")
+                if openai_api_key:
+                    enhanced_qa = EnhancedQA(openai_api_key)
+                    result = enhanced_qa.answer_question_enhanced(company_name, question)
+                    
+                    # If enhanced Q&A found something, return it
+                    if result.get("source_type") != "none" and result.get("answer"):
+                        logger.info(f"✅ Enhanced Q&A provided answer for {company_name}")
+                        return {
+                            "answer": result["answer"],
+                            "sources": result.get("sources", []),
+                            "video_url": result.get("video_timestamp", {}).get("video_url"),
+                            "start": result.get("video_timestamp", {}).get("start"),
+                            "end": result.get("video_timestamp", {}).get("end"),
+                            "source_type": result.get("source_type"),
+                            "confidence": result.get("confidence")
+                        }
+                    else:
+                        logger.info(f"⚠️ Enhanced Q&A found no relevant content, falling back to video-only")
+                        
+            except Exception as e:
+                logger.warning(f"⚠️ Enhanced Q&A failed, falling back to video-only: {e}")
+        
+        # Fall back to original video-only Q&A
+        logger.info(f"🎬 Using video-only Q&A for {company_name}")
+        return answer_question(company_name, question)
+        
+    except Exception as e:
+        logger.error(f"❌ Enhanced fallback Q&A failed: {e}")
+        return {"error": f"Failed to answer question: {str(e)}"}

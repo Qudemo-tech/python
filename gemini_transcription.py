@@ -690,7 +690,7 @@ class GeminiTranscriptionProcessor:
                         'duration': transcription_data.get('duration', 'Unknown'),
                         'language': transcription_data.get('language', 'Unknown'),
                         'word_count': transcription_data.get('word_count', 'Unknown'),
-                        'source_type': 'youtube_gemini'
+                        'source_type': 'video'
                     }
                 }
                 vectors.append(vector_data)

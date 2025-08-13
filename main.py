@@ -6,7 +6,7 @@ Clean, refactored version with modular architecture
 import os
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from dotenv import load_dotenv
@@ -36,14 +36,28 @@ from health_checks import (
     get_health_check
 )
 
+# Import new knowledge processing modules
+from web_scraper import WebScraper
+from document_processor import DocumentProcessor
+from knowledge_integration import KnowledgeIntegrator
+from enhanced_qa import EnhancedQA
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Global instances for knowledge processing
+web_scraper = None
+document_processor = None
+knowledge_integrator = None
+enhanced_qa = None
 
 # Lifespan event handler for startup and shutdown
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown"""
+    global web_scraper, document_processor, knowledge_integrator, enhanced_qa
+    
     # Startup
     logger.info("🚀 Starting QuDemo Video Processing API...")
     
@@ -58,6 +72,21 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Q&A system initialized successfully")
     else:
         logger.error("❌ Failed to initialize Q&A system")
+    
+    # Initialize knowledge processing modules
+    try:
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if openai_api_key and openai_api_key != "your_openai_api_key_here" and openai_api_key != "your-openai-api-key-here":
+            web_scraper = WebScraper(openai_api_key)
+            document_processor = DocumentProcessor()
+            knowledge_integrator = KnowledgeIntegrator(openai_api_key)
+            enhanced_qa = EnhancedQA(openai_api_key)
+            logger.info("✅ Knowledge processing modules initialized successfully")
+        else:
+            logger.warning("⚠️ OPENAI_API_KEY not found or invalid - knowledge processing disabled")
+            logger.info("💡 To enable knowledge processing, set OPENAI_API_KEY environment variable")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize knowledge processing modules: {e}")
     
     # Initialize video mappings
     initialize_existing_mappings()
@@ -189,6 +218,176 @@ async def generate_summary_endpoint(request: GenerateSummaryRequest):
             
     except Exception as e:
         logger.error(f"❌ Summary endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Knowledge Processing Endpoints
+@app.post("/process-website/{company_name}")
+async def process_website_endpoint(company_name: str, request: Request):
+    """Process website knowledge for a company"""
+    global enhanced_qa
+    
+    try:
+        if not enhanced_qa:
+            raise HTTPException(
+                status_code=503, 
+                detail="Knowledge processing not available. Please set OPENAI_API_KEY environment variable to enable this feature."
+            )
+        
+        # Parse request body
+        body = await request.json()
+        website_url = body.get('website_url')
+        knowledge_source_id = body.get('knowledge_source_id')  # New parameter
+        
+        if not website_url:
+            raise HTTPException(status_code=400, detail="Website URL is required")
+        
+        logger.info(f"🌐 Processing website for {company_name}: {website_url}")
+        
+        # Process website knowledge
+        result = enhanced_qa.process_website_knowledge(company_name, website_url, knowledge_source_id)
+        
+        if result['success']:
+            return {
+                "success": True,
+                "message": "Website knowledge processed successfully",
+                "data": result['data']
+            }
+        else:
+            raise HTTPException(status_code=500, detail=result['error'])
+            
+    except Exception as e:
+        logger.error(f"❌ Website processing error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/process-document/{company_name}")
+async def process_document_endpoint(company_name: str, request: Request):
+    """Process document knowledge for a specific company"""
+    global document_processor, knowledge_integrator
+    
+    try:
+        if not document_processor or not knowledge_integrator:
+            raise HTTPException(
+                status_code=503, 
+                detail="Knowledge processing not available. Please set OPENAI_API_KEY environment variable to enable this feature."
+            )
+        
+        # Parse multipart form data
+        form = await request.form()
+        file = form.get("file")
+        
+        if not file:
+            raise HTTPException(status_code=400, detail="file is required")
+        
+        # Read file content
+        file_content = await file.read()
+        filename = file.filename
+        
+        logger.info(f"📄 Processing document for {company_name}: {filename}")
+        
+        # Process document
+        document_data = document_processor.process_uploaded_file(file_content, filename)
+        
+        if not document_data:
+            raise HTTPException(status_code=400, detail="Failed to extract text from document")
+        
+        # Process document knowledge
+        success = knowledge_integrator.process_document_knowledge(
+            company_name=company_name,
+            document_data=document_data,
+            doc_processor=document_processor
+        )
+        
+        if success:
+            return {
+                "success": True,
+                "message": f"Document knowledge processed successfully for {company_name}",
+                "filename": filename,
+                "word_count": document_data.get("word_count", 0)
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to process document knowledge")
+            
+    except Exception as e:
+        logger.error(f"❌ Document processing endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/knowledge/source/{source_id}/content")
+async def get_knowledge_source_content_endpoint(source_id: str, company_name: str = Query(None)):
+    """Get knowledge source content from Pinecone for preview"""
+    global enhanced_qa
+    
+    try:
+        if not enhanced_qa:
+            raise HTTPException(
+                status_code=503, 
+                detail="Knowledge retrieval not available. Please set OPENAI_API_KEY environment variable to enable this feature."
+            )
+        
+        logger.info(f"📄 Getting knowledge source content: {source_id} (company: {company_name})")
+        
+        # Get content from Pinecone using the source ID and company name
+        content_data = enhanced_qa.get_source_content(source_id, company_name)
+        
+        if content_data:
+            return {
+                "success": True,
+                "data": content_data
+            }
+        else:
+            raise HTTPException(status_code=404, detail="Knowledge source content not found")
+            
+    except Exception as e:
+        logger.error(f"❌ Knowledge source content endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ask-enhanced/{company_name}")
+async def ask_enhanced_question_endpoint(company_name: str, request: Request):
+    """Ask a question using enhanced Q&A with all knowledge sources"""
+    global enhanced_qa
+    
+    try:
+        if not enhanced_qa:
+            raise HTTPException(status_code=503, detail="Enhanced Q&A not available")
+        
+        # Parse request body
+        body = await request.json()
+        question = body.get("question")
+        
+        if not question:
+            raise HTTPException(status_code=400, detail="question is required")
+        
+        logger.info(f"🤖 Enhanced Q&A for {company_name}: {question}")
+        
+        # Get enhanced answer
+        result = enhanced_qa.answer_question_enhanced(company_name, question)
+        
+        return {
+            "success": True,
+            "answer": result["answer"],
+            "sources": result.get("sources", []),
+            "source_type": result.get("source_type", "unknown"),
+            "confidence": result.get("confidence", 0.0),
+            "video_timestamp": result.get("video_timestamp")
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Enhanced Q&A endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/knowledge-summary/{company_name}")
+async def get_knowledge_summary_endpoint(company_name: str):
+    """Get knowledge summary for a specific company"""
+    global knowledge_integrator
+    
+    try:
+        if not knowledge_integrator:
+            raise HTTPException(status_code=503, detail="Knowledge processing not available")
+        
+        summary = knowledge_integrator.get_knowledge_summary(company_name)
+        return summary
+        
+    except Exception as e:
+        logger.error(f"❌ Knowledge summary endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Health Check Endpoints

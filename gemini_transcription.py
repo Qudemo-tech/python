@@ -23,14 +23,19 @@ except ImportError:
 def get_youtube_transcript(video_id, languages=None):
     """Get YouTube transcript with version compatibility"""
     try:
-        # Try the correct method for newer versions
+        # Create instance and use fetch method
+        api = YouTubeTranscriptApi()
         if languages:
-            return YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
+            return api.fetch(video_id, languages=languages)
         else:
-            return YouTubeTranscriptApi.get_transcript(video_id)
+            return api.fetch(video_id)
     except Exception as e:
-        # Silently fail - this is just a fallback
+        logger.warning(f"⚠️ YouTube Transcript API failed for {video_id}: {e}")
         return None
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 from pinecone import Pinecone, ServerlessSpec
 import numpy as np
 import openai
@@ -111,9 +116,34 @@ class GeminiTranscriptionProcessor:
             
             logger.info(f"🎬 Extracting transcription from: {video_url}")
             
-            # Use Gemini's native YouTube URL processing with correct API method
+            # Try Gemini API with retry logic
+            gemini_result = self._try_gemini_api(video_url)
+            if gemini_result:
+                return gemini_result
+            
+            # Fallback to YouTube Transcript API
+            youtube_result = self._try_youtube_api(video_url)
+            if youtube_result:
+                return youtube_result
+            
+            # Final fallback: Create basic transcription
+            fallback_result = self._create_fallback_transcription(video_url)
+            if fallback_result:
+                return fallback_result
+            
+            return None
+                
+        except Exception as e:
+            logger.error(f"❌ Transcription failed: {e}")
+            return None
+
+    def _try_gemini_api(self, video_url: str) -> Optional[Dict]:
+        """Try Gemini API with enhanced retry logic for overload handling"""
+        max_retries = 5  # Increased from 3 to 5
+        base_delay = 3   # Base delay in seconds
+        
+        for attempt in range(max_retries):
             try:
-                # Use the raw API call with the exact structure from the working Insomnia example
                 import requests
                 
                 url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
@@ -145,21 +175,20 @@ class GeminiTranscriptionProcessor:
                     ]
                 }
                 
-                # Call Gemini API with the exact structure from Insomnia
-                logger.info("Sending request to Gemini API...")
+                logger.info(f"Sending request to Gemini API... (attempt {attempt + 1}/{max_retries})")
                 response = requests.post(
                     f"{url}?key={self.gemini_api_key}",
                     headers=headers,
-                    json=data
+                    json=data,
+                    timeout=90  # Increased timeout from 60 to 90 seconds
                 )
                 
                 if response.status_code == 200:
                     result = response.json()
                     if "candidates" in result and len(result["candidates"]) > 0:
                         transcription_text = result["candidates"][0]["content"]["parts"][0]["text"]
-                        logger.info("✅ Request successful - Using Gemini raw API video analysis")
+                        logger.info("✅ Gemini API successful - Using raw API video analysis")
                         
-                        # Create result structure
                         result_dict = {
                             "title": "YouTube Video",
                             "transcription": transcription_text,
@@ -170,7 +199,6 @@ class GeminiTranscriptionProcessor:
                             "method": "gemini_raw_api_analysis"
                         }
                         
-                        # Log the transcription
                         logger.info(f"✅ Transcription extracted successfully")
                         logger.info(f"📝 Word count: {len(transcription_text.split())}")
                         logger.info(f"🔧 Method: gemini_raw_api_analysis")
@@ -183,78 +211,73 @@ class GeminiTranscriptionProcessor:
                         if len(transcription_text) > 2000:
                             logger.info(f"📄 (Showing first 2000 characters of {len(transcription_text)} total)")
                         
-                        # Save transcript to file for logging purposes
                         self._save_transcript_to_file(video_url, transcription_text, result_dict)
-                        
                         return result_dict
                     else:
                         raise Exception("No candidates in response")
                 else:
-                    raise Exception(f"API request failed with status {response.status_code}: {response.text}")
-                
-            except Exception as e:
-                # Fallback to YouTube Transcript API if Gemini fails
-                try:
-                    # Try YouTube Transcript API as fallback
-                    segments = self.fetch_youtube_segments(video_url)
-                    if segments:
-                        # Combine all segments into one transcription
-                        transcription_text = " ".join([segment.get('text', '') for segment in segments])
-                        
-                        logger.info("✅ YouTube Transcript API fallback successful")
-                        
-                        # Create result structure
-                        result_dict = {
-                            "title": "YouTube Video",
-                            "transcription": transcription_text,
-                            "summary": "",
-                            "duration": "Unknown",
-                            "language": "en",
-                            "word_count": len(transcription_text.split()),
-                            "method": "youtube_transcript_api_fallback",
-                            "segments": segments
-                        }
-                        
-                        # Log the transcription
-                        logger.info(f"✅ Transcription extracted successfully via YouTube API")
-                        logger.info(f"📝 Word count: {len(transcription_text.split())}")
-                        logger.info(f"🔧 Method: youtube_transcript_api_fallback")
-                        
-                        # Save transcript to file for logging purposes
-                        self._save_transcript_to_file(video_url, transcription_text, result_dict)
-                        
-                        return result_dict
+                    # Enhanced retry logic with exponential backoff
+                    if response.status_code == 503 and attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)  # Exponential backoff: 3s, 6s, 12s, 24s
+                        logger.warning(f"⚠️ Gemini API overloaded (503), retrying in {delay} seconds... (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(delay)
+                        continue
+                    elif response.status_code in [429, 500, 502] and attempt < max_retries - 1:
+                        # Handle other rate limiting and server errors
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(f"⚠️ Gemini API error ({response.status_code}), retrying in {delay} seconds... (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(delay)
+                        continue
                     else:
-                        raise Exception("YouTube Transcript API also failed")
-                except Exception as fallback_error:
-                    logger.error(f"❌ Both Gemini and YouTube Transcript API failed: {fallback_error}")
-                    
-                    # Final fallback: Create a basic transcription from video metadata
-                    logger.info("🔄 Attempting fallback transcription from video metadata...")
-                    try:
-                        fallback_result = self._create_fallback_transcription(video_url)
-                        if fallback_result:
-                            logger.info("✅ Fallback transcription created successfully")
-                            return fallback_result
-                    except Exception as fallback_error2:
-                        logger.error(f"❌ Fallback transcription also failed: {fallback_error2}")
-                    
-                    return None
-            
-            # Response handling is now done directly in the try block above
+                        raise Exception(f"API request failed with status {response.status_code}: {response.text}")
                 
+            except requests.exceptions.Timeout:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"⚠️ Gemini API timeout, retrying in {delay} seconds... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(delay)
+                else:
+                    logger.warning(f"⚠️ Gemini API failed after {max_retries} attempts due to timeouts")
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"⚠️ Gemini API attempt {attempt + 1} failed: {e}, retrying in {delay} seconds...")
+                    time.sleep(delay)
+                else:
+                    logger.warning(f"⚠️ Gemini API failed after {max_retries} attempts: {e}")
+        
+        return None
+
+    def _try_youtube_api(self, video_url: str) -> Optional[Dict]:
+        """Try YouTube Transcript API as fallback"""
+        try:
+            segments = self.fetch_youtube_segments(video_url)
+            if segments:
+                transcription_text = " ".join([segment.get('text', '') for segment in segments])
+                
+                logger.info("✅ YouTube Transcript API fallback successful")
+                
+                result_dict = {
+                    "title": "YouTube Video",
+                    "transcription": transcription_text,
+                    "summary": "",
+                    "duration": "Unknown",
+                    "language": "en",
+                    "word_count": len(transcription_text.split()),
+                    "method": "youtube_transcript_api_fallback",
+                    "segments": segments
+                }
+                
+                logger.info(f"✅ Transcription extracted successfully via YouTube API")
+                logger.info(f"📝 Word count: {len(transcription_text.split())}")
+                logger.info(f"🔧 Method: youtube_transcript_api_fallback")
+                
+                self._save_transcript_to_file(video_url, transcription_text, result_dict)
+                return result_dict
+            else:
+                raise Exception("YouTube Transcript API returned no segments")
         except Exception as e:
-            logger.error(f"❌ Gemini transcription failed: {e}")
-            
-            # Try YouTube transcript as fallback
-            try:
-                youtube_result = self.fetch_youtube_segments(video_url)
-                if youtube_result:
-                    logger.info("✅ YouTube transcript fallback successful")
-                    return youtube_result
-            except Exception as youtube_error:
-                logger.error(f"❌ YouTube transcript fallback also failed: {youtube_error}")
-            
+            logger.error(f"❌ YouTube Transcript API failed: {e}")
             return None
 
     def fetch_youtube_segments(self, video_url: str) -> Optional[List[Dict]]:
@@ -273,12 +296,12 @@ class GeminiTranscriptionProcessor:
             logger.info(f"🔎 Fetching YouTube transcript segments for: {video_id}")
 
             # Try English first, then auto
-            try:
-                transcript = get_youtube_transcript(video_id, languages=['en'])
-                if transcript is None:
-                    transcript = get_youtube_transcript(video_id)
-                    
-            except Exception as e:
+            transcript = get_youtube_transcript(video_id, languages=['en'])
+            if transcript is None:
+                transcript = get_youtube_transcript(video_id)
+            
+            if transcript is None:
+                logger.warning(f"⚠️ No transcript available for video {video_id}")
                 return None
 
             segments: List[Dict] = []
@@ -763,7 +786,7 @@ class GeminiTranscriptionProcessor:
                 'vectors_stored': len(embeddings),
                 'word_count': transcription_data.get('word_count', 'Unknown'),
                 'language': transcription_data.get('language', 'Unknown'),
-                'method': 'gemini_transcription'
+                'method': transcription_data.get('method', 'gemini_transcription')  # Use the actual method from transcription_data
             }
             
             logger.info(f"✅ Video processing completed successfully")

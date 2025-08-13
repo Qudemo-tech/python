@@ -89,6 +89,7 @@ tmp/
 
 # Transcript files
 transcript_chunks.json
+transcript_logs
 transcripts/
 *.json
 

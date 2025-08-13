@@ -5,6 +5,7 @@ Clean, refactored version with modular architecture
 
 import os
 import logging
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -132,20 +133,40 @@ async def process_video_endpoint(company_name: str, request: Request):
         
         logger.info(f"🎬 Processing video for {company_name}: {video_url}")
         
-        # Process the video
-        result = process_video(
-            video_url=video_url,
-            company_name=company_name,
-            bucket_name=bucket_name,
-            source=source,
-            meeting_link=meeting_link
-        )
+        # Process the video with extended timeout for Loom videos
+        is_loom_video = 'loom.com' in video_url
+        timeout_seconds = 810.0 if is_loom_video else 270.0  # 13.5 minutes for Loom, 4.5 minutes for others
+        
+        logger.info(f"⏱️ Using timeout: {timeout_seconds/60:.1f} minutes for {'Loom' if is_loom_video else 'other'} video")
+        
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    process_video,
+                    video_url=video_url,
+                    company_name=company_name,
+                    bucket_name=bucket_name,
+                    source=source,
+                    meeting_link=meeting_link
+                ),
+                timeout=timeout_seconds
+            )
+        except asyncio.TimeoutError:
+            timeout_minutes = int(timeout_seconds / 60)
+            logger.error(f"❌ Video processing timeout for {company_name}: {video_url} after {timeout_minutes} minutes")
+            raise HTTPException(
+                status_code=408, 
+                detail=f"Video processing timed out after {timeout_minutes} minutes. Loom videos take longer to process. Please try again."
+            )
         
         if result["success"]:
             return result
         else:
             raise HTTPException(status_code=500, detail=result["error"])
             
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
         logger.error(f"❌ Video processing endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -243,8 +264,20 @@ async def process_website_endpoint(company_name: str, request: Request):
         
         logger.info(f"🌐 Processing website for {company_name}: {website_url}")
         
-        # Process website knowledge
-        result = enhanced_qa.process_website_knowledge(company_name, website_url, knowledge_source_id)
+        # Process website knowledge with timeout (4.5 minutes)
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    enhanced_qa.process_website_knowledge,
+                    company_name,
+                    website_url,
+                    knowledge_source_id
+                ),
+                timeout=270.0  # 4.5 minutes
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"❌ Website processing timeout for {company_name}: {website_url}")
+            raise HTTPException(status_code=408, detail="Website processing timed out. Please try again.")
         
         if result['success']:
             return {
@@ -255,6 +288,9 @@ async def process_website_endpoint(company_name: str, request: Request):
         else:
             raise HTTPException(status_code=500, detail=result['error'])
             
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
         logger.error(f"❌ Website processing error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

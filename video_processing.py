@@ -108,8 +108,8 @@ def process_video(video_url: str, company_name: str, bucket_name: Optional[str] 
                 except:
                     pass
             
-            # Choose processing mode based on memory - 8GB RAM can handle standard mode
-            if memory_mb > 6000:  # Increased threshold for 8GB RAM capacity
+            # Choose processing mode based on memory - Force Standard Mode for 8GB RAM
+            if memory_mb > 7000:  # Extremely high threshold (never reached on 8GB RAM)
                 logger.warning(f"⚠️ Critical memory usage ({memory_mb:.1f}MB), using lightweight mode")
                 logger.info("🎬 Processing with Loom processor (LIGHTWEIGHT MODE)...")
                 result = loom_processor.process_video_lightweight(

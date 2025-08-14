@@ -188,6 +188,130 @@ async def process_video_endpoint(company_name: str, request: Request):
         logger.error(f"❌ Video processing endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/process-videos-batch/{company_name}")
+async def process_videos_batch_endpoint(company_name: str, request: Request):
+    """Process multiple videos for a specific company sequentially"""
+    try:
+        # Parse request body
+        body = await request.json()
+        video_urls = body.get("video_urls", [])
+        source = body.get("source", "batch")
+        meeting_link = body.get("meeting_link")
+        
+        if not video_urls or not isinstance(video_urls, list):
+            raise HTTPException(status_code=400, detail="video_urls must be a non-empty list")
+        
+        if len(video_urls) > 10:  # Limit batch size
+            raise HTTPException(status_code=400, detail="Maximum 10 videos per batch")
+        
+        logger.info(f"🎬 Starting batch processing for {company_name}: {len(video_urls)} videos")
+        
+        # Initialize batch results
+        batch_results = {
+            "success": True,
+            "company_name": company_name,
+            "total_videos": len(video_urls),
+            "processed_videos": 0,
+            "failed_videos": 0,
+            "results": [],
+            "start_time": datetime.now().isoformat(),
+            "end_time": None,
+            "total_duration": None
+        }
+        
+        start_time = datetime.now()
+        
+        # Process videos sequentially
+        for i, video_url in enumerate(video_urls, 1):
+            try:
+                logger.info(f"🎬 Processing video {i}/{len(video_urls)}: {video_url}")
+                
+                # Check if it's a Loom video for timeout
+                is_loom_video = 'loom.com' in video_url
+                timeout_seconds = 810.0 if is_loom_video else 270.0  # 13.5 minutes for Loom, 4.5 minutes for others
+                
+                logger.info(f"⏱️ Using timeout: {timeout_seconds/60:.1f} minutes for {'Loom' if is_loom_video else 'other'} video")
+                
+                # Process the video
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        process_video,
+                        video_url=video_url,
+                        company_name=company_name,
+                        bucket_name=None,
+                        source=source,
+                        meeting_link=meeting_link
+                    ),
+                    timeout=timeout_seconds
+                )
+                
+                if result["success"]:
+                    batch_results["processed_videos"] += 1
+                    batch_results["results"].append({
+                        "video_url": video_url,
+                        "status": "success",
+                        "result": result["result"],
+                        "processing_order": i
+                    })
+                    logger.info(f"✅ Video {i}/{len(video_urls)} processed successfully")
+                else:
+                    batch_results["failed_videos"] += 1
+                    batch_results["results"].append({
+                        "video_url": video_url,
+                        "status": "failed",
+                        "error": result["error"],
+                        "processing_order": i
+                    })
+                    logger.error(f"❌ Video {i}/{len(video_urls)} failed: {result['error']}")
+                
+            except asyncio.TimeoutError:
+                timeout_minutes = int(timeout_seconds / 60)
+                batch_results["failed_videos"] += 1
+                batch_results["results"].append({
+                    "video_url": video_url,
+                    "status": "timeout",
+                    "error": f"Processing timed out after {timeout_minutes} minutes",
+                    "processing_order": i
+                })
+                logger.error(f"⏰ Video {i}/{len(video_urls)} timed out after {timeout_minutes} minutes")
+                
+            except Exception as e:
+                batch_results["failed_videos"] += 1
+                batch_results["results"].append({
+                    "video_url": video_url,
+                    "status": "error",
+                    "error": str(e),
+                    "processing_order": i
+                })
+                logger.error(f"❌ Video {i}/{len(video_urls)} error: {e}")
+            
+            # Add small delay between videos for memory cleanup
+            if i < len(video_urls):
+                await asyncio.sleep(2)
+        
+        # Calculate batch completion metrics
+        end_time = datetime.now()
+        total_duration = (end_time - start_time).total_seconds()
+        
+        batch_results["end_time"] = end_time.isoformat()
+        batch_results["total_duration"] = total_duration
+        batch_results["success"] = batch_results["failed_videos"] == 0
+        
+        # Log batch completion
+        logger.info(f"🎬 Batch processing completed for {company_name}:")
+        logger.info(f"   ✅ Processed: {batch_results['processed_videos']}/{batch_results['total_videos']}")
+        logger.info(f"   ❌ Failed: {batch_results['failed_videos']}/{batch_results['total_videos']}")
+        logger.info(f"   ⏱️ Total duration: {total_duration/60:.1f} minutes")
+        
+        return batch_results
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        logger.error(f"❌ Batch processing endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Q&A Endpoints
 @app.post("/ask-question")
 async def ask_question_endpoint(request: AskQuestionRequest):

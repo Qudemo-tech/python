@@ -358,14 +358,15 @@ class LoomVideoProcessor:
             logger.info(f"💾 Memory before download: {memory_mb:.1f} MB")
             
             # Quality levels to try in order (lowest to highest)
+            # Loom uses HLS stream formats, not height-based formats
             quality_formats = [
-                "worst[height<=480]",      # 480p or lower
-                "worst[height<=720]",      # 720p or lower
-                "worst[height<=1080]",     # 1080p or lower
-                "worst"                    # Any available format
+                "hls-raw-1500",           # 720p HLS stream
+                "hls-raw-3200",           # 1080p HLS stream
+                "hls-raw-audio-audio",    # Audio only
+                "best"                    # Any available format
             ]
             
-            quality_names = ["480p", "720p", "1080p", "any"]
+            quality_names = ["720p", "1080p", "audio", "best"]
             
             for i, (format_spec, quality_name) in enumerate(zip(quality_formats, quality_names)):
                 try:

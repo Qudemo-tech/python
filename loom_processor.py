@@ -360,13 +360,14 @@ class LoomVideoProcessor:
             # Quality levels to try in order (lowest to highest)
             # Loom uses HLS stream formats, not height-based formats
             quality_formats = [
-                "hls-raw-1500",           # 720p HLS stream
-                "hls-raw-3200",           # 1080p HLS stream
-                "hls-raw-audio-audio",    # Audio only
-                "best"                    # Any available format
+                "hls-raw-1500+hls-raw-audio-audio",  # 720p + Audio (merged)
+                "hls-raw-3200+hls-raw-audio-audio",  # 1080p + Audio (merged)
+                "hls-raw-1500",                      # 720p video only (fallback)
+                "hls-raw-3200",                      # 1080p video only (fallback)
+                "best"                               # Any available format
             ]
             
-            quality_names = ["720p", "1080p", "audio", "best"]
+            quality_names = ["720p+audio", "1080p+audio", "720p", "1080p", "best"]
             
             for i, (format_spec, quality_name) in enumerate(zip(quality_formats, quality_names)):
                 try:

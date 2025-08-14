@@ -137,6 +137,19 @@ def process_video(video_url: str, company_name: str, bucket_name: Optional[str] 
             logger.info("🧹 Post-processing memory cleanup...")
             loom_processor.cleanup_memory(preserve_whisper=False)
         
+        # Check if the result is valid (not None)
+        if result is None:
+            logger.error("❌ Video processing failed - result is None")
+            return {
+                "success": False,
+                "error": "Video processing failed - no result returned",
+                "company_name": company_name,
+                "video_url": video_url,
+                "details": {
+                    "suggestion": "The video may not have audio or may be corrupted"
+                }
+            }
+        
         logger.info(f"✅ Video processing completed successfully")
         return {
             "success": True,

@@ -43,8 +43,25 @@ from document_processor import DocumentProcessor
 from knowledge_integration import KnowledgeIntegrator
 from enhanced_qa import EnhancedQA
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging with larger buffer and rotation
+import logging
+import logging.handlers
+import sys
+
+# Configure root logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.handlers.RotatingFileHandler(
+            'app.log',
+            maxBytes=10*1024*1024,  # 10MB
+            backupCount=5
+        )
+    ]
+)
+
 logger = logging.getLogger(__name__)
 
 # Global instances for knowledge processing
@@ -435,36 +452,6 @@ async def status_check():
 @app.get("/memory-status")
 async def memory_status():
     """Get current memory usage status"""
-    return get_memory_status()
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    try:
-        status = get_health_check()
-        
-        # Add Whisper model status
-        try:
-            from video_processing import loom_processor
-            if loom_processor:
-                whisper_loaded = loom_processor.is_whisper_loaded()
-                status['whisper_model_loaded'] = whisper_loaded
-                status['whisper_model_status'] = 'loaded' if whisper_loaded else 'not_loaded'
-            else:
-                status['whisper_model_loaded'] = False
-                status['whisper_model_status'] = 'processor_not_initialized'
-        except Exception as e:
-            status['whisper_model_loaded'] = False
-            status['whisper_model_status'] = f'error: {str(e)}'
-        
-        return status
-    except Exception as e:
-        logger.error(f"❌ Health check error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/memory-debug")
-async def memory_debug():
-    """Detailed memory debugging endpoint"""
     try:
         import psutil
         import gc

@@ -88,6 +88,16 @@ class LoomVideoProcessor:
                 self._whisper_model = None
                 gc.collect()
             
+            # Force additional cleanup for Render's memory constraints
+            if memory_mb > 2000:
+                logger.info("🧹 Performing additional memory cleanup for Render constraints...")
+                import sys
+                # Clear any cached objects
+                for obj in gc.get_objects():
+                    if hasattr(obj, '__dict__'):
+                        obj.__dict__.clear()
+                gc.collect()
+            
             logger.info("✅ Memory cleanup completed")
         except Exception as e:
             logger.error(f"❌ Memory cleanup failed: {e}")
@@ -1136,7 +1146,7 @@ class LoomVideoProcessor:
             
             # Check memory - if too high, fail early
             memory_mb = self.check_memory_usage()
-            if memory_mb > 2800:  # Increased from 1900MB to 2800MB
+            if memory_mb > 6000:  # Increased threshold for 8GB RAM capacity
                 raise Exception(f"Memory too high ({memory_mb:.1f}MB) for lightweight processing")
             
             # Step 1: Extract video info (minimal)
@@ -1157,7 +1167,7 @@ class LoomVideoProcessor:
             try:
                 # Check memory before transcription
                 memory_mb = self.check_memory_usage()
-                if memory_mb > 2500:  # Increased from 1800MB to 2500MB
+                if memory_mb > 5000:  # Increased threshold for 8GB RAM capacity
                     logger.warning(f"⚠️ High memory before transcription ({memory_mb:.1f}MB), performing cleanup")
                     self.cleanup_memory(preserve_whisper=True)
                 

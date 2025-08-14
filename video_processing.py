@@ -97,9 +97,20 @@ def process_video(video_url: str, company_name: str, bucket_name: Optional[str] 
             if not loom_processor:
                 raise Exception("Loom processor not initialized")
             
-            # Choose processing mode based on memory - increased threshold to allow timestamps
-            if memory_mb > 2800:  # Increased from 1500MB to 2800MB to allow timestamps
-                logger.warning(f"⚠️ Very high memory usage ({memory_mb:.1f}MB), using lightweight mode")
+            # Force memory cleanup before processing new video
+            if memory_mb > 1500:
+                logger.info("🧹 Pre-processing memory cleanup for new video...")
+                loom_processor.cleanup_memory(preserve_whisper=False)
+                # Re-check memory after cleanup
+                try:
+                    memory_mb = process.memory_info().rss / 1024 / 1024
+                    logger.info(f"💾 Memory after cleanup: {memory_mb:.1f} MB")
+                except:
+                    pass
+            
+            # Choose processing mode based on memory - 8GB RAM can handle standard mode
+            if memory_mb > 6000:  # Increased threshold for 8GB RAM capacity
+                logger.warning(f"⚠️ Critical memory usage ({memory_mb:.1f}MB), using lightweight mode")
                 logger.info("🎬 Processing with Loom processor (LIGHTWEIGHT MODE)...")
                 result = loom_processor.process_video_lightweight(
                     video_url=video_url,
@@ -120,6 +131,11 @@ def process_video(video_url: str, company_name: str, bucket_name: Optional[str] 
                 video_url=video_url,
                 company_name=company_name
             )
+        
+        # Post-processing memory cleanup
+        if is_loom and loom_processor:
+            logger.info("🧹 Post-processing memory cleanup...")
+            loom_processor.cleanup_memory(preserve_whisper=False)
         
         logger.info(f"✅ Video processing completed successfully")
         return {

@@ -186,9 +186,22 @@ def answer_question(company_name: str, question: str) -> Dict:
         try:
             rerank_prompt = f"Question: {question}\n\nHere are the chunks:\n"
             for i, chunk in enumerate(top_chunks):
-                snippet = chunk["text"][:500].strip().replace("\n", " ")
-                rerank_prompt += f"{i+1}. [{chunk.get('type', 'video')}] {chunk.get('context','')}\n{snippet}\n\n"
+                # Safely get text with fallback
+                text = chunk.get("text", "")
+                if not text:
+                    text = chunk.get("content", "")  # Try alternative field name
+                snippet = text[:500].strip().replace("\n", " ")
+                
+                # Safely get chunk type and context
+                chunk_type = chunk.get('type', chunk.get('source_type', 'content'))
+                chunk_context = chunk.get('context', chunk.get('source_info', ''))
+                rerank_prompt += f"{i+1}. [{chunk_type}] {chunk_context}\n{snippet}\n\n"
+            
             rerank_prompt += "Which chunk is most relevant to the question above? Just give the number."
+            
+            # Log the rerank prompt for debugging
+            logger.info(f"🔍 Rerank prompt length: {len(rerank_prompt)} characters")
+            
             rerank_response = openai.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[{"role": "user", "content": rerank_prompt}],
@@ -210,70 +223,218 @@ def answer_question(company_name: str, question: str) -> Dict:
         except Exception as e:
             best_chunk = top_chunks[0]
             logger.warning(f"⚠️ Reranking failed, falling back to top Pinecone chunk: {e}")
+            logger.error(f"❌ Reranking error details: {str(e)}")
+            # Log chunk structure for debugging
+            if top_chunks:
+                logger.info(f"🔍 First chunk keys: {list(top_chunks[0].keys())}")
+                logger.info(f"🔍 First chunk text preview: {str(top_chunks[0].get('text', 'NO_TEXT'))[:100]}")
         
-        # Generate answer using GPT-4
-        try:
-            # Clean the text data before sending to GPT (use more chunks for richer context)
-            cleaned_chunks = []
-            for chunk in top_chunks[:6]:
-                text = chunk['text']
-                # Remove JSON formatting and extract clean transcription
-                if '```json' in text:
-                    # Try to extract the transcription from JSON
-                    import json
-                    try:
-                        # Find the JSON part
-                        json_start = text.find('{')
-                        json_end = text.rfind('}') + 1
-                        if json_start != -1 and json_end != -1:
-                            json_text = text[json_start:json_end]
-                            json_data = json.loads(json_text)
-                            clean_text = json_data.get('transcription', text)
-                        else:
-                            clean_text = text
-                    except:
-                        clean_text = text
-                else:
-                    clean_text = text
+        # Analyze chunks to separate video and scraped data
+        video_chunks = []
+        scraped_chunks = []
+        faq_chunks = []
+        
+        logger.info(f"🔍 Analyzing {len(top_chunks)} chunks...")
+        for i, chunk in enumerate(top_chunks):
+            chunk_type = chunk.get('source_type', 'unknown')
+            logger.info(f"🔍 Chunk {i+1}: type={chunk_type}, keys={list(chunk.keys())}")
+            
+            # Check if it's FAQ data (has both question and answer)
+            if chunk.get('answer') and chunk.get('question'):
+                faq_chunks.append(chunk)
+                logger.info(f"📋 FAQ chunk found: {chunk.get('question', '')[:50]}...")
+            
+            # Check if it's video data
+            elif chunk_type == 'video' or chunk.get('video_url') or chunk.get('start') is not None:
+                video_chunks.append(chunk)
+                logger.info(f"🎬 Video chunk found: {chunk.get('title', '')[:50]}...")
+            
+            # Check if it's scraped data
+            elif chunk_type == 'website' or chunk.get('source_type') == 'website':
+                scraped_chunks.append(chunk)
+                logger.info(f"🌐 Scraped chunk found: {chunk.get('text', '')[:50]}...")
                 
-                # Clean up the text
-                clean_text = clean_text.replace('\n', ' ').replace('  ', ' ').strip()
-                cleaned_chunks.append(clean_text[:500])
+                # Also check if scraped data is highly relevant to the question
+                scraped_text = chunk.get('text', '').strip()
+                if scraped_text and len(scraped_text) > 50:  # Only consider substantial text
+                    # Check if this scraped text is highly relevant to the user's question
+                    import difflib
+                    
+                    # Check for key terms that indicate this is a direct answer
+                    key_terms = ['puzzle', 'accounting', 'platform', 'quickbooks', 'xero', 'startup', 'technology']
+                    question_lower = question.lower()
+                    scraped_lower = scraped_text.lower()
+                    
+                    # Count how many key terms are present in both question and scraped text
+                    matching_terms = sum(1 for term in key_terms if term in question_lower and term in scraped_lower)
+                    
+                    # If we have good term matching and substantial text, treat as FAQ
+                    if matching_terms >= 2 and len(scraped_text) > 100:
+                        logger.info(f"🎯 Found highly relevant scraped data with {matching_terms} matching terms")
+                        # Create a FAQ-like structure for this scraped data
+                        faq_chunks.append({
+                            'question': question,
+                            'answer': scraped_text,
+                            'source_type': 'website',
+                            'source': chunk.get('source', 'scraped_data')
+                        })
+        
+        logger.info(f"📊 Found: {len(video_chunks)} video chunks, {len(scraped_chunks)} scraped chunks, {len(faq_chunks)} FAQ chunks")
+        
+        # Priority 1: Check for exact FAQ matches first
+        use_faq_answer = False
+        raw_answer = None
+        
+        for chunk in faq_chunks:
+            faq_question = chunk.get('question', '').strip()
+            faq_answer = chunk.get('answer', '').strip()
             
-            context = "\n\n".join([
-                f"Video Content: {text}" for text in cleaned_chunks
-            ])
+            # Check if the user's question matches the FAQ question (fuzzy match)
+            import difflib
+            similarity = difflib.SequenceMatcher(None, question.lower(), faq_question.lower()).ratio()
             
-            system_prompt = (
-                f"You are a product demo assistant for {company_name}. "
-                "Answer ONLY using the provided video content. If the content does not contain relevant info, say: "
-                "'The provided content doesn't contain information about [topic].' Do NOT use external knowledge. "
-                "Return ONLY the following markdown sections in this exact order and nothing else: \n"
-                "- TL;DR: <one concise line>\n"
-                "- Steps:\n  1. <step>\n  2. <step>\n  3. <step>\n"
-                "- Notes:\n  - <note>\n  - <note>\n"
-                "Keep it crisp (roughly 120-180 words total)."
-            )
-            user_prompt = (
-                "Video Content:\n" + context + "\n\n" +
-                "Question: " + question + "\n\n" +
-                "Respond using the exact structure above."
-            )
-            completion = openai.chat.completions.create(
-                model="gpt-4-turbo",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                timeout=30,
-                max_tokens=350,
-                temperature=0.2
-            )
-            raw_answer = completion.choices[0].message.content
-            logger.info("✅ Generated answer with GPT-4.")
-        except Exception as e:
-            logger.error(f"❌ Failed to generate GPT-4 answer: {e}")
-            return {"error": "Failed to generate answer."}
+            logger.info(f"🔍 Checking FAQ: '{faq_question}' vs '{question}' (similarity: {similarity:.2f})")
+            
+            if similarity > 0.6:  # Lowered threshold for better FAQ matching
+                logger.info(f"✅ Found FAQ match (similarity: {similarity:.2f})")
+                logger.info(f"🔍 FAQ Question: {faq_question}")
+                logger.info(f"🔍 FAQ Answer: {faq_answer[:100]}...")
+                raw_answer = faq_answer
+                use_faq_answer = True
+                break
+        
+        # Only generate new answer if we don't have a matching FAQ answer
+        if not use_faq_answer:
+            # Determine the best approach based on available data
+            has_video = len(video_chunks) > 0
+            has_scraped = len(scraped_chunks) > 0
+            
+            logger.info(f"🎯 Strategy: has_video={has_video}, has_scraped={has_scraped}")
+            
+            if has_video and has_scraped:
+                # Both video and scraped data available - combine them
+                logger.info("🔄 Combining video and scraped data...")
+                combined_chunks = video_chunks + scraped_chunks
+                content_type = "Combined Video & Website Content"
+                should_return_video_url = True
+            elif has_video and not has_scraped:
+                # Only video data available
+                logger.info("🎬 Using video data only...")
+                combined_chunks = video_chunks
+                content_type = "Video Content"
+                should_return_video_url = True
+            elif has_scraped and not has_video:
+                # Only scraped data available
+                logger.info("🌐 Using scraped data only...")
+                combined_chunks = scraped_chunks
+                content_type = "Website Content"
+                should_return_video_url = False
+            else:
+                # Fallback to all chunks
+                logger.info("⚠️ Using all available chunks...")
+                combined_chunks = top_chunks
+                content_type = "Mixed Content"
+                should_return_video_url = False
+            
+            # Generate answer using GPT-4
+            try:
+                # Clean the text data before sending to GPT
+                cleaned_chunks = []
+                for chunk in combined_chunks[:6]:
+                    # Safely get text with multiple fallbacks
+                    text = chunk.get('text', '')
+                    if not text:
+                        text = chunk.get('content', '')  # Try alternative field name
+                    if not text:
+                        text = str(chunk)  # Last resort
+                    
+                    # Remove JSON formatting and extract clean transcription
+                    if '```json' in text:
+                        # Try to extract the transcription from JSON
+                        import json
+                        try:
+                            # Find the JSON part
+                            json_start = text.find('{')
+                            json_end = text.rfind('}') + 1
+                            if json_start != -1 and json_end != -1:
+                                json_text = text[json_start:json_end]
+                                json_data = json.loads(json_text)
+                                clean_text = json_data.get('transcription', text)
+                            else:
+                                clean_text = text
+                        except:
+                            clean_text = text
+                    else:
+                        clean_text = text
+                    
+                    # Clean up the text
+                    clean_text = clean_text.replace('\n', ' ').replace('  ', ' ').strip()
+                    if clean_text:  # Only add non-empty chunks
+                        cleaned_chunks.append(clean_text[:500])
+                
+                                # Ensure we have at least some content
+                if not cleaned_chunks:
+                    logger.error("❌ No valid text content found in chunks")
+                    return {"error": "No valid content found to generate answer."}
+                
+                # Content type is already determined above
+                
+                context = "\n\n".join([
+                    f"{content_type}: {text}" for text in cleaned_chunks
+                ])
+                
+                system_prompt = (
+                    f"You are a product demo assistant for {company_name}. "
+                    f"Answer ONLY using the provided {content_type.lower()}. If the content does not contain relevant info, say: "
+                    "'The provided content doesn't contain information about [topic].' Do NOT use external knowledge. "
+                    "Return ONLY the following markdown sections in this exact order and nothing else: \n"
+                    "- TL;DR: <one concise line>\n"
+                    "- Steps:\n  1. <step>\n  2. <step>\n  3. <step>\n"
+                    "- Notes:\n  - <note>\n  - <note>\n"
+                    "Keep it crisp (roughly 120-180 words total)."
+                )
+                user_prompt = (
+                    f"{content_type}:\n" + context + "\n\n" +
+                    "Question: " + question + "\n\n" +
+                    "Respond using the exact structure above."
+                )
+                # Log the prompts for debugging
+                logger.info(f"🔍 System prompt length: {len(system_prompt)} characters")
+                logger.info(f"🔍 User prompt length: {len(user_prompt)} characters")
+                logger.info(f"🔍 Context length: {len(context)} characters")
+                
+                completion = openai.chat.completions.create(
+                    model="gpt-4-turbo",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    timeout=30,
+                    max_tokens=350,
+                    temperature=0.2
+                )
+                raw_answer = completion.choices[0].message.content
+                logger.info("✅ Generated answer with GPT-4.")
+            except Exception as e:
+                logger.error(f"❌ Failed to generate GPT-4 answer: {e}")
+                logger.error(f"❌ GPT-4 error details: {str(e)}")
+                # Try with a simpler prompt as fallback
+                try:
+                    logger.info("🔄 Trying fallback with simpler prompt...")
+                    fallback_prompt = f"Based on this content: {context[:1000]}...\n\nQuestion: {question}\n\nAnswer:"
+                    fallback_completion = openai.chat.completions.create(
+                        model="gpt-3.5-turbo",
+                        messages=[{"role": "user", "content": fallback_prompt}],
+                        timeout=20,
+                        max_tokens=200,
+                        temperature=0.3
+                    )
+                    raw_answer = fallback_completion.choices[0].message.content
+                    logger.info("✅ Generated fallback answer with GPT-3.5.")
+                except Exception as fallback_error:
+                    logger.error(f"❌ Fallback also failed: {fallback_error}")
+                    return {"error": "Failed to generate answer after multiple attempts."}
+
         
         def strip_sources(text):
             return re.sub(r'\[source\]\([^)]+\)', '', text).strip()
@@ -283,8 +444,12 @@ def answer_question(company_name: str, question: str) -> Dict:
             text = re.sub(r'\s*\d+\.\s+', lambda m: f"\n{m.group(0)}", text)
             return re.sub(r'\n+', '\n', text).strip()
         
-        raw_answer = strip_sources(raw_answer)
-        clean_answer = format_answer(raw_answer)
+        # If we used a FAQ answer, don't apply video-specific formatting
+        if use_faq_answer:
+            clean_answer = raw_answer  # Use FAQ answer as-is
+        else:
+            raw_answer = strip_sources(raw_answer)
+            clean_answer = format_answer(raw_answer)
         sources = []
         for chunk in top_chunks:
             title = chunk.get("title")
@@ -322,61 +487,74 @@ def answer_question(company_name: str, question: str) -> Dict:
             }
 
         # Get original video URL using metadata
-        video_url = best_chunk.get("video_url") or best_chunk.get("original_video_url")
-        if not video_url:
-            # Try to resolve from the chunk's source filename
-            source_filename = best_chunk.get("source", "").split(" [")[0].strip()
-            video_url = get_original_video_url(source_filename)
+        video_url = None
+        if should_return_video_url and video_chunks:
+            # Get video URL from the first video chunk
+            video_chunk = video_chunks[0]
+            video_url = video_chunk.get("video_url") or video_chunk.get("original_video_url")
             if not video_url:
-                logger.warning(f"⚠️ No video mapping found for: {source_filename}")
-                video_url = best_chunk.get("source")
+                # Try to resolve from the chunk's source filename
+                source_filename = video_chunk.get("source", "").split(" [")[0].strip()
+                video_url = get_original_video_url(source_filename)
+                if not video_url:
+                    logger.warning(f"⚠️ No video mapping found for: {source_filename}")
+                    video_url = video_chunk.get("source")
         logger.info(f"📤 Returning final answer. Video URL: {video_url}")
         
         # Enhanced timestamp handling for better accuracy (YouTube-style precision)
-        start = float(best_chunk.get('start', 0.0)) if isinstance(best_chunk, dict) else 0.0
-        end = float(best_chunk.get('end', 0.0)) if isinstance(best_chunk, dict) else 0.0
+        start = 0.0
+        end = 0.0
         
-        # Debug timestamp information
-        logger.info(f"🔍 Best chunk timestamps - start: {start}, end: {end}")
-        logger.info(f"🔍 Best chunk source type: {best_chunk.get('source_type', 'unknown')}")
-        logger.info(f"🔍 Best chunk source: {best_chunk.get('source', 'unknown')}")
-        logger.info(f"🔍 Best chunk metadata keys: {list(best_chunk.keys()) if isinstance(best_chunk, dict) else 'NOT_DICT'}")
-        
-        # Check if we have valid timestamps
-        if start == 0.0 and end == 0.0:
-            logger.warning(f"⚠️ Best chunk has no timestamps, looking for alternatives...")
-            # Fallback: aggregate across top few chunks if best chunk lacks timestamps
-            relevant_chunks = [c for c in top_chunks if isinstance(c, dict)]
-            ts_candidates = []
+        if video_chunks:
+            # Get timestamps from the first video chunk
+            video_chunk = video_chunks[0]
+            start = float(video_chunk.get('start', 0.0)) if isinstance(video_chunk, dict) else 0.0
+            end = float(video_chunk.get('end', 0.0)) if isinstance(video_chunk, dict) else 0.0
             
-            for i, chunk in enumerate(relevant_chunks[:3]):  # Check top 3 chunks
-                chunk_start = float(chunk.get('start', 0.0))
-                chunk_end = float(chunk.get('end', 0.0))
-                chunk_type = chunk.get('source_type', 'unknown')
-                chunk_source = chunk.get('source', 'unknown')
-                logger.info(f"🔍 Chunk {i+1}: start={chunk_start}, end={chunk_end}, type={chunk_type}, source={chunk_source}")
+            # Debug timestamp information
+            logger.info(f"🔍 Video chunk timestamps - start: {start}, end: {end}")
+            logger.info(f"🔍 Video chunk source type: {video_chunk.get('source_type', 'unknown')}")
+            logger.info(f"🔍 Video chunk source: {video_chunk.get('source', 'unknown')}")
+            logger.info(f"🔍 Video chunk metadata keys: {list(video_chunk.keys()) if isinstance(video_chunk, dict) else 'NOT_DICT'}")
+            
+            # Check if we have valid timestamps
+            if start == 0.0 and end == 0.0:
+                logger.warning(f"⚠️ Video chunk has no timestamps, looking for alternatives...")
+                # Fallback: aggregate across video chunks if first chunk lacks timestamps
+                ts_candidates = []
                 
-                if chunk_start > 0.0 or chunk_end > 0.0:
-                    ts_candidates.append((chunk_start, chunk_end))
-            
-            if ts_candidates:
-                start = min(s for s, _ in ts_candidates)
-                end = max(e for _, e in ts_candidates)
-                logger.info(f"✅ Found timestamps from alternatives: start={start}, end={end}")
+                for i, chunk in enumerate(video_chunks[:3]):  # Check top 3 video chunks
+                    chunk_start = float(chunk.get('start', 0.0))
+                    chunk_end = float(chunk.get('end', 0.0))
+                    chunk_type = chunk.get('source_type', 'unknown')
+                    chunk_source = chunk.get('source', 'unknown')
+                    logger.info(f"🔍 Video chunk {i+1}: start={chunk_start}, end={chunk_end}, type={chunk_type}, source={chunk_source}")
+                    
+                    if chunk_start > 0.0 or chunk_end > 0.0:
+                        ts_candidates.append((chunk_start, chunk_end))
+                
+                if ts_candidates:
+                    start = min(s for s, _ in ts_candidates)
+                    end = max(e for _, e in ts_candidates)
+                    logger.info(f"✅ Found timestamps from video alternatives: start={start}, end={end}")
+                else:
+                    logger.warning(f"⚠️ No valid timestamps found in any video chunks")
+                    # Try to extract from source filename or other metadata
+                    source_info = video_chunk.get('source', '')
+                    if source_info and '[' in source_info and ']' in source_info:
+                        try:
+                            # Try to extract timestamp from source string like "video.mp4 [120-180]"
+                            timestamp_match = re.search(r'\[(\d+)-(\d+)\]', source_info)
+                            if timestamp_match:
+                                start = float(timestamp_match.group(1))
+                                end = float(timestamp_match.group(2))
+                                logger.info(f"✅ Extracted timestamps from source string: start={start}, end={end}")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Failed to extract timestamps from source: {e}")
             else:
-                logger.warning(f"⚠️ No valid timestamps found in any chunks")
-                # Try to extract from source filename or other metadata
-                source_info = best_chunk.get('source', '')
-                if source_info and '[' in source_info and ']' in source_info:
-                    try:
-                        # Try to extract timestamp from source string like "video.mp4 [120-180]"
-                        timestamp_match = re.search(r'\[(\d+)-(\d+)\]', source_info)
-                        if timestamp_match:
-                            start = float(timestamp_match.group(1))
-                            end = float(timestamp_match.group(2))
-                            logger.info(f"✅ Extracted timestamps from source string: start={start}, end={end}")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Failed to extract timestamps from source: {e}")
+                logger.info(f"✅ Using timestamps from video chunk: start={start}, end={end}")
+        else:
+            logger.info("🎬 No video chunks found, skipping timestamp logic")
         
         # YouTube-style timestamp precision for all video types
         if end > start:

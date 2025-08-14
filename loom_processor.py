@@ -364,10 +364,35 @@ class LoomVideoProcessor:
                 "hls-raw-3200+hls-raw-audio-audio",  # 1080p + Audio (merged)
                 "hls-raw-1500",                      # 720p video only (fallback)
                 "hls-raw-3200",                      # 1080p video only (fallback)
+                "hls-raw-audio-audio",               # Audio only (fallback)
                 "best"                               # Any available format
             ]
             
-            quality_names = ["720p+audio", "1080p+audio", "720p", "1080p", "best"]
+            quality_names = ["720p+audio", "1080p+audio", "720p", "1080p", "audio", "best"]
+            
+            # First, check available formats to avoid format errors
+            try:
+                logger.info("🔍 Checking available formats for this Loom video...")
+                import subprocess
+                import sys
+                
+                format_check_cmd = [
+                    sys.executable, '-m', 'yt_dlp',
+                    '--no-warnings',
+                    '--list-formats',
+                    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    '--referer', 'https://www.loom.com/',
+                    video_url
+                ]
+                
+                format_result = subprocess.run(format_check_cmd, capture_output=True, text=True, timeout=30)
+                if format_result.returncode == 0:
+                    available_formats = format_result.stdout
+                    logger.info(f"📋 Available formats: {available_formats[:500]}...")
+                else:
+                    logger.warning(f"⚠️ Could not check formats: {format_result.stderr[:200]}")
+            except Exception as e:
+                logger.warning(f"⚠️ Format check failed: {e}")
             
             for i, (format_spec, quality_name) in enumerate(zip(quality_formats, quality_names)):
                 try:

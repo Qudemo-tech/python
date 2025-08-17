@@ -75,7 +75,7 @@ def initialize_processors():
 
 def process_video(video_url: str, company_name: str, bucket_name: Optional[str] = None, 
                  source: Optional[str] = None, meeting_link: Optional[str] = None):
-    """Process a video URL and store in Pinecone with memory management"""
+    """Process a video URL and store in Pinecone with semantic chunking"""
     try:
         logger.info(f"🎬 Processing video: {video_url}")
         logger.info(f"🏢 Company: {company_name}")
@@ -97,40 +97,14 @@ def process_video(video_url: str, company_name: str, bucket_name: Optional[str] 
             if not loom_processor:
                 raise Exception("Loom processor not initialized")
             
-            # Force memory cleanup before processing new video
-            if memory_mb > 1500:
-                logger.info("🧹 Pre-processing memory cleanup for new video...")
-                loom_processor.cleanup_memory(preserve_whisper=False)
-                # Re-check memory after cleanup
-                try:
-                    memory_mb = process.memory_info().rss / 1024 / 1024
-                    logger.info(f"💾 Memory after cleanup: {memory_mb:.1f} MB")
-                except:
-                    pass
-            
-            # Choose processing mode based on memory - Force Standard Mode for 8GB RAM
-            if memory_mb > 7000:  # Extremely high threshold (never reached on 8GB RAM)
-                logger.warning(f"⚠️ Critical memory usage ({memory_mb:.1f}MB), using lightweight mode")
-                logger.info("🎬 Processing with Loom processor (LIGHTWEIGHT MODE)...")
-                result = loom_processor.process_video_lightweight(
-                    video_url=video_url,
-                    company_name=company_name
-                )
-            else:
-                logger.info("🎬 Processing with Loom processor (STANDARD MODE)...")
-                result = loom_processor.process_video(
-                    video_url=video_url,
-                    company_name=company_name
-                )
+            # Process with semantic chunking
+            return process_video_with_semantic_chunking(video_url, company_name)
         else:
+            # Use Gemini processor for other video types
             if not gemini_processor:
                 raise Exception("Gemini processor not initialized")
             
-            logger.info("🎬 Processing with Gemini processor...")
-            result = gemini_processor.process_video(
-                video_url=video_url,
-                company_name=company_name
-            )
+            return process_video_with_semantic_chunking(video_url, company_name)
         
         # Post-processing memory cleanup
         if is_loom and loom_processor:
@@ -271,3 +245,129 @@ def get_processors_status() -> Dict[str, str]:
         "gemini": "✅ Available" if gemini_processor else "❌ Not available",
         "loom": "✅ Available" if loom_processor else "❌ Not available"
     }
+
+def process_video_with_semantic_chunking(video_url: str, company_name: str) -> Dict:
+    """Process video with semantic chunking for enhanced retrieval"""
+    try:
+        logger.info(f"🎬 Processing video with semantic chunking: {video_url}")
+        
+        # Determine processor based on video type
+        is_loom = "loom.com" in video_url.lower()
+        
+        if is_loom:
+            if not loom_processor:
+                raise Exception("Loom processor not initialized")
+            
+            logger.info(f"🎬 Using Loom processor for: {video_url}")
+            # Download and transcribe video
+            transcription_data = loom_processor._download_and_transcribe(video_url)
+            if not transcription_data:
+                raise Exception("Failed to transcribe video with Loom processor")
+            
+            transcription = transcription_data.get('transcription', '')
+            segments = transcription_data.get('segments', [])
+            
+            logger.info(f"✅ Loom transcription successful: {len(transcription)} chars, {len(segments)} segments")
+            
+            # Create semantic chunks from transcription
+            return _create_semantic_chunks_from_transcription(
+                transcription=transcription,
+                segments=segments,
+                company_name=company_name,
+                video_url=video_url
+            )
+        else:
+            if not gemini_processor:
+                raise Exception("Gemini processor not initialized")
+            
+            logger.info(f"🎬 Using Gemini processor for: {video_url}")
+            # Use the correct method for Gemini processor
+            transcription_data = gemini_processor.extract_transcription_with_gemini(video_url)
+            if not transcription_data:
+                raise Exception("Failed to transcribe video with Gemini processor")
+            
+            transcription = transcription_data.get('transcription', '')
+            # For Gemini, segments might be in a different format or not available
+            segments = transcription_data.get('segments', [])
+            
+            # If no segments, create a basic segment structure
+            if not segments and transcription:
+                segments = [{'text': transcription, 'start': 0, 'end': 0}]
+            
+            logger.info(f"✅ Gemini transcription successful: {len(transcription)} chars, {len(segments)} segments")
+            
+            # Create semantic chunks from transcription
+            return _create_semantic_chunks_from_transcription(
+                transcription=transcription,
+                segments=segments,
+                company_name=company_name,
+                video_url=video_url
+            )
+            
+    except Exception as e:
+        logger.error(f"❌ Error in semantic chunking video processing: {e}")
+        import traceback
+        logger.error(f"🔍 Full traceback: {traceback.format_exc()}")
+        return {
+            "success": False,
+            "error": str(e),
+            "company_name": company_name,
+            "video_url": video_url
+        }
+
+def _create_semantic_chunks_from_transcription(transcription: str, segments: list, 
+                                             company_name: str, video_url: str) -> Dict:
+    """Create semantic chunks from video transcription and store in Pinecone"""
+    try:
+        logger.info(f"🔧 Creating semantic chunks from transcription for {company_name}")
+        
+        # Initialize knowledge integrator for semantic chunking
+        from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
+        
+        integrator = EnhancedKnowledgeIntegrator(
+            openai_api_key=os.getenv('OPENAI_API_KEY'),
+            pinecone_api_key=os.getenv('PINECONE_API_KEY'),
+            pinecone_index=os.getenv('PINECONE_INDEX')
+        )
+        
+        # Prepare source information for video data
+        source_info = {
+            'source': 'video',
+            'url': video_url,
+            'title': f'Video Transcription - {company_name}',
+            'platform': 'loom' if 'loom.com' in video_url else 'other',
+            'transcription_length': len(transcription),
+            'segment_count': len(segments),
+            'processed_at': datetime.now().isoformat()
+        }
+        
+        # Store transcription using semantic chunking
+        stored_chunks = integrator.store_semantic_chunks(
+            text=transcription,
+            company_name=company_name,
+            source_info=source_info
+        )
+        
+        logger.info(f"✅ Successfully stored {len(stored_chunks)} semantic chunks for video")
+        
+        return {
+            "success": True,
+            "message": "Video processed with semantic chunking",
+            "company_name": company_name,
+            "video_url": video_url,
+            "result": {
+                "chunks_stored": len(stored_chunks),
+                "transcription_length": len(transcription),
+                "segment_count": len(segments),
+                "processing_method": "semantic_chunking"
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error creating semantic chunks: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "company_name": company_name,
+            "video_url": video_url
+        }

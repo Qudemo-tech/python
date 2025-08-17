@@ -16,6 +16,17 @@ from datetime import datetime
 # Load environment variables from .env file
 load_dotenv()
 
+# Suppress all Chrome/Selenium warnings and errors
+import os
+os.environ['WDM_LOG_LEVEL'] = '0'
+os.environ['WDM_PRINT_FIRST_LINE'] = 'False'
+
+import logging
+logging.getLogger('selenium').setLevel(logging.ERROR)
+logging.getLogger('urllib3').setLevel(logging.ERROR)
+logging.getLogger('WDM').setLevel(logging.ERROR)
+logging.getLogger('faiss').setLevel(logging.ERROR)
+
 # Import modules
 from video_processing import (
     initialize_processors, 
@@ -23,25 +34,15 @@ from video_processing import (
     initialize_existing_mappings,
     ProcessVideoRequest
 )
-from qa_system import (
-    initialize_qa_system,
-    answer_question,
-    generate_summary,
-    AskQuestionRequest,
-    AskQuestionCompanyRequest,
-    GenerateSummaryRequest
-)
 from health_checks import (
     get_system_status,
     get_memory_status,
     get_health_check
 )
 
-# Import new knowledge processing modules
-from web_scraper import WebScraper
-from document_processor import DocumentProcessor
-from knowledge_integration import KnowledgeIntegrator
-from enhanced_qa import EnhancedQA
+# Import clean knowledge processing modules
+from enhanced_qa import EnhancedQASystem, initialize_enhanced_qa
+from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
 
 # Configure logging with larger buffer and rotation
 import logging
@@ -64,17 +65,15 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Global instances for knowledge processing
-web_scraper = None
-document_processor = None
-knowledge_integrator = None
-enhanced_qa = None
+# Global instances for clean knowledge processing
+enhanced_qa_system = None
+enhanced_knowledge_integrator = None
 
 # Lifespan event handler for startup and shutdown
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown"""
-    global web_scraper, document_processor, knowledge_integrator, enhanced_qa
+    global enhanced_qa_system, enhanced_knowledge_integrator
     
     # Startup
     logger.info("🚀 Starting QuDemo Video Processing API...")
@@ -86,25 +85,39 @@ async def lifespan(app: FastAPI):
         logger.error("❌ Failed to initialize some processors")
     
     # Initialize Q&A system
-    if initialize_qa_system():
-        logger.info("✅ Q&A system initialized successfully")
+    success = await initialize_enhanced_qa()
+    if success:
+        logger.info("✅ Enhanced Q&A system initialized successfully")
+        # Import the global instance after successful initialization
+        from enhanced_qa import enhanced_qa_system
+        global enhanced_qa_system
     else:
-        logger.error("❌ Failed to initialize Q&A system")
+        logger.error("❌ Failed to initialize Enhanced Q&A system")
+        logger.error("🔧 This will prevent website processing from working")
+        logger.error("🔧 Please check your API keys in the .env file")
+        enhanced_qa_system = None
     
-    # Initialize knowledge processing modules
+    # Initialize knowledge integrator (separate from QA system)
+    global enhanced_knowledge_integrator
+    
     try:
         openai_api_key = os.getenv("OPENAI_API_KEY")
+        
         if openai_api_key and openai_api_key != "your_openai_api_key_here" and openai_api_key != "your-openai-api-key-here":
-            web_scraper = WebScraper(openai_api_key)
-            document_processor = DocumentProcessor()
-            knowledge_integrator = KnowledgeIntegrator(openai_api_key)
-            enhanced_qa = EnhancedQA(openai_api_key)
-            logger.info("✅ Knowledge processing modules initialized successfully")
+            # Initialize knowledge integrator for embeddings and storage
+            enhanced_knowledge_integrator = EnhancedKnowledgeIntegrator(
+                openai_api_key=openai_api_key,
+                pinecone_api_key=os.getenv('PINECONE_API_KEY'),
+                pinecone_index=os.getenv('PINECONE_INDEX')
+            )
+            logger.info("✅ Knowledge integrator initialized successfully")
         else:
-            logger.warning("⚠️ OPENAI_API_KEY not found or invalid - knowledge processing disabled")
-            logger.info("💡 To enable knowledge processing, set OPENAI_API_KEY environment variable")
+            logger.warning("⚠️ OpenAI API key not found or invalid - knowledge storage disabled")
+            logger.info("💡 To enable knowledge storage, set OPENAI_API_KEY environment variable")
+            enhanced_knowledge_integrator = None
     except Exception as e:
-        logger.error(f"❌ Failed to initialize knowledge processing modules: {e}")
+        logger.error(f"❌ Failed to initialize knowledge integrator: {e}")
+        enhanced_knowledge_integrator = None
     
     # Initialize video mappings
     initialize_existing_mappings()
@@ -314,12 +327,19 @@ async def process_videos_batch_endpoint(company_name: str, request: Request):
 
 # Q&A Endpoints
 @app.post("/ask-question")
-async def ask_question_endpoint(request: AskQuestionRequest):
+async def ask_question_endpoint(request: Request):
     """Ask a question with company name in request body"""
     try:
-        logger.info(f"❓ Question for {request.company_name}: {request.question}")
+        body = await request.json()
+        company_name = body.get("company_name")
+        question = body.get("question")
         
-        result = answer_question(request.company_name, request.question)
+        if not company_name or not question:
+            raise HTTPException(status_code=400, detail="company_name and question are required")
+        
+        logger.info(f"❓ Question for {company_name}: {question}")
+        
+        result = enhanced_qa_system.ask_question(question, company_name)
         
         if 'error' in result:
             raise HTTPException(status_code=500, detail=result['error'])
@@ -333,20 +353,29 @@ async def ask_question_endpoint(request: AskQuestionRequest):
             'end': result.get('end')
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Question endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/ask/{company_name}")
-async def ask_question_company_endpoint(company_name: str, request: AskQuestionCompanyRequest):
+async def ask_question_company_endpoint(company_name: str, request: Request):
     """Ask a question for a specific company"""
     try:
-        logger.info(f"❓ Question for {company_name}: {request.question}")
+        body = await request.json()
+        question = body.get("question")
         
-        result = answer_question(company_name, request.question)
+        if not question:
+            raise HTTPException(status_code=400, detail="question is required")
         
-        if 'error' in result:
-            raise HTTPException(status_code=500, detail=result['error'])
+        logger.info(f"❓ Question for {company_name}: {question}")
+        
+        # Call the async ask_question method
+        result = await enhanced_qa_system.ask_question(question, company_name)
+        
+        if not result.get('success'):
+            raise HTTPException(status_code=500, detail=result.get('message', 'Failed to process question'))
         
         return {
             'success': True,
@@ -354,30 +383,39 @@ async def ask_question_company_endpoint(company_name: str, request: AskQuestionC
             'sources': result['sources'],
             'video_url': result.get('video_url'),
             'start': result.get('start'),
-            'end': result.get('end')
+            'end': result.get('end'),
+            'video_title': result.get('video_title')
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Company question endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/generate-summary")
-async def generate_summary_endpoint(request: GenerateSummaryRequest):
+async def generate_summary_endpoint(request: Request):
     """Generate a summary from questions and answers"""
     try:
-        logger.info(f"📝 Generating summary for {request.company_name}")
+        body = await request.json()
+        questions_and_answers = body.get("questions_and_answers", [])
+        buyer_name = body.get("buyer_name")
+        company_name = body.get("company_name")
         
-        result = generate_summary(
-            questions_and_answers=request.questions_and_answers,
-            buyer_name=request.buyer_name,
-            company_name=request.company_name
-        )
+        if not questions_and_answers or not company_name:
+            raise HTTPException(status_code=400, detail="questions_and_answers and company_name are required")
+        
+        logger.info(f"📝 Generating summary for {company_name}")
+        
+        result = enhanced_qa_system.get_knowledge_summary(company_name)
         
         if result['success']:
             return result
         else:
             raise HTTPException(status_code=500, detail=result['error'])
             
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Summary endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -385,49 +423,61 @@ async def generate_summary_endpoint(request: GenerateSummaryRequest):
 # Knowledge Processing Endpoints
 @app.post("/process-website/{company_name}")
 async def process_website_endpoint(company_name: str, request: Request):
-    """Process website knowledge for a company"""
-    global enhanced_qa
+    """Process website knowledge for a company with 3-page limit"""
+    global enhanced_qa_system
     
     try:
-        if not enhanced_qa:
+        if not enhanced_qa_system:
+            logger.error("❌ Enhanced QA system not available")
             raise HTTPException(
                 status_code=503, 
-                detail="Knowledge processing not available. Please set OPENAI_API_KEY environment variable to enable this feature."
+                detail="Knowledge processing not available. Please check API keys configuration and restart the server."
             )
         
         # Parse request body
         body = await request.json()
         website_url = body.get('website_url')
-        knowledge_source_id = body.get('knowledge_source_id')  # New parameter
         
         if not website_url:
             raise HTTPException(status_code=400, detail="Website URL is required")
         
         logger.info(f"🌐 Processing website for {company_name}: {website_url}")
+        logger.info(f"📊 Using 3-page limit: 3 collections × 3 articles per collection")
         
-        # Process website knowledge with timeout (4.5 minutes)
+        # Process website knowledge with timeout (10 minutes for comprehensive scraping)
         try:
             result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    enhanced_qa.process_website_knowledge,
-                    company_name,
-                    website_url,
-                    knowledge_source_id
-                ),
-                timeout=270.0  # 4.5 minutes
+                enhanced_qa_system.process_website_knowledge(website_url, company_name),
+                timeout=600.0  # 10 minutes timeout
             )
         except asyncio.TimeoutError:
             logger.error(f"❌ Website processing timeout for {company_name}: {website_url}")
             raise HTTPException(status_code=408, detail="Website processing timed out. Please try again.")
         
-        if result['success']:
+        if result.get('success'):
+            data = result.get('data', {})
+            summary = data.get('summary', {})
+            
             return {
                 "success": True,
                 "message": "Website knowledge processed successfully",
-                "data": result['data']
+                "data": {
+                    "chunks": data.get('chunks', []),
+                    "qa_pairs": data.get('qa_pairs', []),
+                    "summary": {
+                        "total_items": summary.get('total_items', 0),
+                        "enhanced": summary.get('enhanced', 0),
+                        "faqs": summary.get('faqs', 0),
+                        "beginner": summary.get('beginner', 0),
+                        "intermediate": summary.get('intermediate', 0),
+                        "advanced": summary.get('advanced', 0)
+                    }
+                },
+                "company_name": company_name,
+                "website_url": website_url
             }
         else:
-            raise HTTPException(status_code=500, detail=result['error'])
+            raise HTTPException(status_code=500, detail=result.get('error', 'Unknown error'))
             
     except HTTPException:
         # Re-raise HTTP exceptions as-is
@@ -436,65 +486,43 @@ async def process_website_endpoint(company_name: str, request: Request):
         logger.error(f"❌ Website processing error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/process-document/{company_name}")
-async def process_document_endpoint(company_name: str, request: Request):
-    """Process document knowledge for a specific company"""
-    global document_processor, knowledge_integrator
+# Removed document processing endpoint - using clean system instead
+
+# Removed old enhanced website processing endpoint - using clean scraper instead
+
+@app.get("/knowledge/sources/{company_name}")
+async def get_knowledge_sources_endpoint(company_name: str):
+    """Get all knowledge sources for a company"""
+    global enhanced_qa_system
     
     try:
-        if not document_processor or not knowledge_integrator:
+        if not enhanced_qa_system:
             raise HTTPException(
                 status_code=503, 
-                detail="Knowledge processing not available. Please set OPENAI_API_KEY environment variable to enable this feature."
+                detail="Knowledge retrieval not available. Please set OPENAI_API_KEY environment variable to enable this feature."
             )
         
-        # Parse multipart form data
-        form = await request.form()
-        file = form.get("file")
+        logger.info(f"📄 Getting knowledge sources for company: {company_name}")
         
-        if not file:
-            raise HTTPException(status_code=400, detail="file is required")
+        # Get knowledge summary which includes all sources
+        summary_data = enhanced_qa_system.get_knowledge_summary(company_name)
         
-        # Read file content
-        file_content = await file.read()
-        filename = file.filename
-        
-        logger.info(f"📄 Processing document for {company_name}: {filename}")
-        
-        # Process document
-        document_data = document_processor.process_uploaded_file(file_content, filename)
-        
-        if not document_data:
-            raise HTTPException(status_code=400, detail="Failed to extract text from document")
-        
-        # Process document knowledge
-        success = knowledge_integrator.process_document_knowledge(
-            company_name=company_name,
-            document_data=document_data,
-            doc_processor=document_processor
-        )
-        
-        if success:
-            return {
-                "success": True,
-                "message": f"Document knowledge processed successfully for {company_name}",
-                "filename": filename,
-                "word_count": document_data.get("word_count", 0)
-            }
+        if summary_data and summary_data.get("success"):
+            return summary_data
         else:
-            raise HTTPException(status_code=500, detail="Failed to process document knowledge")
+            raise HTTPException(status_code=404, detail="Knowledge sources not found")
             
     except Exception as e:
-        logger.error(f"❌ Document processing endpoint error: {e}")
+        logger.error(f"❌ Knowledge sources endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/knowledge/source/{source_id}/content")
 async def get_knowledge_source_content_endpoint(source_id: str, company_name: str = Query(None)):
     """Get knowledge source content from Pinecone for preview"""
-    global enhanced_qa
+    global enhanced_qa_system
     
     try:
-        if not enhanced_qa:
+        if not enhanced_qa_system:
             raise HTTPException(
                 status_code=503, 
                 detail="Knowledge retrieval not available. Please set OPENAI_API_KEY environment variable to enable this feature."
@@ -503,13 +531,10 @@ async def get_knowledge_source_content_endpoint(source_id: str, company_name: st
         logger.info(f"📄 Getting knowledge source content: {source_id} (company: {company_name})")
         
         # Get content from Pinecone using the source ID and company name
-        content_data = enhanced_qa.get_source_content(source_id, company_name)
+        content_data = enhanced_qa_system.get_source_content(source_id, company_name)
         
-        if content_data:
-            return {
-                "success": True,
-                "data": content_data
-            }
+        if content_data and content_data.get("success"):
+            return content_data
         else:
             raise HTTPException(status_code=404, detail="Knowledge source content not found")
             
@@ -520,10 +545,10 @@ async def get_knowledge_source_content_endpoint(source_id: str, company_name: st
 @app.post("/ask-enhanced/{company_name}")
 async def ask_enhanced_question_endpoint(company_name: str, request: Request):
     """Ask a question using enhanced Q&A with all knowledge sources"""
-    global enhanced_qa
+    global enhanced_qa_system
     
     try:
-        if not enhanced_qa:
+        if not enhanced_qa_system:
             raise HTTPException(status_code=503, detail="Enhanced Q&A not available")
         
         # Parse request body
@@ -536,7 +561,7 @@ async def ask_enhanced_question_endpoint(company_name: str, request: Request):
         logger.info(f"🤖 Enhanced Q&A for {company_name}: {question}")
         
         # Get enhanced answer
-        result = enhanced_qa.answer_question_enhanced(company_name, question)
+        result = enhanced_qa_system.ask_question(question, company_name)
         
         return {
             "success": True,
@@ -547,25 +572,13 @@ async def ask_enhanced_question_endpoint(company_name: str, request: Request):
             "video_timestamp": result.get("video_timestamp")
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Enhanced Q&A endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/knowledge-summary/{company_name}")
-async def get_knowledge_summary_endpoint(company_name: str):
-    """Get knowledge summary for a specific company"""
-    global knowledge_integrator
-    
-    try:
-        if not knowledge_integrator:
-            raise HTTPException(status_code=503, detail="Knowledge processing not available")
-        
-        summary = knowledge_integrator.get_knowledge_summary(company_name)
-        return summary
-        
-    except Exception as e:
-        logger.error(f"❌ Knowledge summary endpoint error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+# Removed old knowledge summary and scraping stats endpoints - using clean system instead
 
 # Health Check Endpoints
 @app.get("/status")
@@ -632,9 +645,741 @@ async def force_cleanup():
     except Exception as e:
         return {"error": str(e)}
 
+@app.delete("/delete-company-data/{company_name}")
+async def delete_company_data_endpoint(company_name: str):
+    """Delete all company data from Pinecone"""
+    try:
+        logger.info(f"🗑️ Deleting all data for company: {company_name}")
+        
+        # Initialize Q&A system if not already done
+        import os
+        
+        # Initialize if not already done
+        success = await initialize_enhanced_qa()
+        
+        # Get the initialized enhanced_knowledge_integrator after initialization
+        from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
+        
+        # Get index name
+        index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
+        
+        # Get the index from enhanced_knowledge_integrator
+        if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
+            index = enhanced_knowledge_integrator.index
+        else:
+            # Fallback: create new integrator
+            integrator = EnhancedKnowledgeIntegrator(
+                openai_api_key=os.getenv("OPENAI_API_KEY"),
+                pinecone_api_key=os.getenv("PINECONE_API_KEY"),
+                pinecone_index=index_name
+            )
+            index = integrator.index
+        
+        # Create namespace from company name
+        namespace = company_name.lower().replace(' ', '-')
+        logger.info(f"🗑️ Deleting namespace: {namespace} from index: {index_name}")
+        
+        # Get index stats to check if namespace exists
+        try:
+            stats = index.describe_index_stats()
+            total_vectors = stats.get('total_vector_count', 0)
+            
+            if total_vectors == 0:
+                logger.warning(f"⚠️ No vectors found in index {index_name}")
+                return {
+                    "success": True,
+                    "message": "No data found to delete",
+                    "deleted_count": 0
+                }
+            
+            # Delete all vectors in the namespace
+            # Pinecone doesn't have a direct delete by namespace method, so we need to:
+            # 1. Query all vectors in the namespace
+            # 2. Delete them by ID
+            
+            # Query all vectors in the namespace
+            dummy_embedding = [0.0] * 1536  # OpenAI embedding dimension
+            
+            try:
+                # Get all vectors in the namespace
+                query_response = index.query(
+                    vector=dummy_embedding,
+                    top_k=10000,  # Get all vectors (max limit)
+                    include_metadata=True,
+                    namespace=namespace
+                )
+                
+                if not query_response.matches:
+                    logger.info(f"✅ No vectors found in namespace '{namespace}'")
+                    return {
+                        "success": True,
+                        "message": "No data found in namespace",
+                        "deleted_count": 0,
+                        "namespace": namespace
+                    }
+                
+                # Extract vector IDs to delete
+                vector_ids_to_delete = [match.id for match in query_response.matches]
+                logger.info(f"🗑️ Found {len(vector_ids_to_delete)} vectors to delete in namespace '{namespace}'")
+                
+                # Delete vectors by ID
+                if vector_ids_to_delete:
+                    # Delete in batches of 1000 (Pinecone limit)
+                    batch_size = 1000
+                    total_deleted = 0
+                    
+                    for i in range(0, len(vector_ids_to_delete), batch_size):
+                        batch = vector_ids_to_delete[i:i + batch_size]
+                        logger.info(f"🗑️ Deleting batch {i//batch_size + 1}: {len(batch)} vectors")
+                        
+                        try:
+                            index.delete(ids=batch, namespace=namespace)
+                            total_deleted += len(batch)
+                            logger.info(f"✅ Deleted batch {i//batch_size + 1}: {len(batch)} vectors")
+                        except Exception as batch_error:
+                            logger.error(f"❌ Failed to delete batch {i//batch_size + 1}: {batch_error}")
+                            # Continue with other batches
+                    
+                    logger.info(f"🎉 Successfully deleted {total_deleted} vectors from namespace '{namespace}'")
+                    
+                    return {
+                        "success": True,
+                        "message": f"Successfully deleted {total_deleted} vectors",
+                        "deleted_count": total_deleted,
+                        "namespace": namespace,
+                        "index": index_name
+                    }
+                else:
+                    return {
+                        "success": True,
+                        "message": "No vectors found to delete",
+                        "deleted_count": 0,
+                        "namespace": namespace
+                    }
+                    
+            except Exception as query_error:
+                logger.error(f"❌ Error querying namespace '{namespace}': {query_error}")
+                return {
+                    "success": False,
+                    "error": f"Failed to query namespace: {str(query_error)}",
+                    "namespace": namespace
+                }
+                
+        except Exception as stats_error:
+            logger.error(f"❌ Error getting index stats: {stats_error}")
+            return {
+                "success": False,
+                "error": f"Failed to get index stats: {str(stats_error)}"
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Delete company data error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/delete-knowledge-source/{company_name}")
+async def delete_knowledge_source_endpoint(company_name: str, request: Request):
+    """Delete specific knowledge source from Pinecone"""
+    try:
+        logger.info(f"🗑️ Deleting knowledge source for company: {company_name}")
+        
+        body = await request.json()
+        source_id = body.get("source_id")
+        source_type = body.get("source_type")
+        source_url = body.get("source_url")
+        title = body.get("title")
+        
+        if not source_id:
+            raise HTTPException(status_code=400, detail="source_id is required")
+        
+        # Initialize Q&A system if not already done
+        import os
+        
+        # Initialize if not already done
+        success = await initialize_enhanced_qa()
+        
+        # Get the initialized enhanced_knowledge_integrator after initialization
+        from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
+        
+        # Get index name
+        index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
+        
+        # Get the index from enhanced_knowledge_integrator
+        if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
+            index = enhanced_knowledge_integrator.index
+        else:
+            # Fallback: create new integrator
+            integrator = EnhancedKnowledgeIntegrator(
+                openai_api_key=os.getenv("OPENAI_API_KEY"),
+                pinecone_api_key=os.getenv("PINECONE_API_KEY"),
+                pinecone_index=index_name
+            )
+            index = integrator.index
+        
+        # Create namespace from company name
+        namespace = company_name.lower().replace(' ', '-')
+        logger.info(f"🗑️ Deleting knowledge source from namespace: {namespace}")
+        
+        # Query for vectors that match the source criteria
+        dummy_embedding = [0.0] * 1536  # OpenAI embedding dimension
+        
+        try:
+            # Get all vectors in the namespace
+            query_response = index.query(
+                vector=dummy_embedding,
+                top_k=10000,  # Get all vectors (max limit)
+                include_metadata=True,
+                namespace=namespace
+            )
+            
+            if not query_response.matches:
+                logger.info(f"✅ No vectors found in namespace '{namespace}'")
+                return {
+                    "success": True,
+                    "message": "No data found in namespace",
+                    "deleted_count": 0,
+                    "namespace": namespace
+                }
+            
+            # Filter vectors that match the source criteria
+            vectors_to_delete = []
+            for match in query_response.matches:
+                metadata = match.metadata or {}
+                
+                # Check if this vector belongs to the source we want to delete
+                # Match by source_id, source_url, or title
+                if (metadata.get("source_id") == source_id or
+                    metadata.get("source_url") == source_url or
+                    metadata.get("title") == title or
+                    metadata.get("source_type") == source_type):
+                    vectors_to_delete.append(match.id)
+            
+            if not vectors_to_delete:
+                logger.info(f"✅ No vectors found matching source criteria")
+                return {
+                    "success": True,
+                    "message": "No matching vectors found",
+                    "deleted_count": 0,
+                    "namespace": namespace,
+                    "source_id": source_id
+                }
+            
+            logger.info(f"🗑️ Found {len(vectors_to_delete)} vectors to delete for source: {source_id}")
+            
+            # Delete vectors by ID
+            if vectors_to_delete:
+                # Delete in batches of 1000 (Pinecone limit)
+                batch_size = 1000
+                total_deleted = 0
+                
+                for i in range(0, len(vectors_to_delete), batch_size):
+                    batch = vectors_to_delete[i:i + batch_size]
+                    logger.info(f"🗑️ Deleting batch {i//batch_size + 1}: {len(batch)} vectors")
+                    
+                    try:
+                        index.delete(ids=batch, namespace=namespace)
+                        total_deleted += len(batch)
+                        logger.info(f"✅ Deleted batch {i//batch_size + 1}: {len(batch)} vectors")
+                    except Exception as batch_error:
+                        logger.error(f"❌ Failed to delete batch {i//batch_size + 1}: {batch_error}")
+                        # Continue with other batches
+                
+                logger.info(f"🎉 Successfully deleted {total_deleted} vectors for source: {source_id}")
+                
+                return {
+                    "success": True,
+                    "message": f"Successfully deleted {total_deleted} vectors",
+                    "deleted_count": total_deleted,
+                    "namespace": namespace,
+                    "source_id": source_id,
+                    "index": index_name
+                }
+            else:
+                return {
+                    "success": True,
+                    "message": "No vectors found to delete",
+                    "deleted_count": 0,
+                    "namespace": namespace,
+                    "source_id": source_id
+                }
+                
+        except Exception as query_error:
+            logger.error(f"❌ Error querying namespace '{namespace}': {query_error}")
+            return {
+                "success": False,
+                "error": f"Failed to query namespace: {str(query_error)}",
+                "namespace": namespace
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Delete knowledge source error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Comprehensive Support Bot Endpoints
+@app.post("/scrape-company-support/{company_name}")
+async def scrape_company_support_endpoint(company_name: str, request: Request):
+    """Scrape comprehensive support data from company websites"""
+    try:
+        if not enhanced_knowledge_integrator:
+            raise HTTPException(status_code=503, detail="Support bot system not initialized")
+        
+        body = await request.json()
+        website_urls = body.get("website_urls", [])
+        max_pages_per_url = body.get("max_pages_per_url", 10)
+        
+        if not website_urls:
+            raise HTTPException(status_code=400, detail="website_urls is required")
+        
+        logger.info(f"🕷️ Starting comprehensive support scraping for {company_name}")
+        
+        # Scrape support data
+        support_data = enhanced_knowledge_integrator.scrape_company_support_data(
+            company_name, website_urls, max_pages_per_url
+        )
+        
+        # Get summary
+        summary = enhanced_knowledge_integrator.get_knowledge_summary(company_name)
+        
+        return {
+            "success": True,
+            "company_name": company_name,
+            "support_data_count": len(support_data),
+            "summary": summary,
+            "message": f"Successfully scraped {len(support_data)} support data items"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Support scraping error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/integrate-video-transcripts/{company_name}")
+async def integrate_video_transcripts_endpoint(company_name: str, request: Request):
+    """Integrate video transcripts with support data"""
+    try:
+        if not enhanced_knowledge_integrator:
+            raise HTTPException(status_code=503, detail="Support bot system not initialized")
+        
+        body = await request.json()
+        video_transcripts = body.get("video_transcripts", [])
+        
+        if not video_transcripts:
+            raise HTTPException(status_code=400, detail="video_transcripts is required")
+        
+        logger.info(f"🎬 Integrating video transcripts for {company_name}")
+        
+        # Integrate video transcripts
+        integrated_data = enhanced_knowledge_integrator.integrate_video_transcripts(
+            company_name, video_transcripts
+        )
+        
+        return {
+            "success": True,
+            "company_name": company_name,
+            "integrated_data_count": len(integrated_data),
+            "message": f"Successfully integrated {len(integrated_data)} data items"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Video integration error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/enhance-support-data/{company_name}")
+async def enhance_support_data_endpoint(company_name: str):
+    """Enhance support data with AI-generated content"""
+    try:
+        if not enhanced_knowledge_integrator:
+            raise HTTPException(status_code=503, detail="Support bot system not initialized")
+        
+        logger.info(f"🤖 Enhancing support data for {company_name}")
+        
+        # Enhance support data
+        enhanced_data = enhanced_knowledge_integrator.enhance_support_data_with_ai(company_name)
+        
+        return {
+            "success": True,
+            "company_name": company_name,
+            "enhanced_data_count": len(enhanced_data),
+            "message": f"Successfully enhanced {len(enhanced_data)} support data items"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Support data enhancement error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/process-raw-content/{company_name}")
+async def process_raw_content_endpoint(company_name: str, request: Request):
+    """Process raw HTML content and extract complete content chunks without Q&A generation"""
+    try:
+        if not enhanced_knowledge_integrator:
+            raise HTTPException(status_code=503, detail="Support bot system not initialized")
+        
+        body = await request.json()
+        html_content = body.get("html_content", "")
+        url = body.get("url", "")
+        
+        if not html_content:
+            raise HTTPException(status_code=400, detail="html_content is required")
+        
+        if not url:
+            raise HTTPException(status_code=400, detail="url is required")
+        
+        logger.info(f"🔍 Processing raw content for {company_name} from: {url}")
+        
+        # Use enhanced knowledge integrator to process raw content
+        content_chunks = enhanced_knowledge_integrator.process_raw_content(
+            company_name, html_content, url
+        )
+        
+        # Get summary
+        summary = enhanced_knowledge_integrator.get_knowledge_summary(company_name)
+        
+        return {
+            "success": True,
+            "company_name": company_name,
+            "content_chunks_count": len(content_chunks),
+            "summary": summary,
+            "message": f"Successfully processed {len(content_chunks)} content chunks"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Process raw content error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/create-vector-embeddings/{company_name}")
+async def create_vector_embeddings_endpoint(company_name: str):
+    """Create vector embeddings for company knowledge"""
+    try:
+        if not enhanced_knowledge_integrator:
+            raise HTTPException(status_code=503, detail="Support bot system not initialized")
+        
+        logger.info(f"🔢 Creating vector embeddings for {company_name}")
+        
+        # Create vector embeddings
+        embeddings = enhanced_knowledge_integrator.create_vector_embeddings(company_name)
+        
+        return {
+            "success": True,
+            "company_name": company_name,
+            "embeddings_count": len(embeddings),
+            "message": f"Successfully created {len(embeddings)} vector embeddings"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Vector embedding error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ask-support-question")
+async def ask_support_question_endpoint(request: Request):
+    """Ask a support question using comprehensive knowledge base"""
+    try:
+        if not enhanced_knowledge_integrator:
+            raise HTTPException(status_code=503, detail="Support bot system not initialized")
+        
+        body = await request.json()
+        company_name = body.get("company_name")
+        question = body.get("question")
+        
+        if not company_name or not question:
+            raise HTTPException(status_code=400, detail="company_name and question are required")
+        
+        logger.info(f"🤖 Support question for {company_name}: {question}")
+        
+        # Generate support response
+        response = enhanced_knowledge_integrator.generate_support_response(company_name, question)
+        
+        return {
+            "success": True,
+            "company_name": company_name,
+            "question": question,
+            "response": response
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Support question error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/support-knowledge-summary/{company_name}")
+async def get_support_knowledge_summary_endpoint(company_name: str):
+    """Get comprehensive summary of company support knowledge"""
+    try:
+        if not enhanced_knowledge_integrator:
+            raise HTTPException(status_code=503, detail="Support bot system not initialized")
+        
+        summary = enhanced_knowledge_integrator.get_knowledge_summary(company_name)
+        
+        return {
+            "success": True,
+            "company_name": company_name,
+            "summary": summary
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Knowledge summary error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/export-company-knowledge/{company_name}")
+async def export_company_knowledge_endpoint(company_name: str):
+    """Export company knowledge to JSON file"""
+    try:
+        if not enhanced_knowledge_integrator:
+            raise HTTPException(status_code=503, detail="Support bot system not initialized")
+        
+        filename = f"company_knowledge_{company_name}_{int(time.time())}.json"
+        enhanced_knowledge_integrator.export_company_knowledge(company_name, filename)
+        
+        return {
+            "success": True,
+            "company_name": company_name,
+            "filename": filename,
+            "message": f"Successfully exported company knowledge to {filename}"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Knowledge export error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Startup and shutdown events are now handled by the lifespan event handler above
 
 # Main entry point
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5001))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+@app.delete("/delete-video-data/{company_name}")
+async def delete_video_data_endpoint(company_name: str, request: Request):
+    """Delete video data from Pinecone when processing fails"""
+    try:
+        logger.info(f"🗑️ Deleting video data from Pinecone for company: {company_name}")
+        
+        body = await request.json()
+        video_id = body.get("video_id")
+        video_url = body.get("video_url")
+        
+        if not video_id and not video_url:
+            raise HTTPException(status_code=400, detail="video_id or video_url is required")
+        
+        # Initialize Q&A system if not already done
+        import os
+        
+        # Initialize if not already done
+        success = await initialize_enhanced_qa()
+        
+        # Get the initialized enhanced_knowledge_integrator after initialization
+        from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
+        
+        # Get index name
+        index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
+        
+        # Get the index from enhanced_knowledge_integrator
+        if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
+            index = enhanced_knowledge_integrator.index
+        else:
+            # Fallback: create new integrator
+            integrator = EnhancedKnowledgeIntegrator(
+                openai_api_key=os.getenv("OPENAI_API_KEY"),
+                pinecone_api_key=os.getenv("PINECONE_API_KEY"),
+                pinecone_index=index_name
+            )
+            index = integrator.index
+        
+        # Delete vectors by metadata filter
+        try:
+            # Delete by video_id if provided
+            if video_id:
+                index.delete(filter={"video_id": video_id})
+                logger.info(f"✅ Deleted vectors with video_id: {video_id}")
+            
+            # Delete by video_url if provided
+            if video_url:
+                index.delete(filter={"video_url": video_url})
+                logger.info(f"✅ Deleted vectors with video_url: {video_url}")
+            
+            # Also delete by company_name and source type
+            index.delete(filter={
+                "company_name": company_name,
+                "source": "video"
+            })
+            logger.info(f"✅ Deleted video vectors for company: {company_name}")
+            
+            return {
+                "success": True,
+                "message": "Video data deleted from Pinecone successfully",
+                "deleted_video_id": video_id,
+                "deleted_video_url": video_url
+            }
+            
+        except Exception as delete_error:
+            logger.error(f"❌ Error deleting from Pinecone: {delete_error}")
+            return {
+                "success": False,
+                "error": f"Failed to delete from Pinecone: {str(delete_error)}"
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Delete video data error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/delete-website-data/{company_name}")
+async def delete_website_data_endpoint(company_name: str, request: Request):
+    """Delete website data from Pinecone when processing fails"""
+    try:
+        logger.info(f"🗑️ Deleting website data from Pinecone for company: {company_name}")
+        
+        body = await request.json()
+        website_url = body.get("website_url")
+        knowledge_source_id = body.get("knowledge_source_id")
+        
+        if not website_url and not knowledge_source_id:
+            raise HTTPException(status_code=400, detail="website_url or knowledge_source_id is required")
+        
+        # Initialize Q&A system if not already done
+        import os
+        
+        # Initialize if not already done
+        success = await initialize_enhanced_qa()
+        
+        # Get the initialized enhanced_knowledge_integrator after initialization
+        from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
+        
+        # Get index name
+        index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
+        
+        # Get the index from enhanced_knowledge_integrator
+        if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
+            index = enhanced_knowledge_integrator.index
+        else:
+            # Fallback: create new integrator
+            integrator = EnhancedKnowledgeIntegrator(
+                openai_api_key=os.getenv("OPENAI_API_KEY"),
+                pinecone_api_key=os.getenv("PINECONE_API_KEY"),
+                pinecone_index=index_name
+            )
+            index = integrator.index
+        
+        # Delete vectors by metadata filter
+        try:
+            # Delete by website_url if provided
+            if website_url:
+                index.delete(filter={"url": website_url})
+                logger.info(f"✅ Deleted vectors with website_url: {website_url}")
+            
+            # Delete by knowledge_source_id if provided
+            if knowledge_source_id:
+                index.delete(filter={"knowledge_source_id": knowledge_source_id})
+                logger.info(f"✅ Deleted vectors with knowledge_source_id: {knowledge_source_id}")
+            
+            # Also delete by company_name and source type
+            index.delete(filter={
+                "company_name": company_name,
+                "source": "web_scraping"
+            })
+            logger.info(f"✅ Deleted website vectors for company: {company_name}")
+            
+            return {
+                "success": True,
+                "message": "Website data deleted from Pinecone successfully",
+                "deleted_website_url": website_url,
+                "deleted_knowledge_source_id": knowledge_source_id
+            }
+            
+        except Exception as delete_error:
+            logger.error(f"❌ Error deleting from Pinecone: {delete_error}")
+            return {
+                "success": False,
+                "error": f"Failed to delete from Pinecone: {str(delete_error)}"
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Delete website data error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/delete-document-data/{company_name}")
+async def delete_document_data_endpoint(company_name: str, request: Request):
+    """Delete document data from Pinecone when processing fails"""
+    try:
+        logger.info(f"🗑️ Deleting document data from Pinecone for company: {company_name}")
+        
+        body = await request.json()
+        file_name = body.get("file_name")
+        knowledge_source_id = body.get("knowledge_source_id")
+        
+        if not file_name and not knowledge_source_id:
+            raise HTTPException(status_code=400, detail="file_name or knowledge_source_id is required")
+        
+        # Initialize Q&A system if not already done
+        import os
+        
+        # Initialize if not already done
+        success = await initialize_enhanced_qa()
+        
+        # Get the initialized enhanced_knowledge_integrator after initialization
+        from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
+        
+        # Get index name
+        index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
+        
+        # Get the index from enhanced_knowledge_integrator
+        if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
+            index = enhanced_knowledge_integrator.index
+        else:
+            # Fallback: create new integrator
+            integrator = EnhancedKnowledgeIntegrator(
+                openai_api_key=os.getenv("OPENAI_API_KEY"),
+                pinecone_api_key=os.getenv("PINECONE_API_KEY"),
+                pinecone_index=index_name
+            )
+            index = integrator.index
+        
+        # Delete vectors by metadata filter
+        try:
+            # Delete by file_name if provided
+            if file_name:
+                index.delete(filter={"file_name": file_name})
+                logger.info(f"✅ Deleted vectors with file_name: {file_name}")
+            
+            # Delete by knowledge_source_id if provided
+            if knowledge_source_id:
+                index.delete(filter={"knowledge_source_id": knowledge_source_id})
+                logger.info(f"✅ Deleted vectors with knowledge_source_id: {knowledge_source_id}")
+            
+            # Also delete by company_name and source type
+            index.delete(filter={
+                "company_name": company_name,
+                "source": "document"
+            })
+            logger.info(f"✅ Deleted document vectors for company: {company_name}")
+            
+            return {
+                "success": True,
+                "message": "Document data deleted from Pinecone successfully",
+                "deleted_file_name": file_name,
+                "deleted_knowledge_source_id": knowledge_source_id
+            }
+            
+        except Exception as delete_error:
+            logger.error(f"❌ Error deleting from Pinecone: {delete_error}")
+            return {
+                "success": False,
+                "error": f"Failed to delete from Pinecone: {str(delete_error)}"
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Delete document data error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

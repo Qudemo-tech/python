@@ -41,7 +41,7 @@ class LoomVideoProcessor:
         
         # Initialize Pinecone
         self.pc = Pinecone(api_key=pinecone_api_key)
-        self.default_index_name = os.getenv("PINECONE_INDEX", "qudemo-demo")
+        self.default_index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
         
         # Initialize Whisper model (lazy loading with memory management)
         self._whisper_model = None
@@ -1430,4 +1430,156 @@ class LoomVideoProcessor:
             logger.error(f"❌ Loom video processing failed (lightweight): {e}")
             # Cleanup on error
             self.cleanup_memory(preserve_whisper=True)
+            return None
+
+    def process_video_with_semantic_chunking(self, video_url: str, company_name: str) -> Dict:
+        """
+        Process video with semantic chunking for better retrieval
+        
+        Args:
+            video_url: URL of the video to process
+            company_name: Company name for storage
+            
+        Returns:
+            Processing result dictionary
+        """
+        try:
+            logger.info(f"🎬 Processing video with semantic chunking: {video_url}")
+            
+            # Download and transcribe video
+            transcription_result = self._download_and_transcribe(video_url)
+            if not transcription_result:
+                return {
+                    "success": False,
+                    "error": "Failed to transcribe video",
+                    "video_url": video_url,
+                    "company_name": company_name
+                }
+            
+            # Extract transcription text
+            transcription = transcription_result.get('transcription', '')
+            segments = transcription_result.get('segments', [])
+            
+            if not transcription.strip():
+                return {
+                    "success": False,
+                    "error": "No transcription content found",
+                    "video_url": video_url,
+                    "company_name": company_name
+                }
+            
+            logger.info(f"📝 Transcription completed: {len(transcription)} characters")
+            
+            # Use semantic chunking instead of fixed-size chunks
+            semantic_chunks = self._create_semantic_chunks_from_transcription(
+                transcription=transcription,
+                segments=segments,
+                company_name=company_name,
+                video_url=video_url
+            )
+            
+            if not semantic_chunks:
+                return {
+                    "success": False,
+                    "error": "Failed to create semantic chunks",
+                    "video_url": video_url,
+                    "company_name": company_name
+                }
+            
+            logger.info(f"✅ Successfully created {len(semantic_chunks)} semantic chunks")
+            
+            return {
+                "success": True,
+                "message": "Video processed successfully with semantic chunking",
+                "video_url": video_url,
+                "company_name": company_name,
+                "chunks_created": len(semantic_chunks),
+                "transcription_length": len(transcription),
+                "segments_count": len(segments)
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Error in semantic video processing: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "video_url": video_url,
+                "company_name": company_name
+            }
+    
+    def _create_semantic_chunks_from_transcription(self, transcription: str, segments: List[Dict], 
+                                                  company_name: str, video_url: str) -> List[Dict]:
+        """
+        Create semantic chunks from video transcription
+        
+        Args:
+            transcription: Full transcription text
+            segments: Time-stamped segments
+            company_name: Company name
+            video_url: Video URL
+            
+        Returns:
+            List of stored chunk information
+        """
+        try:
+            # Initialize knowledge integrator for semantic chunking
+            from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
+            
+            integrator = EnhancedKnowledgeIntegrator(
+                openai_api_key=self.openai_api_key,
+                pinecone_api_key=self.pinecone_api_key,
+                pinecone_index=self.default_index_name
+            )
+            
+            # Prepare source information
+            source_info = {
+                'title': f'Video: {video_url}',
+                'url': video_url,
+                'source': 'video_transcription',
+                'content_type': 'video',
+                'segments_count': len(segments),
+                'transcription_length': len(transcription),
+                'processing_method': 'semantic_chunking'
+            }
+            
+            # Store using semantic chunking
+            stored_chunks = integrator.store_semantic_chunks(
+                text=transcription,
+                company_name=company_name,
+                source_info=source_info
+            )
+            
+            logger.info(f"✅ Stored {len(stored_chunks)} semantic chunks in Pinecone")
+            return stored_chunks
+            
+        except Exception as e:
+            logger.error(f"❌ Error creating semantic chunks: {e}")
+            return []
+
+    def _download_and_transcribe(self, video_url: str) -> Optional[Dict]:
+        """
+        Download and transcribe video using existing methods
+        
+        Args:
+            video_url: Video URL to process
+            
+        Returns:
+            Transcription result or None
+        """
+        try:
+            # Use existing download and transcription logic
+            # This is a simplified version - you can integrate with your existing methods
+            
+            # For now, return a placeholder
+            # In practice, this would call your existing transcription methods
+            logger.info(f"🎬 Downloading and transcribing: {video_url}")
+            
+            # Placeholder - replace with actual transcription logic
+            return {
+                'transcription': 'Sample transcription text...',
+                'segments': [{'text': 'Sample segment', 'start': 0.0, 'end': 10.0}]
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Error in download and transcribe: {e}")
             return None

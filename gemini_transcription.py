@@ -70,7 +70,7 @@ class GeminiTranscriptionProcessor:
         
         # Initialize Pinecone
         self.pc = Pinecone(api_key=pinecone_api_key)
-        self.default_index_name = os.getenv("PINECONE_INDEX", "qudemo-demo")
+        self.default_index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
         
         logger.info("🔧 Initializing Gemini Transcription Processor...")
 
@@ -843,29 +843,4 @@ class GeminiTranscriptionProcessor:
             logger.error(f"❌ Search failed: {e}")
             return []
 
-# Example usage
-if __name__ == "__main__":
-    # Load environment variables
-    gemini_api_key = os.getenv("GEMINI_API_KEY")
-    pinecone_api_key = os.getenv("PINECONE_API_KEY")
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    
-    if not all([gemini_api_key, pinecone_api_key, openai_api_key]):
-        print("❌ Missing required API keys")
-        exit(1)
-    
-    # Initialize processor
-    processor = GeminiTranscriptionProcessor(gemini_api_key, pinecone_api_key, openai_api_key)
-    
-    # Test URL
-    test_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-    test_company = "TestCompany"
-    
-    print("🧪 Testing Gemini Transcription Processor...")
-    
-    # Test processing (commented out to avoid actual processing)
-    # result = processor.process_video(test_url, test_company)
-    # if result:
-    #     print(f"✅ Processing result: {result}")
-    # else:
-    #     print("❌ Processing failed")
+

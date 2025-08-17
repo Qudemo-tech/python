@@ -56,6 +56,8 @@ Thumbs.db
 *.log
 logs/
 log/
+app.log
+*.log.*
 
 # Temporary files
 *.tmp
@@ -89,11 +91,19 @@ tmp/
 
 # Transcript files
 transcript_chunks.json
-transcript_logs
+transcript_logs/
 transcripts/
 *.json
 
+# Test result files
+*_results.json
+*_scraper_results.json
+*_test_results.json
+
 # Authentication and credentials
+.env
+.env.local
+.env.production
 cookies.txt
 *.key
 *.pem
@@ -118,14 +128,14 @@ weights/
 test_*.py
 *_test.py
 tests/
+*_test.py
+test_implementation.py
+debug_*.py
+quick_test.py
 
 # Documentation (keep only essential)
 *.md
 !README.md
-!DEPLOYMENT_GUIDE.md
-!RENDER_LOOM_DEPLOYMENT.md
-!RENDER_512MB_OPTIMIZATION.md
-!LOOM_FIX_SUMMARY.md
 
 # Git
 .git/
@@ -165,6 +175,40 @@ coverage.xml
 
 # pipenv
 Pipfile.lock
+
+# Cache and temporary directories
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+.classpath
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Backup files
+*.bak
+*.backup
+*.old
+*.orig
 
 # PEP 582
 __pypackages__/

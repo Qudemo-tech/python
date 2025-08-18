@@ -231,6 +231,7 @@ class EnhancedQASystem:
                 
                 # Extract video timestamp if available
                 if metadata.get('source') == 'video':
+                    print(f"🔍 Processing video source: {metadata.get('title', 'Unknown')}")
                     # Look for timestamp in the chunk text or metadata
                     timestamp = self._extract_video_timestamp(result['text'], metadata)
                     if timestamp:
@@ -240,8 +241,12 @@ class EnhancedQASystem:
                             'start': timestamp,
                             'title': metadata.get('title', 'Video')
                         })
+                        print(f"🔍 Added video timestamp: {timestamp}s for {metadata.get('title', 'Unknown')}")
+                    else:
+                        print(f"🔍 No timestamp found for video: {metadata.get('title', 'Unknown')}")
                     video_sources.append(source_data)
                 else:
+                    print(f"🔍 Processing website source: {metadata.get('title', 'Unknown')} (source: {metadata.get('source', 'unknown')})")
                     website_sources.append(source_data)
             
             # Determine source composition and prioritize accordingly
@@ -269,6 +274,8 @@ class EnhancedQASystem:
                 # Only website sources available
                 final_sources = website_sources[:5]  # Top 5 website sources
                 print("🔍 Using website sources only (no timestamps)")
+                # Clear any video timestamps since we're only using website sources
+                video_timestamps = []
             
             sources = final_sources
             
@@ -315,19 +322,35 @@ Please provide a comprehensive and accurate answer based only on the information
             for i, source in enumerate(sources):
                 print(f"  Source {i+1}: {source['source_type']} - {source['title']} - {source['url']}")
             
-            # Add video navigation data only if video sources were used
-            if video_timestamps and has_video_sources:
-                # Use the highest scoring video timestamp
-                best_video = max(video_timestamps, key=lambda x: next(
-                    (s['score'] for s in sources if s.get('start_timestamp') == x['start']), 0
-                ))
-                response_data.update({
-                    "video_url": best_video['url'],
-                    "start": best_video['start'],
-                    "end": best_video['start'] + 30,  # 30 second window
-                    "video_title": best_video['title']
-                })
-                print(f"🔍 Added video timestamp: {best_video['start']}s from {best_video['title']}")
+            # Check if any of the final sources are actually video sources
+            final_sources_include_video = any(source.get('source_type') == 'video' for source in sources)
+            print(f"🔍 Final sources include video: {final_sources_include_video}")
+            
+            # Add video navigation data only if video sources were used AND they have valid timestamps
+            if video_timestamps and has_video_sources and len(video_timestamps) > 0 and final_sources_include_video:
+                print(f"🔍 Found {len(video_timestamps)} video timestamps, checking for valid ones...")
+                
+                # Filter for valid video timestamps with URLs
+                valid_video_timestamps = [
+                    vt for vt in video_timestamps 
+                    if vt.get('url') and vt.get('start') is not None and vt.get('url').strip()
+                ]
+                
+                if valid_video_timestamps:
+                    # Use the highest scoring video timestamp
+                    best_video = max(valid_video_timestamps, key=lambda x: next(
+                        (s['score'] for s in sources if s.get('start_timestamp') == x['start']), 0
+                    ))
+                    
+                    response_data.update({
+                        "video_url": best_video['url'],
+                        "start": best_video['start'],
+                        "end": best_video['start'] + 30,  # 30 second window
+                        "video_title": best_video['title']
+                    })
+                    print(f"🔍 Added video timestamp: {best_video['start']}s from {best_video['title']}")
+                else:
+                    print("🔍 Video sources found but no valid timestamps with URLs - not adding video data")
             else:
                 print("🔍 No video timestamps added (website sources only or no timestamps found)")
             

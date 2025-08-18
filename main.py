@@ -423,7 +423,7 @@ async def generate_summary_endpoint(request: Request):
 # Knowledge Processing Endpoints
 @app.post("/process-website/{company_name}")
 async def process_website_endpoint(company_name: str, request: Request):
-    """Process website knowledge for a company with 3-page limit"""
+    """Process website knowledge for a company - comprehensive website crawling"""
     global enhanced_qa_system
     
     try:
@@ -442,17 +442,19 @@ async def process_website_endpoint(company_name: str, request: Request):
             raise HTTPException(status_code=400, detail="Website URL is required")
         
         logger.info(f"🌐 Processing website for {company_name}: {website_url}")
-        logger.info(f"📊 Using 3-page limit: 3 collections × 3 articles per collection")
+        logger.info(f"📊 COMPREHENSIVE MODE: Up to 50 collections × 100 articles per collection")
+        logger.info(f"🌐 DOMAIN RESTRICTION: Will only crawl within the same domain")
+        logger.info(f"⏱️ NO TIMEOUT: Will take as long as needed to crawl the entire website")
         
-        # Process website knowledge with timeout (10 minutes for comprehensive scraping)
+        # Process website knowledge with extended timeout for comprehensive scraping
         try:
             result = await asyncio.wait_for(
                 enhanced_qa_system.process_website_knowledge(website_url, company_name),
-                timeout=600.0  # 10 minutes timeout
+                timeout=3600.0  # 60 minutes timeout for comprehensive scraping
             )
         except asyncio.TimeoutError:
             logger.error(f"❌ Website processing timeout for {company_name}: {website_url}")
-            raise HTTPException(status_code=408, detail="Website processing timed out. Please try again.")
+            raise HTTPException(status_code=408, detail="Website processing timed out after 60 minutes. This is normal for large websites. Please try again.")
         
         if result.get('success'):
             data = result.get('data', {})

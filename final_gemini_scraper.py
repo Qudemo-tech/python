@@ -183,8 +183,29 @@ class FinalGeminiScraper:
     def _fallback_content_extraction(self, prompt: str) -> str:
         """Fallback content extraction when Gemini is not available"""
         try:
-            # Basic content extraction without AI
-            # This is a simple fallback that extracts basic text content
+            # Try to extract meaningful content from the prompt
+            if "content:" in prompt.lower() or "text:" in prompt.lower():
+                # Extract content from the prompt itself
+                lines = prompt.split('\n')
+                content_lines = []
+                in_content = False
+                
+                for line in lines:
+                    if 'content:' in line.lower() or 'text:' in line.lower():
+                        in_content = True
+                        # Extract content after the colon
+                        content_part = line.split(':', 1)[1].strip()
+                        if content_part:
+                            content_lines.append(content_part)
+                    elif in_content and line.strip():
+                        content_lines.append(line.strip())
+                    elif in_content and not line.strip():
+                        break
+                
+                if content_lines:
+                    return '\n'.join(content_lines)
+            
+            # If no content found in prompt, return a basic message
             return "Content extracted using fallback method. For enhanced extraction, please configure a valid Gemini API key."
         except Exception as e:
             print(f"❌ Fallback extraction failed: {e}")
@@ -688,33 +709,66 @@ Respond only with the JSON object, no additional text. Ensure the content is COM
             for script in soup(["script", "style"]):
                 script.decompose()
             
-            # Get text content
-            text = soup.get_text()
+            # Get text content with better formatting
+            text = soup.get_text(separator='\n', strip=True)
             
-            # Clean up whitespace
-            lines = (line.strip() for line in text.splitlines())
-            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-            text = ' '.join(chunk for chunk in chunks if chunk)
+            # Clean up whitespace and normalize
+            lines = [line.strip() for line in text.split('\n') if line.strip()]
+            text = '\n'.join(lines)
             
             # Extract title
             title = soup.find('title')
-            title_text = title.get_text() if title else "Extracted Content"
+            title_text = title.get_text().strip() if title else "Extracted Content"
+            
+            # Try to find better title from headings
+            for heading in soup.find_all(['h1', 'h2', 'h3']):
+                heading_text = heading.get_text().strip()
+                if heading_text and len(heading_text) > 10 and len(heading_text) < 200:
+                    title_text = heading_text
+                    break
             
             # Basic content analysis
             word_count = len(text.split())
-            has_steps = any(word in text.lower() for word in ['step', 'procedure', 'guide', 'tutorial'])
-            is_complete = word_count > 500
+            has_steps = any(word in text.lower() for word in ['step', 'procedure', 'guide', 'tutorial', '1.', '2.', '3.'])
+            is_complete = word_count > 100  # Reduced threshold for help articles
+            
+            # Determine content type
+            content_type = "article"
+            if any(word in text.lower() for word in ['faq', 'question', 'answer']):
+                content_type = "faq"
+            elif any(word in text.lower() for word in ['step', 'procedure', 'guide', 'tutorial']):
+                content_type = "guide"
+            elif any(word in text.lower() for word in ['error', 'troubleshoot', 'problem']):
+                content_type = "troubleshooting"
+            
+            # Determine difficulty level
+            difficulty = "intermediate"
+            if any(word in text.lower() for word in ['beginner', 'basic', 'simple', 'start']):
+                difficulty = "beginner"
+            elif any(word in text.lower() for word in ['advanced', 'expert', 'complex', 'professional']):
+                difficulty = "advanced"
+            
+            # Calculate quality score based on content
+            quality_score = 85  # Base score
+            if word_count > 500:
+                quality_score += 10
+            if has_steps:
+                quality_score += 5
+            if content_type != "article":
+                quality_score += 5
+            if len(title_text) > 20:
+                quality_score += 5
             
             return {
                 "title": title_text,
                 "content": text,
-                "content_type": "article",
+                "content_type": content_type,
                 "has_steps": has_steps,
                 "is_complete": is_complete,
                 "word_count": word_count,
-                "quality_score": 85,  # Lower quality for basic extraction
+                "quality_score": min(100, quality_score),
                 "key_topics": [],
-                "difficulty_level": "intermediate"
+                "difficulty_level": difficulty
             }
             
         except Exception as e:
@@ -776,11 +830,18 @@ Respond only with the JSON object, no additional text. Ensure the content is COM
             # Use enhanced Gemini to extract content intelligently
             extracted = await self.extract_content_with_gemini_enhanced(url, clean_text)
             
-            if extracted and extracted.get('content') and len(extracted['content']) > 200:  # Reduced minimum
-                extracted['url'] = url
-                return extracted
+            if extracted and extracted.get('content'):
+                content_length = len(extracted['content'])
+                # More flexible content validation - accept shorter content for help articles
+                if content_length > 50:  # Reduced from 200 to 50 characters
+                    extracted['url'] = url
+                    print(f"✅ Content extracted: {content_length} characters")
+                    return extracted
+                else:
+                    print(f"⚠️ Content too short ({content_length} chars) from {url}")
+                    return None
             else:
-                print(f"⚠️ Insufficient content extracted from {url}")
+                print(f"⚠️ No content extracted from {url}")
                 return None
                 
         except Exception as e:
@@ -1120,8 +1181,8 @@ Respond only with the JSON object, no additional text. Ensure the content is COM
             
             # If we found collections, process them
             if collections:
-                for i, collection in enumerate(collections[:3]):  # Process up to 3 collections
-                    print(f"📁 Processing Salesforce collection {i+1}/3: {collection['title']}")
+                for i, collection in enumerate(collections[:50]):  # Process up to 50 collections for comprehensive scraping
+                    print(f"📁 Processing Salesforce collection {i+1}/{min(len(collections), 50)}: {collection['title']}")
                     
                     try:
                         await self.page.goto(collection['url'], wait_until='domcontentloaded', timeout=30000)
@@ -1183,7 +1244,7 @@ Respond only with the JSON object, no additional text. Ensure the content is COM
                         print(f"📄 Found {len(articles)} articles in collection {collection['title']}")
                         
                         # Extract articles from this collection
-                        articles_per_collection = max(1, max_articles // 3)  # Distribute articles across collections
+                        articles_per_collection = max(1, max_articles // len(collections))  # Distribute articles across collections
                         for j, article in enumerate(articles[:articles_per_collection]):
                             print(f"📖 Scraping Salesforce article {j+1}/{min(len(articles), articles_per_collection)} from {collection['title']}")
                             

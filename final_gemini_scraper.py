@@ -263,10 +263,73 @@ class FinalGeminiScraper:
             print(f"❌ Fallback scraping failed: {e}")
             return []
             
+    def _extract_domain(self, url: str) -> str:
+        """Extract domain from URL for domain restriction"""
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        return f"{parsed.scheme}://{parsed.netloc}"
+    
+    def _is_same_domain(self, url: str, base_domain: str) -> bool:
+        """Check if URL is within the same domain"""
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(url)
+            url_domain = f"{parsed.scheme}://{parsed.netloc}"
+            return url_domain == base_domain
+        except:
+            return False
+    
+    def _is_error_page(self, url: str) -> bool:
+        """Check if URL is likely an error page"""
+        error_patterns = [
+            '/404', '/error', '/not-found', '/page-not-found',
+            '/500', '/server-error', '/maintenance', '/under-construction',
+            'error.html', '404.html', 'notfound.html'
+        ]
+        url_lower = url.lower()
+        return any(pattern in url_lower for pattern in error_patterns)
+    
+    async def _final_summary_log(self, start_time: float, pages_scraped: int, pages_skipped: int, collections_found: int, articles_found: int, results: List[Dict]) -> List[Dict]:
+        """Generate final comprehensive summary log of scraping session"""
+        import time
+        
+        end_time = time.time()
+        total_time = end_time - start_time
+        minutes = int(total_time // 60)
+        seconds = int(total_time % 60)
+        
+        print("\n" + "=" * 80)
+        print("🎯 COMPREHENSIVE WEBSITE SCRAPING - FINAL SUMMARY")
+        print("=" * 80)
+        print(f"⏱️  Total Time: {minutes}m {seconds}s ({total_time:.2f} seconds)")
+        print(f"📊 Pages Scraped: {pages_scraped}")
+        print(f"🔄 Pages Skipped (Duplicates): {pages_skipped}")
+        print(f"📁 Collections Found: {collections_found}")
+        print(f"📄 Total Articles Found: {articles_found}")
+        print(f"✅ Successful Extractions: {len(results)}")
+        print(f"📈 Success Rate: {(len(results) / max(pages_scraped, 1)) * 100:.1f}%")
+        
+        if pages_scraped > 0:
+            avg_time_per_page = total_time / pages_scraped
+            print(f"⚡ Average Time per Page: {avg_time_per_page:.2f} seconds")
+        
+        if total_time > 0:
+            pages_per_minute = (pages_scraped / total_time) * 60
+            print(f"🚀 Scraping Speed: {pages_per_minute:.1f} pages/minute")
+        
+        print(f"🔄 Duplicate Prevention: {pages_skipped} pages skipped to avoid duplicates")
+        print("=" * 80)
+        
+        return results
+    
     async def find_collection_pages(self, url: str) -> List[Dict]:
         """Find collection/category pages that contain multiple articles"""
         
         try:
+            # Extract base domain for restriction
+            base_domain = self._extract_domain(url)
+            print(f"🌐 Domain restriction: {base_domain}")
+            
             await self.page.goto(url, wait_until='networkidle', timeout=30000)
             await asyncio.sleep(3)
             
@@ -296,15 +359,24 @@ class FinalGeminiScraper:
             
             print(f"🔍 Found {len(links)} total links")
             
-            # Filter for collection pages (multiple patterns)
+            # Filter for collection pages (multiple patterns) with domain restriction
             collection_pages = []
             
             for link in links:
-                href = link['href'].lower()
+                href = link['href']
                 text = link['text'].lower()
                 
+                # Skip if not same domain or is error page
+                if not self._is_same_domain(href, base_domain):
+                    continue
+                
+                if self._is_error_page(href):
+                    continue
+                
+                href_lower = href.lower()
+                
                 # Look for various collection patterns
-                if any(pattern in href for pattern in ['/collections/', '/topics/', '/categories/', '/help/']):
+                if any(pattern in href_lower for pattern in ['/collections/', '/topics/', '/categories/', '/help/', '/support/', '/faq/', '/knowledge/']):
                     # Extract article count if available
                     article_count = 0
                     article_match = re.search(r'(\d+)\s*articles?', text)
@@ -312,15 +384,15 @@ class FinalGeminiScraper:
                         article_count = int(article_match.group(1))
                     
                     collection_pages.append({
-                        'url': link['href'],
+                        'url': href,
                         'title': link['text'],
                         'article_count': article_count,
                         'category': self._extract_category_name(link['text'])
                     })
                 # Also look for FAQ sections
-                elif any(faq_word in text for faq_word in ['faq', 'frequently asked', 'questions', 'help']):
+                elif any(faq_word in text for faq_word in ['faq', 'frequently asked', 'questions', 'help', 'support']):
                     collection_pages.append({
-                        'url': link['href'],
+                        'url': href,
                         'title': link['text'],
                         'article_count': 0,
                         'category': self._extract_category_name(link['text'])
@@ -362,6 +434,9 @@ class FinalGeminiScraper:
         """Find individual article URLs within a collection page"""
         
         try:
+            # Extract base domain for restriction
+            base_domain = self._extract_domain(collection_url)
+            
             print(f"🔍 Navigating to collection: {collection_url}")
             await self.page.goto(collection_url, wait_until='networkidle', timeout=30000)
             await asyncio.sleep(3)
@@ -407,23 +482,32 @@ class FinalGeminiScraper:
                 }
             """)
             
-            # Filter for individual article links
+            # Filter for individual article links with domain restriction
             article_links = []
             
             for link in links:
-                href = link['href'].lower()
+                href = link['href']
                 text = link['text'].lower()
                 
+                # Skip if not same domain or is error page
+                if not self._is_same_domain(href, base_domain):
+                    continue
+                
+                if self._is_error_page(href):
+                    continue
+                
+                href_lower = href.lower()
+                
                 # Look for individual article patterns
-                if any(pattern in href for pattern in ['/articles/', '/posts/', '/help/', '/support/', '/faq/', '/topics/']):
-                    article_links.append(link['href'])
+                if any(pattern in href_lower for pattern in ['/articles/', '/posts/', '/help/', '/support/', '/faq/', '/topics/', '/knowledge/']):
+                    article_links.append(href)
                     continue
                 
                 # Look for substantial text that doesn't look like navigation
-                if len(text) > 15 and not any(nav_word in text for nav_word in ['home', 'back', 'next', 'previous', 'menu', 'nav', 'header', 'footer', 'search']):
+                if len(text) > 15 and not any(nav_word in text for nav_word in ['home', 'back', 'next', 'previous', 'menu', 'nav', 'header', 'footer', 'search', 'login', 'signup']):
                     # Check if it's not a collection link
-                    if not any(pattern in href for pattern in ['/collections/', '/topics/', '/categories/']):
-                        article_links.append(link['href'])
+                    if not any(pattern in href_lower for pattern in ['/collections/', '/topics/', '/categories/']):
+                        article_links.append(href)
             
             # Remove duplicates
             article_links = list(set(article_links))
@@ -703,14 +787,27 @@ Respond only with the JSON object, no additional text. Ensure the content is COM
             print(f"❌ Error scraping {url}: {e}")
             return None
     
-    async def scrape_website_comprehensive(self, url: str, max_collections: int = 5, max_articles_per_collection: int = 8) -> List[Dict]:
-        """Comprehensive website scraping using final Gemini approach"""
+    async def scrape_website_comprehensive(self, url: str, max_collections: int = 50, max_articles_per_collection: int = 100) -> List[Dict]:
+        """Comprehensive website scraping using final Gemini approach - full website crawl"""
         
         # Use lock to prevent multiple scraping processes
         async with _scraping_lock:
-            print(f"🚀 Starting FINAL GEMINI intelligent scraping of: {url}")
+            import time
+            start_time = time.time()
+            
+            print(f"🚀 Starting COMPREHENSIVE website scraping of: {url}")
             print("=" * 60)
-            print(f"📊 LIMITS: {max_collections} collections, {max_articles_per_collection} articles per collection")
+            print(f"📊 COMPREHENSIVE MODE: {max_collections} collections, {max_articles_per_collection} articles per collection")
+            print("🌐 DOMAIN RESTRICTION: Will only crawl within the same domain")
+            print("⏱️ NO TIMEOUT: Will take as long as needed to crawl the entire website")
+            print("🔄 DUPLICATE PREVENTION: Will track and skip already scraped pages")
+            
+            # Initialize tracking variables
+            scraped_urls = set()  # Track all scraped URLs to prevent duplicates
+            total_pages_scraped = 0
+            total_pages_skipped = 0
+            total_collections_found = 0
+            total_articles_found = 0
             
             browser_initialized = False
             try:
@@ -731,14 +828,16 @@ Respond only with the JSON object, no additional text. Ensure the content is COM
                 # Step 1: Find collection pages
                 print("🔍 Step 1: Finding collection pages...")
                 collections = await self.find_collection_pages(url)
+                total_collections_found = len(collections)
                 
                 if not collections:
                     print("⚠️ No collections found, trying direct article extraction...")
                     # Fallback to direct article extraction
-                    return await self._fallback_direct_extraction(url)
+                    return await self._final_summary_log(start_time, total_pages_scraped, total_pages_skipped, total_collections_found, total_articles_found, await self._fallback_direct_extraction(url))
                 
                 # Step 2: Extract articles from each collection
                 print(f"📖 Step 2: Extracting articles from {len(collections)} collections...")
+                print(f"⏱️ This may take a while for comprehensive website crawling...")
                 all_extracted_contents = []
                 
                 for i, collection in enumerate(collections[:max_collections]):
@@ -751,10 +850,24 @@ Respond only with the JSON object, no additional text. Ensure the content is COM
                         print(f"⚠️ No articles found in collection: {collection['category']}")
                         continue
                     
+                    # Filter out already scraped URLs
+                    new_article_urls = [url for url in article_urls if url not in scraped_urls]
+                    skipped_count = len(article_urls) - len(new_article_urls)
+                    total_pages_skipped += skipped_count
+                    
+                    if skipped_count > 0:
+                        print(f"🔄 Skipped {skipped_count} already scraped articles in collection: {collection['category']}")
+                    
+                    total_articles_found += len(article_urls)
+                    print(f"📊 Progress: Collection {i+1}/{min(len(collections), max_collections)} - {len(new_article_urls)} new articles found (total: {len(article_urls)})")
+                    
                     # Scrape articles from this collection
                     collection_contents = []
-                    for j, article_url in enumerate(article_urls[:max_articles_per_collection]):
-                        print(f"📖 Scraping article {j+1}/{min(len(article_urls), max_articles_per_collection)} from {collection['category']}")
+                    for j, article_url in enumerate(new_article_urls[:max_articles_per_collection]):
+                        print(f"📖 Scraping article {j+1}/{min(len(new_article_urls), max_articles_per_collection)} from {collection['category']}")
+                        
+                        # Add URL to scraped set to prevent future duplicates
+                        scraped_urls.add(article_url)
                         
                         try:
                             # Check if browser is still alive
@@ -767,12 +880,13 @@ Respond only with the JSON object, no additional text. Ensure the content is COM
                             if extracted:
                                 extracted['collection'] = collection['category']
                                 collection_contents.append(extracted)
+                                total_pages_scraped += 1
                                 print(f"✅ Extracted: {extracted['title']} ({extracted['word_count']} words, Quality: {extracted.get('quality_score', 'N/A')})")
                             else:
                                 print(f"⚠️ Failed to extract content from article {j+1}")
                             
-                            # Be respectful and add timeout protection
-                            await asyncio.sleep(1)  # Reduced from 2 to 1 second
+                            # Be respectful but allow comprehensive scraping
+                            await asyncio.sleep(0.5)  # Reduced delay for comprehensive scraping
                             
                         except Exception as e:
                             print(f"❌ Error scraping article {j+1}: {e}")
@@ -789,12 +903,19 @@ Respond only with the JSON object, no additional text. Ensure the content is COM
                     all_extracted_contents.extend(collection_contents)
                     print(f"✅ Collection {collection['category']}: {len(collection_contents)} articles extracted")
                     
-                    # Add timeout protection between collections
+                    # Show real-time progress
+                    elapsed_time = time.time() - start_time
+                    elapsed_minutes = int(elapsed_time // 60)
+                    elapsed_seconds = int(elapsed_time % 60)
+                    print(f"⏱️  Elapsed Time: {elapsed_minutes}m {elapsed_seconds}s | Total Scraped: {total_pages_scraped} | Skipped: {total_pages_skipped}")
+                    
+                    # Add minimal delay between collections for comprehensive scraping
                     if i < len(collections[:max_collections]) - 1:
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(0.5)
                 
                 print(f"\n✅ Successfully extracted {len(all_extracted_contents)} total articles")
-                return all_extracted_contents
+                print(f"📊 Summary: Found {total_articles_found} total articles across {len(collections)} collections")
+                return await self._final_summary_log(start_time, total_pages_scraped, total_pages_skipped, total_collections_found, total_articles_found, all_extracted_contents)
                 
             except Exception as e:
                 print(f"❌ Scraping error: {e}")
@@ -805,13 +926,13 @@ Respond only with the JSON object, no additional text. Ensure the content is COM
                     fallback_results = await self.scrape_with_fallback(url)
                     if fallback_results:
                         print(f"✅ Fallback scraping successful: {len(fallback_results)} articles extracted")
-                        return fallback_results
+                        return await self._final_summary_log(start_time, total_pages_scraped, total_pages_skipped, total_collections_found, total_articles_found, fallback_results)
                     else:
                         print("❌ Fallback scraping also failed")
-                        return []
+                        return await self._final_summary_log(start_time, total_pages_scraped, total_pages_skipped, total_collections_found, total_articles_found, [])
                 except Exception as fallback_error:
                     print(f"❌ Fallback scraping error: {fallback_error}")
-                    return []
+                    return await self._final_summary_log(start_time, total_pages_scraped, total_pages_skipped, total_collections_found, total_articles_found, [])
                 
             finally:
                 if browser_initialized:

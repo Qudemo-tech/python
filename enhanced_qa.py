@@ -26,12 +26,12 @@ class EnhancedQASystem:
         try:
             print(f"🚀 Processing website: {url} for company: {company_name}")
             
-            # Extract content using the final scraper with 3-page limit
+            # Extract content using the final scraper - comprehensive website crawling
             try:
                 extracted_contents = await self.final_scraper.scrape_website_comprehensive(
                     url, 
-                    max_collections=3,  # Limit to 3 collections
-                    max_articles_per_collection=3  # Limit to 3 articles per collection
+                    max_collections=50,  # Allow up to 50 collections for comprehensive coverage
+                    max_articles_per_collection=100  # Allow up to 100 articles per collection
                 )
             except Exception as e:
                 print(f"❌ Website scraping failed: {e}")

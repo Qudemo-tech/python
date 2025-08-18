@@ -52,12 +52,30 @@ class FinalGeminiScraper:
             raise
         
     async def setup_browser(self):
-        """Setup Playwright browser with improved error handling"""
+        """Setup Playwright browser with improved error handling and fallback"""
         try:
             if hasattr(self, 'playwright') and self.playwright:
                 await self.playwright.stop()
                 
+            print("🔧 Starting Playwright...")
             self.playwright = await async_playwright().start()
+            
+            # Try to install browsers if they don't exist
+            try:
+                print("🔧 Checking for Playwright browsers...")
+                import subprocess
+                import sys
+                result = subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], 
+                                      capture_output=True, text=True, timeout=300)
+                if result.returncode == 0:
+                    print("✅ Playwright browsers installed successfully")
+                else:
+                    print(f"⚠️ Browser installation output: {result.stdout}")
+                    print(f"⚠️ Browser installation errors: {result.stderr}")
+            except Exception as install_error:
+                print(f"⚠️ Browser installation attempt failed: {install_error}")
+            
+            print("🔧 Launching Chromium browser...")
             self.browser = await self.playwright.chromium.launch(
                 headless=True,
                 args=[
@@ -70,9 +88,13 @@ class FinalGeminiScraper:
                     '--disable-gpu',
                     '--disable-background-timer-throttling',
                     '--disable-backgrounding-occluded-windows',
-                    '--disable-renderer-backgrounding'
+                    '--disable-renderer-backgrounding',
+                    '--disable-web-security',
+                    '--allow-running-insecure-content'
                 ]
             )
+            
+            print("🔧 Creating new page...")
             self.page = await self.browser.new_page()
             
             # Set user agent
@@ -84,8 +106,26 @@ class FinalGeminiScraper:
             self.page.set_default_timeout(60000)  # 60 seconds
             self.page.set_default_navigation_timeout(60000)  # 60 seconds
             
+            print("✅ Browser setup completed successfully")
+            
         except Exception as e:
             print(f"❌ Browser setup error: {e}")
+            print(f"🔧 Error details: {type(e).__name__}")
+            
+            # Try alternative browser launch method
+            try:
+                print("🔄 Attempting alternative browser launch...")
+                if hasattr(self, 'playwright') and self.playwright:
+                    self.browser = await self.playwright.chromium.launch(
+                        headless=True,
+                        args=['--no-sandbox', '--disable-dev-shm-usage']
+                    )
+                    self.page = await self.browser.new_page()
+                    print("✅ Alternative browser launch successful")
+                    return
+            except Exception as alt_error:
+                print(f"❌ Alternative browser launch also failed: {alt_error}")
+            
             raise
             
     async def close_browser(self):
@@ -149,6 +189,79 @@ class FinalGeminiScraper:
         except Exception as e:
             print(f"❌ Fallback extraction failed: {e}")
             return ""
+    
+    async def scrape_with_fallback(self, url: str) -> List[Dict]:
+        """Fallback scraping method using requests and BeautifulSoup when Playwright fails"""
+        try:
+            print("🔄 Using fallback scraping method (requests + BeautifulSoup)")
+            import requests
+            from bs4 import BeautifulSoup
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+            
+            response = requests.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Extract title
+            title = soup.find('title')
+            title_text = title.get_text().strip() if title else "Help Center Article"
+            
+            # Extract main content
+            main_content = ""
+            
+            # Try to find main content areas
+            content_selectors = [
+                'main', 'article', '.content', '.main-content', '.post-content',
+                '.article-content', '.help-content', '.support-content'
+            ]
+            
+            for selector in content_selectors:
+                content_elem = soup.select_one(selector)
+                if content_elem:
+                    main_content = content_elem.get_text(separator='\n', strip=True)
+                    break
+            
+            # If no main content found, get body text
+            if not main_content:
+                body = soup.find('body')
+                if body:
+                    # Remove script and style elements
+                    for script in body(["script", "style"]):
+                        script.decompose()
+                    main_content = body.get_text(separator='\n', strip=True)
+            
+            # Clean up content
+            lines = [line.strip() for line in main_content.split('\n') if line.strip()]
+            main_content = '\n'.join(lines)
+            
+            if len(main_content) < 100:
+                return []
+            
+            # Create article object
+            article = {
+                'title': title_text,
+                'content': main_content,
+                'url': url,
+                'collection': 'Help Center',
+                'content_type': 'article',
+                'has_steps': 'step' in main_content.lower() or '1.' in main_content[:500],
+                'is_complete': True,
+                'word_count': len(main_content.split()),
+                'quality_score': 70,  # Lower score for fallback method
+                'key_topics': [],
+                'difficulty_level': 'intermediate'
+            }
+            
+            print(f"✅ Fallback extraction successful: {article['title']} ({article['word_count']} words)")
+            return [article]
+            
+        except Exception as e:
+            print(f"❌ Fallback scraping failed: {e}")
+            return []
             
     async def find_collection_pages(self, url: str) -> List[Dict]:
         """Find collection/category pages that contain multiple articles"""
@@ -685,7 +798,20 @@ Respond only with the JSON object, no additional text. Ensure the content is COM
                 
             except Exception as e:
                 print(f"❌ Scraping error: {e}")
-                return []
+                print("🔄 Attempting fallback scraping method...")
+                
+                # Try fallback scraping method
+                try:
+                    fallback_results = await self.scrape_with_fallback(url)
+                    if fallback_results:
+                        print(f"✅ Fallback scraping successful: {len(fallback_results)} articles extracted")
+                        return fallback_results
+                    else:
+                        print("❌ Fallback scraping also failed")
+                        return []
+                except Exception as fallback_error:
+                    print(f"❌ Fallback scraping error: {fallback_error}")
+                    return []
                 
             finally:
                 if browser_initialized:

@@ -16,9 +16,9 @@ WORKDIR /app
 COPY requirements-python312.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers
-RUN playwright install chromium
-RUN playwright install-deps
+# Install Playwright browsers with better error handling
+RUN playwright install chromium || echo "Playwright install failed, will retry during runtime"
+RUN playwright install-deps || echo "Playwright deps install failed, will retry during runtime"
 
 # Copy application code
 COPY . .

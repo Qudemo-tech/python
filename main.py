@@ -444,17 +444,17 @@ async def process_website_endpoint(company_name: str, request: Request):
         logger.info(f"🌐 Processing website for {company_name}: {website_url}")
         logger.info(f"📊 COMPREHENSIVE MODE: Up to 50 collections × 100 articles per collection")
         logger.info(f"🌐 DOMAIN RESTRICTION: Will only crawl within the same domain")
-        logger.info(f"⏱️ NO TIMEOUT: Will take as long as needed to crawl the entire website")
+        logger.info(f"⏱️ EXTENDED TIMEOUT: 300 minutes (5 hours) for very large website crawling")
         
         # Process website knowledge with extended timeout for comprehensive scraping
         try:
             result = await asyncio.wait_for(
                 enhanced_qa_system.process_website_knowledge(website_url, company_name),
-                timeout=3600.0  # 60 minutes timeout for comprehensive scraping
+                timeout=18000.0  # 300 minutes (5 hours) timeout for very large websites
             )
         except asyncio.TimeoutError:
             logger.error(f"❌ Website processing timeout for {company_name}: {website_url}")
-            raise HTTPException(status_code=408, detail="Website processing timed out after 60 minutes. This is normal for large websites. Please try again.")
+            raise HTTPException(status_code=408, detail="Website processing timed out after 5 hours. This is normal for very large websites. Consider processing in smaller batches or using background job processing.")
         
         if result.get('success'):
             data = result.get('data', {})

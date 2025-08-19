@@ -26,12 +26,14 @@ class EnhancedQASystem:
         try:
             print(f"🚀 Processing website: {url} for company: {company_name}")
             
-            # Extract content using the final scraper - comprehensive website crawling
+            # Extract content using the final scraper - comprehensive website crawling with path-based filtering
             try:
                 extracted_contents = await self.final_scraper.scrape_website_comprehensive(
                     url, 
                     max_collections=50,  # Allow up to 50 collections for comprehensive coverage
-                    max_articles_per_collection=100  # Allow up to 100 articles per collection
+                    max_articles_per_collection=100,  # Allow up to 100 articles per collection
+                    smart_filtering=False,  # Use path-based filtering instead
+                    exclude_patterns=[]  # Use built-in basic filtering only
                 )
             except Exception as e:
                 print(f"❌ Website scraping failed: {e}")
@@ -295,7 +297,7 @@ Please provide a comprehensive and accurate answer based only on the information
             
             if self.knowledge_integrator is None:
                 print("❌ Error: knowledge_integrator is None!")
-                return {
+            return {
                     "success": False,
                     "message": "Knowledge integrator not initialized",
                     "answer": "I'm sorry, the knowledge system is not properly initialized. Please try again later.",
@@ -563,11 +565,11 @@ Please provide a comprehensive and accurate answer based only on the information
             if settle_help_center_data["chunks"] > 0:
                 final_sources.insert(0, settle_help_center_data)  # Put it first
             
-            return {
+                return {
                 "success": True,
                 "data": {
                     "company_name": company_name,
-                "total_chunks": total_chunks,
+                    "total_chunks": total_chunks,
                     "last_updated": last_updated,
                     "sources": final_sources
                 }
@@ -648,10 +650,10 @@ Please provide a comprehensive and accurate answer based only on the information
                 
                 # Clean up the text formatting
                 combined_text = self._clean_text_formatting(combined_text)
-                
-                return {
-                    "success": True,
-                    "data": {
+            
+            return {
+                "success": True,
+                "data": {
                         "source_id": source_id,
                         "company_name": company_name,
                         "text": combined_text,
@@ -665,7 +667,7 @@ Please provide a comprehensive and accurate answer based only on the information
             
             print(f"⚠️ Source content not found: {source_id}")
             return None
-            
+                
         except Exception as e:
             print(f"❌ Error getting source content: {e}")
             import traceback

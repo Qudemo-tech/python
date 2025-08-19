@@ -24,7 +24,7 @@ load_dotenv()
 _scraping_lock = asyncio.Lock()
 
 class FinalGeminiScraper:
-    def __init__(self, gemini_api_key: str):
+    def __init__(self, gemini_api_key: str, smart_filtering: bool = False):
         """Initialize final Gemini intelligent scraper"""
         try:
             if not gemini_api_key:
@@ -35,6 +35,72 @@ class FinalGeminiScraper:
             self.browser = None
             self.page = None
             self.gemini_available = True  # Default to available
+            
+            # Smart filtering configuration
+            self.smart_filtering = smart_filtering
+            self.base_url = None  # Will be set when scraping starts
+            self.domain_restriction = True  # Always restrict to same domain
+            
+            # Define filtering patterns
+            self.include_patterns = [
+                '/articles/',
+                '/sections/',
+                '/collections/',  # Include collection pages (main help sections)
+                '/help/',
+                '/support/',
+                '/faq/',
+                '/knowledge/',
+                '/topics/',
+                '/guides/',
+                '/tutorials/',
+                '/playbooks/',  # Include playbooks for useful guides
+                '/admin/'       # Include admin for configuration guides
+            ]
+            
+            self.exclude_patterns = [
+                '/news',
+                '/updates', 
+                '/blog',
+                '/login',
+                '/signin',
+                '/register',
+                '/signup',
+                '/404.html',
+                '/404/',
+                '/error',
+                '/not-found',
+                '/page-not-found',
+                '/access-denied',
+                '/forbidden',
+                '/unauthorized',
+                '/maintenance',
+                '/under-construction',
+                '/privacy',
+                '/terms',
+                '/legal',
+                '/cookie',
+                '/sitemap',
+                '/robots',
+                '/feed',
+                '/rss',
+                '/search',
+                '/results',
+                '/query',
+                '/api',
+                '/json',
+                '/xml',
+                '/pdf',
+                '/fr/',  # French language
+                '/es/',  # Spanish language
+                '/de/',  # German language
+                '/it/',  # Italian language
+                '/pt/',  # Portuguese language
+                '/ja/',  # Japanese language
+                '/ko/',  # Korean language
+                '/zh/',  # Chinese language
+                '/ar/',  # Arabic language
+                '/ru/'   # Russian language
+            ]
             
             # Test the API key with a simple call
             try:
@@ -300,6 +366,58 @@ class FinalGeminiScraper:
         except:
             return False
     
+    def should_scrape_url(self, url: str) -> bool:
+        """Determine if a URL should be scraped based on domain/path restriction and basic filtering"""
+        if not url or not self.base_url:
+            return False
+        
+        # Extract the base domain and path from user's input
+        from urllib.parse import urlparse
+        base_parsed = urlparse(self.base_url)
+        url_parsed = urlparse(url)
+        
+        # 1. DOMAIN RESTRICTION - Only URLs within the same domain
+        if url_parsed.netloc != base_parsed.netloc:
+            print(f"❌ EXCLUDING: {url} - Outside domain ({url_parsed.netloc} != {base_parsed.netloc})")
+            return False
+        
+        # 2. PATH RESTRICTION - Only URLs under the base path
+        base_path = base_parsed.path.rstrip('/')
+        url_path = url_parsed.path.rstrip('/')
+        
+        if not url_path.startswith(base_path):
+            print(f"❌ EXCLUDING: {url} - Outside base path ({url_path} doesn't start with {base_path})")
+            return False
+        
+        # 3. BASIC EXCLUDE PATTERNS - Only exclude truly irrelevant pages
+        url_lower = url.lower()
+        basic_excludes = [
+            '/404.html', '/404/', '/404', '/error', '/not-found', '/page-not-found',
+            '/maintenance', '/under-construction',
+            '/login', '/signin', '/register', '/signup',
+            '/privacy', '/terms', '/legal', '/cookie',
+            '/robots.txt', '/sitemap.xml', '/sitemap',
+            '/feed', '/rss', '/api', '/json', '/xml', '/pdf'
+        ]
+        
+        for pattern in basic_excludes:
+            if pattern in url_lower:
+                print(f"❌ EXCLUDING: {url} - Matches irrelevant pattern: {pattern}")
+                return False
+        
+        print(f"✅ INCLUDING: {url} - Within domain and path, not irrelevant")
+        return True
+    
+    def set_base_url(self, url: str):
+        """Set the base URL for domain and path restriction"""
+        from urllib.parse import urlparse
+        self.base_url = url
+        parsed = urlparse(url)
+        print(f"🌐 Domain restriction: {parsed.netloc}")
+        print(f"📂 Path restriction: {parsed.path}")
+        print(f"🎯 Filtering: Basic irrelevant pages only (404s, login, privacy, etc.)")
+        print(f"✅ Will scrape ALL content under: {url}")
+    
     def _is_error_page(self, url: str) -> bool:
         """Check if URL is likely an error page"""
         error_patterns = [
@@ -380,18 +498,15 @@ class FinalGeminiScraper:
             
             print(f"🔍 Found {len(links)} total links")
             
-            # Filter for collection pages (multiple patterns) with domain restriction
+            # Filter for collection pages (multiple patterns) with smart filtering
             collection_pages = []
             
             for link in links:
                 href = link['href']
                 text = link['text'].lower()
                 
-                # Skip if not same domain or is error page
-                if not self._is_same_domain(href, base_domain):
-                    continue
-                
-                if self._is_error_page(href):
+                # Use smart filtering to determine if URL should be scraped
+                if not self.should_scrape_url(href):
                     continue
                 
                 href_lower = href.lower()
@@ -503,18 +618,15 @@ class FinalGeminiScraper:
                 }
             """)
             
-            # Filter for individual article links with domain restriction
+            # Filter for individual article links with smart filtering
             article_links = []
             
             for link in links:
                 href = link['href']
                 text = link['text'].lower()
                 
-                # Skip if not same domain or is error page
-                if not self._is_same_domain(href, base_domain):
-                    continue
-                
-                if self._is_error_page(href):
+                # Use smart filtering to determine if URL should be scraped
+                if not self.should_scrape_url(href):
                     continue
                 
                 href_lower = href.lower()
@@ -848,18 +960,25 @@ Respond only with the JSON object, no additional text. Ensure the content is COM
             print(f"❌ Error scraping {url}: {e}")
             return None
     
-    async def scrape_website_comprehensive(self, url: str, max_collections: int = 50, max_articles_per_collection: int = 100) -> List[Dict]:
-        """Comprehensive website scraping using final Gemini approach - full website crawl"""
+    async def scrape_website_comprehensive(self, url: str, max_collections: int = 50, max_articles_per_collection: int = 100, smart_filtering: bool = True, exclude_patterns: List[str] = None) -> List[Dict]:
+        """Comprehensive website scraping using final Gemini approach - full website crawl with smart filtering"""
         
         # Use lock to prevent multiple scraping processes
         async with _scraping_lock:
             import time
             start_time = time.time()
             
+            # Set up filtering
+            self.smart_filtering = smart_filtering
+            if exclude_patterns:
+                self.exclude_patterns.extend(exclude_patterns)
+            self.set_base_url(url)
+            
             print(f"🚀 Starting COMPREHENSIVE website scraping of: {url}")
             print("=" * 60)
             print(f"📊 COMPREHENSIVE MODE: {max_collections} collections, {max_articles_per_collection} articles per collection")
             print("🌐 DOMAIN RESTRICTION: Will only crawl within the same domain")
+            print(f"🎯 SMART FILTERING: {'ENABLED' if smart_filtering else 'DISABLED'}")
             print("⏱️ NO TIMEOUT: Will take as long as needed to crawl the entire website")
             print("🔄 DUPLICATE PREVENTION: Will track and skip already scraped pages")
             

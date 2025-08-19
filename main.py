@@ -47,6 +47,9 @@ from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
 # Import progress tracking
 from progress_tracker import progress_manager
 
+# Import smart scraper
+from smart_scraper import SmartScraper
+
 # Configure logging with larger buffer and rotation
 import logging
 import logging.handlers
@@ -426,7 +429,7 @@ async def generate_summary_endpoint(request: Request):
 # Knowledge Processing Endpoints
 @app.post("/process-website/{company_name}")
 async def process_website_endpoint(company_name: str, request: Request):
-    """Process website knowledge for a company - comprehensive website crawling"""
+    """Process website knowledge for a company - smart scraping with LLM filtering"""
     global enhanced_qa_system
     
     try:
@@ -440,55 +443,121 @@ async def process_website_endpoint(company_name: str, request: Request):
         # Parse request body
         body = await request.json()
         website_url = body.get('website_url')
+        use_smart_scraper = body.get('use_smart_scraper', True)  # Default to smart scraper
         
         if not website_url:
             raise HTTPException(status_code=400, detail="Website URL is required")
         
-        logger.info(f"🌐 Processing website for {company_name}: {website_url}")
-        logger.info(f"📊 COMPREHENSIVE MODE: Up to 50 collections × 100 articles per collection")
-        logger.info(f"🌐 DOMAIN RESTRICTION: Will only crawl within the same domain")
-        logger.info(f"⏱️ NO TIMEOUT: Will take as long as needed to crawl the entire website")
+        # Create task ID for progress tracking
+        task_id = f"scraping_{company_name}_{int(time.time())}"
+        tracker = progress_manager.create_tracker(task_id)
         
-        # Process website knowledge with extended timeout for comprehensive scraping
-        try:
-            result = await asyncio.wait_for(
-                enhanced_qa_system.process_website_knowledge(website_url, company_name),
-                timeout=7200.0  # 120 minutes timeout for comprehensive scraping
-            )
-        except asyncio.TimeoutError:
-            logger.error(f"❌ Website processing timeout for {company_name}: {website_url}")
-            raise HTTPException(status_code=408, detail="Website processing timed out after 120 minutes. This is normal for very large websites. Please try again.")
+        logger.info(f"🧠 Processing website for {company_name}: {website_url}")
+        logger.info(f"📊 Smart scraper enabled: {use_smart_scraper}")
         
-        if result.get('success'):
-            data = result.get('data', {})
-            summary = data.get('summary', {})
-            
-            return {
-                "success": True,
-                "message": "Website knowledge processed successfully",
-                "data": {
-                    "chunks": data.get('chunks', []),
-                    "qa_pairs": data.get('qa_pairs', []),
-                    "summary": {
-                        "total_items": summary.get('total_items', 0),
-                        "enhanced": summary.get('enhanced', 0),
-                        "faqs": summary.get('faqs', 0),
-                        "beginner": summary.get('beginner', 0),
-                        "intermediate": summary.get('intermediate', 0),
-                        "advanced": summary.get('advanced', 0)
+        if use_smart_scraper:
+            # Use smart scraper with LLM filtering
+            try:
+                # Initialize smart scraper
+                openai_api_key = os.getenv("OPENAI_API_KEY")
+                if not openai_api_key:
+                    raise HTTPException(status_code=500, detail="OpenAI API key required for smart scraping")
+                
+                smart_scraper = SmartScraper(openai_api_key)
+                tracker.update_status("initializing", "Starting smart website analysis...")
+                
+                # Process website with smart scraper
+                result = await asyncio.wait_for(
+                    smart_scraper.smart_scrape_website(website_url, company_name),
+                    timeout=5400.0  # 90 minutes timeout for smart scraping
+                )
+                
+                if result.get('success'):
+                    data = result.get('data', {})
+                    summary = data.get('summary', {})
+                    
+                    tracker.update_status("completed", f"Smart scraping completed: {summary.get('total_items', 0)} articles")
+                    
+                    return {
+                        "success": True,
+                        "message": "Website knowledge processed successfully with smart filtering",
+                        "data": {
+                            "chunks": data.get('chunks', []),
+                            "summary": {
+                                "total_items": summary.get('total_items', 0),
+                                "scraped_urls": summary.get('scraped_urls', 0),
+                                "skipped_urls": summary.get('skipped_urls', 0),
+                                "elapsed_time_minutes": summary.get('elapsed_time_minutes', 0),
+                                "website_size": summary.get('website_size', 'unknown')
+                            }
+                        },
+                        "company_name": company_name,
+                        "website_url": website_url,
+                        "task_id": task_id
                     }
-                },
-                "company_name": company_name,
-                "website_url": website_url
-            }
+                else:
+                    tracker.update_status("failed", f"Smart scraping failed: {result.get('error', 'Unknown error')}")
+                    raise HTTPException(status_code=500, detail=result.get('error', 'Unknown error'))
+                    
+            except asyncio.TimeoutError:
+                tracker.update_status("timeout", "Smart scraping timed out after 90 minutes")
+                raise HTTPException(status_code=408, detail="Smart scraping timed out after 90 minutes. This is normal for very large websites.")
+            except Exception as e:
+                tracker.update_status("failed", f"Smart scraping error: {str(e)}")
+                raise HTTPException(status_code=500, detail=str(e))
         else:
-            raise HTTPException(status_code=500, detail=result.get('error', 'Unknown error'))
+            # Fallback to original comprehensive scraping
+            logger.info(f"📊 COMPREHENSIVE MODE: Up to 50 collections × 100 articles per collection")
+            logger.info(f"🌐 DOMAIN RESTRICTION: Will only crawl within the same domain")
+            logger.info(f"⏱️ NO TIMEOUT: Will take as long as needed to crawl the entire website")
+            
+            tracker.update_status("initializing", "Starting comprehensive website scraping...")
+            
+            try:
+                result = await asyncio.wait_for(
+                    enhanced_qa_system.process_website_knowledge(website_url, company_name),
+                    timeout=7200.0  # 120 minutes timeout for comprehensive scraping
+                )
+            except asyncio.TimeoutError:
+                tracker.update_status("timeout", "Comprehensive scraping timed out after 120 minutes")
+                raise HTTPException(status_code=408, detail="Website processing timed out after 120 minutes. This is normal for very large websites. Please try again.")
+            
+            if result.get('success'):
+                data = result.get('data', {})
+                summary = data.get('summary', {})
+                
+                tracker.update_status("completed", f"Comprehensive scraping completed: {summary.get('total_items', 0)} articles")
+                
+                return {
+                    "success": True,
+                    "message": "Website knowledge processed successfully",
+                    "data": {
+                        "chunks": data.get('chunks', []),
+                        "qa_pairs": data.get('qa_pairs', []),
+                        "summary": {
+                            "total_items": summary.get('total_items', 0),
+                            "enhanced": summary.get('enhanced', 0),
+                            "faqs": summary.get('faqs', 0),
+                            "beginner": summary.get('beginner', 0),
+                            "intermediate": summary.get('intermediate', 0),
+                            "advanced": summary.get('advanced', 0)
+                        }
+                    },
+                    "company_name": company_name,
+                    "website_url": website_url,
+                    "task_id": task_id
+                }
+            else:
+                tracker.update_status("failed", f"Comprehensive scraping failed: {result.get('error', 'Unknown error')}")
+                raise HTTPException(status_code=500, detail=result.get('error', 'Unknown error'))
             
     except HTTPException:
         # Re-raise HTTP exceptions as-is
         raise
     except Exception as e:
         logger.error(f"❌ Website processing error: {e}")
+        if 'tracker' in locals():
+            tracker.update_status("failed", f"Processing error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Removed document processing endpoint - using clean system instead
@@ -1420,3 +1489,65 @@ async def get_all_scraping_progress_endpoint():
     except Exception as e:
         logger.error(f"❌ All progress endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/health")
+async def health_check():
+    """Enhanced health check with memory monitoring"""
+    try:
+        import psutil
+        
+        # Get system information
+        memory = psutil.virtual_memory()
+        cpu_percent = psutil.cpu_percent(interval=1)
+        disk = psutil.disk_usage('/')
+        
+        # Check if enhanced QA system is available
+        qa_status = "available" if enhanced_qa_system else "not_available"
+        
+        health_data = {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "services": {
+                "enhanced_qa_system": qa_status,
+                "pinecone_connection": "available" if enhanced_qa_system and enhanced_qa_system.index else "not_available"
+            },
+            "system": {
+                "memory": {
+                    "total_mb": round(memory.total / (1024 * 1024), 2),
+                    "available_mb": round(memory.available / (1024 * 1024), 2),
+                    "used_mb": round(memory.used / (1024 * 1024), 2),
+                    "percent": round(memory.percent, 2)
+                },
+                "cpu_percent": round(cpu_percent, 2),
+                "disk": {
+                    "total_gb": round(disk.total / (1024 * 1024 * 1024), 2),
+                    "free_gb": round(disk.free / (1024 * 1024 * 1024), 2),
+                    "used_gb": round(disk.used / (1024 * 1024 * 1024), 2),
+                    "percent": round((disk.used / disk.total) * 100, 2)
+                }
+            },
+            "warnings": []
+        }
+        
+        # Add warnings for high resource usage
+        if memory.percent > 80:
+            health_data["warnings"].append(f"High memory usage: {memory.percent:.1f}%")
+        
+        if cpu_percent > 80:
+            health_data["warnings"].append(f"High CPU usage: {cpu_percent:.1f}%")
+        
+        if (disk.used / disk.total) * 100 > 80:
+            health_data["warnings"].append(f"High disk usage: {(disk.used / disk.total) * 100:.1f}%")
+        
+        if health_data["warnings"]:
+            health_data["status"] = "warning"
+        
+        return health_data
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }

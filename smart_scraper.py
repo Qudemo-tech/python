@@ -8,6 +8,8 @@ import asyncio
 import json
 import re
 import time
+import psutil
+import gc
 from typing import List, Dict, Any, Optional
 from urllib.parse import urljoin, urlparse
 import requests
@@ -34,8 +36,40 @@ class SmartScraper:
         self.start_time = None
         self.max_time_per_site = 3600  # 1 hour default
         self.max_articles_per_site = 200  # Limit articles per site
+        self.memory_threshold = 0.8  # 80% memory usage threshold
         
-        logger.info("🧠 Smart Scraper Initialized with LLM filtering")
+        logger.info("🧠 Smart Scraper Initialized with LLM filtering and memory management")
+    
+    def check_memory_usage(self) -> Dict[str, float]:
+        """Check current memory usage"""
+        try:
+            memory = psutil.virtual_memory()
+            return {
+                "percent": memory.percent,
+                "available_mb": memory.available / (1024 * 1024),
+                "used_mb": memory.used / (1024 * 1024),
+                "total_mb": memory.total / (1024 * 1024)
+            }
+        except Exception as e:
+            logger.warning(f"Memory check failed: {e}")
+            return {"percent": 0, "available_mb": 0, "used_mb": 0, "total_mb": 0}
+    
+    def should_stop_for_memory(self) -> bool:
+        """Check if we should stop due to high memory usage"""
+        memory_info = self.check_memory_usage()
+        if memory_info["percent"] > (self.memory_threshold * 100):
+            logger.warning(f"⚠️ High memory usage: {memory_info['percent']:.1f}% - stopping scraping")
+            return True
+        return False
+    
+    def cleanup_memory(self):
+        """Force garbage collection to free memory"""
+        try:
+            gc.collect()
+            memory_info = self.check_memory_usage()
+            logger.info(f"🧹 Memory cleanup completed: {memory_info['percent']:.1f}% usage")
+        except Exception as e:
+            logger.warning(f"Memory cleanup failed: {e}")
     
     def is_demo_relevant_url(self, url: str, title: str = "", description: str = "") -> bool:
         """
@@ -179,19 +213,19 @@ class SmartScraper:
             
             estimated_pages = len(unique_paths)
             
-            # Categorize website size
+            # Categorize website size with Render-friendly limits
             if estimated_pages < 50:
                 size_category = "small"
                 max_time = 1800  # 30 minutes
-                max_articles = 50
+                max_articles = 30  # Reduced for Render
             elif estimated_pages < 200:
                 size_category = "medium"
                 max_time = 3600  # 1 hour
-                max_articles = 100
+                max_articles = 60  # Reduced for Render
             else:
                 size_category = "large"
-                max_time = 7200  # 2 hours
-                max_articles = 200
+                max_time = 5400  # 1.5 hours (reduced from 2 hours)
+                max_articles = 100  # Reduced for Render
             
             logger.info(f"📊 Website size estimate: {size_category} ({estimated_pages} pages)")
             logger.info(f"⏱️ Max time: {max_time/60:.0f} minutes, Max articles: {max_articles}")
@@ -201,7 +235,7 @@ class SmartScraper:
                 "estimated_pages": estimated_pages,
                 "max_time": max_time,
                 "max_articles": max_articles,
-                "content_links": list(unique_paths)[:100]  # Limit for analysis
+                "content_links": list(unique_paths)[:50]  # Reduced limit for Render
             }
             
         except Exception as e:
@@ -210,7 +244,7 @@ class SmartScraper:
                 "size_category": "unknown",
                 "estimated_pages": 100,
                 "max_time": 3600,
-                "max_articles": 100,
+                "max_articles": 50,  # Conservative limit
                 "content_links": []
             }
     
@@ -219,7 +253,7 @@ class SmartScraper:
         return urlparse(url1).netloc == urlparse(url2).netloc
     
     def should_continue_scraping(self) -> bool:
-        """Check if we should continue scraping based on time and limits"""
+        """Check if we should continue scraping based on time, limits, and memory"""
         if not self.start_time:
             return True
         
@@ -236,11 +270,15 @@ class SmartScraper:
             logger.info(f"📄 Article limit reached: {articles_scraped} articles")
             return False
         
+        # Check memory usage
+        if self.should_stop_for_memory():
+            return False
+        
         return True
     
     async def smart_scrape_website(self, base_url: str, company_name: str) -> Dict[str, Any]:
         """
-        Smart website scraping with LLM filtering and adaptive timeouts
+        Smart website scraping with LLM filtering, adaptive timeouts, and memory management
         """
         self.start_time = time.time()
         self.scraped_urls.clear()
@@ -248,6 +286,10 @@ class SmartScraper:
         self.skipped_urls.clear()
         
         logger.info(f"🧠 Starting smart scraping for: {base_url}")
+        
+        # Initial memory check
+        memory_info = self.check_memory_usage()
+        logger.info(f"💾 Initial memory usage: {memory_info['percent']:.1f}%")
         
         # Estimate website size and set limits
         size_estimate = await self.estimate_website_size(base_url)
@@ -269,7 +311,7 @@ class SmartScraper:
                 all_content.append(homepage_content)
             
             # Process other content links
-            for link in size_estimate["content_links"][:50]:  # Limit to 50 links for analysis
+            for i, link in enumerate(size_estimate["content_links"][:30]):  # Reduced limit for Render
                 if not self.should_continue_scraping():
                     break
                 
@@ -286,12 +328,19 @@ class SmartScraper:
                 if content:
                     all_content.append(content)
                 
+                # Memory cleanup every 5 articles
+                if (i + 1) % 5 == 0:
+                    self.cleanup_memory()
+                
                 # Small delay to be respectful
                 await asyncio.sleep(0.5)
             
             # Calculate final metrics
             elapsed_time = time.time() - self.start_time
             total_articles = len(all_content)
+            
+            # Final memory cleanup
+            self.cleanup_memory()
             
             logger.info(f"✅ Smart scraping completed:")
             logger.info(f"   📄 Articles scraped: {total_articles}")

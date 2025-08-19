@@ -44,6 +44,9 @@ from health_checks import (
 from enhanced_qa import EnhancedQASystem, initialize_enhanced_qa
 from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
 
+# Import progress tracking
+from progress_tracker import progress_manager
+
 # Configure logging with larger buffer and rotation
 import logging
 import logging.handlers
@@ -450,11 +453,11 @@ async def process_website_endpoint(company_name: str, request: Request):
         try:
             result = await asyncio.wait_for(
                 enhanced_qa_system.process_website_knowledge(website_url, company_name),
-                timeout=3600.0  # 60 minutes timeout for comprehensive scraping
+                timeout=7200.0  # 120 minutes timeout for comprehensive scraping
             )
         except asyncio.TimeoutError:
             logger.error(f"❌ Website processing timeout for {company_name}: {website_url}")
-            raise HTTPException(status_code=408, detail="Website processing timed out after 60 minutes. This is normal for large websites. Please try again.")
+            raise HTTPException(status_code=408, detail="Website processing timed out after 120 minutes. This is normal for very large websites. Please try again.")
         
         if result.get('success'):
             data = result.get('data', {})
@@ -1384,4 +1387,36 @@ async def delete_document_data_endpoint(company_name: str, request: Request):
             
     except Exception as e:
         logger.error(f"❌ Delete document data error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/scraping-progress/{task_id}")
+async def get_scraping_progress_endpoint(task_id: str):
+    """Get real-time progress for website scraping"""
+    try:
+        tracker = progress_manager.get_tracker(task_id)
+        if not tracker:
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        return {
+            "success": True,
+            "data": tracker.get_progress_summary()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Progress endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/scraping-progress")
+async def get_all_scraping_progress_endpoint():
+    """Get progress for all active scraping tasks"""
+    try:
+        return {
+            "success": True,
+            "data": progress_manager.get_all_progress()
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ All progress endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

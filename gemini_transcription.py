@@ -72,23 +72,23 @@ class GeminiTranscriptionProcessor:
         self.pc = Pinecone(api_key=pinecone_api_key)
         self.default_index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
         
-        logger.info("🔧 Initializing Gemini Transcription Processor...")
+        logger.info("Initializing Gemini Transcription Processor...")
 
     def _log_chunk_summary(self, chunks: List[Dict], label: str = ""):
         try:
             total = len(chunks)
             with_ts = sum(1 for c in chunks if float(c.get('start', 0.0)) > 0.0 or float(c.get('end', 0.0)) > 0.0)
-            logger.info(f"🧪 Timestamp chunk check{(' - ' + label) if label else ''}: {with_ts}/{total} chunks have timestamps")
+            logger.info(f"Timestamp chunk check{(' - ' + label) if label else ''}: {with_ts}/{total} chunks have timestamps")
             
             if with_ts > 0:
-                logger.info("✅ Timestamps found - chunks will provide timestamped Q&A")
+                logger.info("Timestamps found - chunks will provide timestamped Q&A")
                 for i, c in enumerate(chunks[: min(5, total)]):
                     s = float(c.get('start', 0.0))
                     e = float(c.get('end', 0.0))
                     t = (c.get('text') or '')[:120].replace('\n', ' ')
                     logger.info(f"    #{i+1}: [{s:.2f} → {e:.2f}] {t}")
             else:
-                logger.warning("⚠️ No timestamps found - Q&A will not include timestamps")
+                logger.warning("No timestamps found - Q&A will not include timestamps")
                 for i, c in enumerate(chunks[: min(5, total)]):
                     t = (c.get('text') or '')[:120].replace('\n', ' ')
                     logger.info(f"    #{i+1}: [NO TIMESTAMP] {t}")

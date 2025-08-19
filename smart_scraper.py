@@ -38,7 +38,7 @@ class SmartScraper:
         self.max_articles_per_site = 200  # Limit articles per site
         self.memory_threshold = 0.8  # 80% memory usage threshold
         
-        logger.info("🧠 Smart Scraper Initialized with LLM filtering and memory management")
+        logger.info("Smart Scraper Initialized with LLM filtering and memory management")
     
     def check_memory_usage(self) -> Dict[str, float]:
         """Check current memory usage"""
@@ -58,7 +58,7 @@ class SmartScraper:
         """Check if we should stop due to high memory usage"""
         memory_info = self.check_memory_usage()
         if memory_info["percent"] > (self.memory_threshold * 100):
-            logger.warning(f"⚠️ High memory usage: {memory_info['percent']:.1f}% - stopping scraping")
+            logger.warning(f"High memory usage: {memory_info['percent']:.1f}% - stopping scraping")
             return True
         return False
     
@@ -67,16 +67,16 @@ class SmartScraper:
         try:
             gc.collect()
             memory_info = self.check_memory_usage()
-            logger.info(f"🧹 Memory cleanup completed: {memory_info['percent']:.1f}% usage")
+            logger.info(f"Memory cleanup completed: {memory_info['percent']:.1f}% usage")
         except Exception as e:
             logger.warning(f"Memory cleanup failed: {e}")
     
     def is_demo_relevant_url(self, url: str, title: str = "", description: str = "") -> bool:
         """
-        Use LLM to determine if URL is relevant for demo purposes
+        Simplified URL filtering - only skip obvious non-content URLs
         """
         try:
-            # Quick heuristic filter first
+            # Only skip very obvious non-content URLs
             skip_patterns = [
                 r'/privacy', r'/terms', r'/legal', r'/cookies', r'/contact',
                 r'/about', r'/careers', r'/blog', r'/news', r'/press',
@@ -89,36 +89,13 @@ class SmartScraper:
                 if re.search(pattern, url.lower()):
                     return False
             
-            # LLM analysis for borderline cases
-            context = f"URL: {url}\nTitle: {title}\nDescription: {description}"
-            
-            prompt = f"""
-            Analyze if this webpage would be useful for a product demo or customer support:
-            
-            {context}
-            
-            Consider:
-            - Does it contain product features, setup guides, or troubleshooting?
-            - Is it customer-facing documentation or help content?
-            - Would it help someone understand how to use the product?
-            
-            Respond with only: RELEVANT or NOT_RELEVANT
-            """
-            
-            response = self.openai_client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=10,
-                temperature=0.1
-            )
-            
-            result = response.choices[0].message.content.strip().upper()
-            return result == "RELEVANT"
+            # Accept all other URLs for processing
+            return True
             
         except Exception as e:
-            logger.warning(f"LLM filtering failed for {url}: {e}")
-            # Fallback to heuristic
-            return not any(pattern in url.lower() for pattern in ['/privacy', '/terms', '/legal'])
+            logger.warning(f"URL filtering failed for {url}: {e}")
+            # Accept URL if filtering fails
+            return True
     
     def is_demo_relevant_content(self, content: str, title: str) -> Dict[str, Any]:
         """
@@ -187,13 +164,13 @@ class SmartScraper:
         Quickly estimate website size to set appropriate timeouts
         """
         try:
-            logger.info(f"🔍 Estimating website size for: {base_url}")
+            logger.info(f"Estimating website size for: {base_url}")
             
             # Get homepage and analyze structure
             response = self.session.get(base_url, timeout=10)
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Count potential content pages
+            # Count potential content pages - be more aggressive
             links = soup.find_all('a', href=True)
             content_links = []
             
@@ -204,6 +181,50 @@ class SmartScraper:
                     if self.is_same_domain(full_url, base_url):
                         content_links.append(full_url)
             
+            # Also look for navigation menus and content areas
+            nav_links = soup.find_all(['nav', 'menu', '.navigation', '.menu', '.sidebar'])
+            for nav in nav_links:
+                nav_links_found = nav.find_all('a', href=True)
+                for link in nav_links_found:
+                    href = link.get('href')
+                    if href and not href.startswith(('http', 'mailto', 'tel', '#')):
+                        full_url = urljoin(base_url, href)
+                        if self.is_same_domain(full_url, base_url):
+                            content_links.append(full_url)
+            
+            # For help centers, try to find article URLs in the HTML source
+            if 'help' in base_url.lower():
+                logger.info("Help center detected - searching for article patterns in HTML source")
+                
+                # Look for article URLs in the page source
+                page_source = response.text
+                
+                # Common patterns for help center articles
+                article_patterns = [
+                    r'/articles/[^"\s]+',
+                    r'/help/[^"\s]+', 
+                    r'/support/[^"\s]+',
+                    r'/docs/[^"\s]+',
+                    r'/guides/[^"\s]+',
+                    r'/tutorials/[^"\s]+',
+                    r'/faq/[^"\s]+',
+                    r'/knowledge/[^"\s]+',
+                    r'/learn/[^"\s]+',
+                    r'/en/articles/[^"\s]+',
+                    r'/en/help/[^"\s]+',
+                    r'/en/support/[^"\s]+'
+                ]
+                
+                for pattern in article_patterns:
+                    matches = re.findall(pattern, page_source)
+                    for match in matches:
+                        if match.startswith('/'):
+                            full_url = urljoin(base_url, match)
+                            if self.is_same_domain(full_url, base_url):
+                                content_links.append(full_url)
+                
+                logger.info(f"Found {len(content_links)} potential article URLs from HTML source")
+            
             # Analyze link patterns to estimate size
             unique_paths = set()
             for link in content_links:
@@ -213,29 +234,45 @@ class SmartScraper:
             
             estimated_pages = len(unique_paths)
             
-            # Categorize website size with Render-friendly limits
-            if estimated_pages < 50:
-                size_category = "small"
-                max_time = 1800  # 30 minutes
-                max_articles = 30  # Reduced for Render
-            elif estimated_pages < 200:
-                size_category = "medium"
-                max_time = 3600  # 1 hour
-                max_articles = 60  # Reduced for Render
-            else:
-                size_category = "large"
-                max_time = 5400  # 1.5 hours (reduced from 2 hours)
-                max_articles = 100  # Reduced for Render
+            # Special handling for help centers and documentation sites
+            help_indicators = [
+                'help', 'support', 'docs', 'documentation', 'guide', 'tutorial',
+                'faq', 'knowledge', 'learn', 'how-to', 'articles'
+            ]
             
-            logger.info(f"📊 Website size estimate: {size_category} ({estimated_pages} pages)")
-            logger.info(f"⏱️ Max time: {max_time/60:.0f} minutes, Max articles: {max_articles}")
+            is_help_site = any(indicator in base_url.lower() for indicator in help_indicators)
+            
+            # If it's a help site and we found few links, it might be a large help center
+            if is_help_site and estimated_pages < 10:
+                logger.info(f"Detected help center site with few visible links - treating as large site")
+                estimated_pages = 200  # Assume large help center
+                size_category = "large"
+                max_time = 5400  # 1.5 hours
+                max_articles = 100
+            else:
+                # Categorize website size with Render-friendly limits
+                if estimated_pages < 50:
+                    size_category = "small"
+                    max_time = 1800  # 30 minutes
+                    max_articles = 30  # Reduced for Render
+                elif estimated_pages < 200:
+                    size_category = "medium"
+                    max_time = 3600  # 1 hour
+                    max_articles = 60  # Reduced for Render
+                else:
+                    size_category = "large"
+                    max_time = 5400  # 1.5 hours (reduced from 2 hours)
+                    max_articles = 100  # Reduced for Render
+            
+            logger.info(f"Website size estimate: {size_category} ({estimated_pages} pages)")
+            logger.info(f"Max time: {max_time/60:.0f} minutes, Max articles: {max_articles}")
             
             return {
                 "size_category": size_category,
                 "estimated_pages": estimated_pages,
                 "max_time": max_time,
                 "max_articles": max_articles,
-                "content_links": list(unique_paths)[:50]  # Reduced limit for Render
+                "content_links": list(unique_paths)[:200]  # Increased limit for better discovery
             }
             
         except Exception as e:
@@ -262,12 +299,12 @@ class SmartScraper:
         
         # Check time limit
         if elapsed_time > self.max_time_per_site:
-            logger.info(f"⏱️ Time limit reached: {elapsed_time/60:.1f} minutes")
+            logger.info(f"Time limit reached: {elapsed_time/60:.1f} minutes")
             return False
         
         # Check article limit
         if articles_scraped >= self.max_articles_per_site:
-            logger.info(f"📄 Article limit reached: {articles_scraped} articles")
+            logger.info(f"Article limit reached: {articles_scraped} articles")
             return False
         
         # Check memory usage
@@ -285,20 +322,20 @@ class SmartScraper:
         self.demo_relevant_urls.clear()
         self.skipped_urls.clear()
         
-        logger.info(f"🧠 Starting smart scraping for: {base_url}")
+        logger.info(f"Starting smart scraping for: {base_url}")
         
         # Initial memory check
         memory_info = self.check_memory_usage()
-        logger.info(f"💾 Initial memory usage: {memory_info['percent']:.1f}%")
+        logger.info(f"Initial memory usage: {memory_info['percent']:.1f}%")
         
         # Estimate website size and set limits
         size_estimate = await self.estimate_website_size(base_url)
         self.max_time_per_site = size_estimate["max_time"]
         self.max_articles_per_site = size_estimate["max_articles"]
         
-        logger.info(f"📊 Website category: {size_estimate['size_category']}")
-        logger.info(f"⏱️ Time limit: {self.max_time_per_site/60:.0f} minutes")
-        logger.info(f"📄 Article limit: {self.max_articles_per_site}")
+        logger.info(f"Website category: {size_estimate['size_category']}")
+        logger.info(f"Time limit: {self.max_time_per_site/60:.0f} minutes")
+        logger.info(f"Article limit: {self.max_articles_per_site}")
         
         # Start scraping with smart filtering
         all_content = []
@@ -310,20 +347,185 @@ class SmartScraper:
             if homepage_content:
                 all_content.append(homepage_content)
             
+            # For help centers, try to discover more content
+            if size_estimate["size_category"] == "large" and "help" in base_url.lower():
+                logger.info("Large help center detected - attempting comprehensive content discovery")
+                
+                # Try common help center patterns
+                help_patterns = [
+                    "/articles/", "/help/", "/support/", "/docs/", "/guides/",
+                    "/tutorials/", "/faq/", "/knowledge/", "/learn/"
+                ]
+                
+                discovered_urls = []
+                for pattern in help_patterns:
+                    try:
+                        test_url = urljoin(base_url, pattern)
+                        logger.info(f"Testing help center pattern: {test_url}")
+                        response = self.session.get(test_url, timeout=5)
+                        if response.status_code == 200:
+                            soup = BeautifulSoup(response.content, 'html.parser')
+                            links = soup.find_all('a', href=True)
+                            for link in links:
+                                href = link.get('href')
+                                if href and not href.startswith(('http', 'mailto', 'tel', '#')):
+                                    full_url = urljoin(test_url, href)
+                                    if self.is_same_domain(full_url, base_url):
+                                        discovered_urls.append(full_url)
+                    except Exception as e:
+                        logger.warning(f"Failed to test pattern {pattern}: {e}")
+                        continue
+                
+                # Also try to find articles by testing common article URLs
+                logger.info("Testing common article URL patterns")
+                common_article_patterns = [
+                    "/articles/", "/en/articles/", "/help/articles/", "/support/articles/",
+                    "/docs/articles/", "/guides/", "/tutorials/", "/faq/"
+                ]
+                
+                for pattern in common_article_patterns:
+                    try:
+                        test_url = urljoin(base_url, pattern)
+                        response = self.session.get(test_url, timeout=5)
+                        if response.status_code == 200:
+                            # Look for article links in the response
+                            page_source = response.text
+                            article_matches = re.findall(r'/articles/[^"\s]+', page_source)
+                            for match in article_matches:
+                                if match.startswith('/'):
+                                    full_url = urljoin(base_url, match)
+                                    if self.is_same_domain(full_url, base_url):
+                                        discovered_urls.append(full_url)
+                    except Exception as e:
+                        logger.warning(f"Failed to test article pattern {pattern}: {e}")
+                        continue
+                
+                # Try different URL structures that Settle might use
+                logger.info("Testing different URL structures")
+                url_structures = [
+                    "/en/articles/", "/articles/", "/help/", "/support/", "/docs/",
+                    "/en/help/", "/en/support/", "/en/docs/", "/help/en/", "/support/en/"
+                ]
+                
+                for structure in url_structures:
+                    try:
+                        test_url = urljoin(base_url, structure)
+                        response = self.session.get(test_url, timeout=5)
+                        if response.status_code == 200:
+                            # Look for any links in the response
+                            page_source = response.text
+                            link_matches = re.findall(r'href="([^"]+)"', page_source)
+                            for match in link_matches:
+                                if match.startswith('/') and 'article' in match.lower():
+                                    full_url = urljoin(base_url, match)
+                                    if self.is_same_domain(full_url, base_url):
+                                        discovered_urls.append(full_url)
+                    except Exception as e:
+                        logger.warning(f"Failed to test URL structure {structure}: {e}")
+                        continue
+                
+                # Add discovered URLs to content links
+                size_estimate["content_links"].extend(discovered_urls[:200])  # Increased limit
+                logger.info(f"Discovered {len(discovered_urls)} additional URLs from help center patterns")
+                
+                # If still no URLs found, try to discover real URLs from Settle's help center
+                if len(discovered_urls) == 0:
+                    logger.info("No URLs discovered - attempting to find real Settle help center URLs")
+                    
+                    # First, try to get the actual help center structure
+                    try:
+                        # Get the main help center page
+                        response = self.session.get(base_url, timeout=10)
+                        soup = BeautifulSoup(response.content, 'html.parser')
+                        
+                        # Look for actual article links in the page
+                        all_links = soup.find_all('a', href=True)
+                        real_article_urls = []
+                        
+                        for link in all_links:
+                            href = link.get('href')
+                            if href and not href.startswith(('http', 'mailto', 'tel', '#')):
+                                full_url = urljoin(base_url, href)
+                                if self.is_same_domain(full_url, base_url):
+                                    # Check if it looks like an article URL
+                                    if any(pattern in href.lower() for pattern in ['/articles/', '/help/', '/support/', '/docs/']):
+                                        real_article_urls.append(full_url)
+                        
+                        logger.info(f"Found {len(real_article_urls)} real article URLs from homepage")
+                        
+                        # Also try to find category pages that might contain article lists
+                        category_urls = []
+                        for link in all_links:
+                            href = link.get('href')
+                            if href and not href.startswith(('http', 'mailto', 'tel', '#')):
+                                full_url = urljoin(base_url, href)
+                                if self.is_same_domain(full_url, base_url):
+                                    # Look for category-like URLs
+                                    if any(pattern in href.lower() for pattern in ['/categories/', '/topics/', '/sections/']):
+                                        category_urls.append(full_url)
+                        
+                        logger.info(f"Found {len(category_urls)} category URLs from homepage")
+                        
+                        # Try to get articles from category pages
+                        for category_url in category_urls[:5]:  # Limit to avoid too many requests
+                            try:
+                                logger.info(f"Checking category page: {category_url}")
+                                cat_response = self.session.get(category_url, timeout=5)
+                                if cat_response.status_code == 200:
+                                    cat_soup = BeautifulSoup(cat_response.content, 'html.parser')
+                                    cat_links = cat_soup.find_all('a', href=True)
+                                    
+                                    for link in cat_links:
+                                        href = link.get('href')
+                                        if href and not href.startswith(('http', 'mailto', 'tel', '#')):
+                                            full_url = urljoin(category_url, href)
+                                            if self.is_same_domain(full_url, base_url):
+                                                if any(pattern in href.lower() for pattern in ['/articles/', '/help/', '/support/']):
+                                                    real_article_urls.append(full_url)
+                            except Exception as e:
+                                logger.warning(f"Failed to check category page {category_url}: {e}")
+                                continue
+                        
+                        # Add discovered real URLs
+                        size_estimate["content_links"].extend(real_article_urls)
+                        logger.info(f"Added {len(real_article_urls)} real article URLs from Settle help center")
+                        
+                    except Exception as e:
+                        logger.warning(f"Failed to discover real URLs: {e}")
+                        
+                        # Fallback: try some common Settle help center patterns that might actually exist
+                        logger.info("Trying fallback URL patterns")
+                        fallback_urls = [
+                            "/en/articles/getting-started-with-settle",
+                            "/en/articles/how-to-settle",
+                            "/en/articles/account-setup",
+                            "/en/articles/payment-methods",
+                            "/en/articles/transactions",
+                            "/en/articles/security",
+                            "/en/articles/troubleshooting",
+                            "/en/articles/contact-support",
+                            "/en/articles/faq",
+                            "/en/articles/help"
+                        ]
+                        
+                        for url_path in fallback_urls:
+                            test_url = urljoin(base_url, url_path)
+                            try:
+                                response = self.session.get(test_url, timeout=5)
+                                if response.status_code == 200:
+                                    size_estimate["content_links"].append(url_path)
+                                    logger.info(f"Found valid fallback URL: {test_url}")
+                            except:
+                                continue
+            
             # Process other content links
-            for i, link in enumerate(size_estimate["content_links"][:30]):  # Reduced limit for Render
+            for i, link in enumerate(size_estimate["content_links"][:500]):  # Increased limit for comprehensive coverage
                 if not self.should_continue_scraping():
                     break
                 
                 full_url = urljoin(base_url, link)
                 
-                # Quick URL relevance check
-                if not self.is_demo_relevant_url(full_url):
-                    self.skipped_urls.add(full_url)
-                    skipped_count += 1
-                    continue
-                
-                # Scrape the page
+                # Scrape the page directly without URL filtering
                 content = await self.scrape_page(full_url, company_name)
                 if content:
                     all_content.append(content)
@@ -342,11 +544,18 @@ class SmartScraper:
             # Final memory cleanup
             self.cleanup_memory()
             
-            logger.info(f"✅ Smart scraping completed:")
-            logger.info(f"   📄 Articles scraped: {total_articles}")
-            logger.info(f"   ⏭️ URLs skipped: {skipped_count}")
-            logger.info(f"   ⏱️ Time taken: {elapsed_time/60:.1f} minutes")
-            logger.info(f"   🎯 Success rate: {total_articles/(total_articles+skipped_count)*100:.1f}%")
+            logger.info(f"Smart scraping completed:")
+            logger.info(f"    Articles scraped: {total_articles}")
+            logger.info(f"    URLs skipped: {skipped_count}")
+            logger.info(f"    Time taken: {elapsed_time/60:.1f} minutes")
+            
+            # Fix division by zero error
+            total_processed = total_articles + skipped_count
+            if total_processed > 0:
+                success_rate = (total_articles / total_processed) * 100
+                logger.info(f"    Success rate: {success_rate:.1f}%")
+            else:
+                logger.info(f"    Success rate: 0.0% (no URLs processed)")
             
             return {
                 "success": True,
@@ -365,7 +574,7 @@ class SmartScraper:
             }
             
         except Exception as e:
-            logger.error(f"❌ Smart scraping failed: {e}")
+            logger.error(f"Smart scraping failed: {e}")
             return {
                 "success": False,
                 "error": str(e)
@@ -378,11 +587,28 @@ class SmartScraper:
                 return None
             
             response = self.session.get(url, timeout=10)
+            
+            # Check if page exists and has content
+            if response.status_code != 200:
+                logger.warning(f"Skipping {url} - status code {response.status_code}")
+                return None
+            
+            # Check if content is substantial
+            content_length = len(response.content)
+            if content_length < 1000:  # Require at least 1KB of content
+                logger.warning(f"Skipping {url} - too little content ({content_length} bytes)")
+                return None
+            
             soup = BeautifulSoup(response.content, 'html.parser')
             
             # Extract basic content
             title = soup.find('title')
             title_text = title.get_text().strip() if title else "Untitled"
+            
+            # Check for obvious error pages
+            if any(error_indicator in title_text.lower() for error_indicator in ['404', 'not found', 'error', 'page not found']):
+                logger.warning(f"Skipping {url} - appears to be error page: {title_text}")
+                return None
             
             # Remove unwanted elements
             for element in soup(["script", "style", "nav", "footer", "header", "aside"]):
@@ -407,19 +633,31 @@ class SmartScraper:
                 if body:
                     content = body.get_text().strip()
             
-            if not content or len(content) < 50:
+            # Require substantial content
+            if not content or len(content) < 200:  # Increased minimum content requirement
+                logger.warning(f"Skipping {url} - insufficient content ({len(content)} chars)")
                 return None
             
             # Analyze content relevance
             relevance_analysis = self.is_demo_relevant_content(content, title_text)
             
-            # Only include highly relevant content
-            if not relevance_analysis.get("is_demo_relevant", False):
-                self.skipped_urls.add(url)
-                return None
+            # For help centers, accept all content without filtering
+            is_help_site = any(indicator in url.lower() for indicator in ['help', 'support', 'docs', 'documentation'])
+            
+            if is_help_site:
+                # For help sites, accept all content without filtering
+                pass
+            else:
+                # Only include highly relevant content for other sites
+                min_relevance_score = 6
+                if not relevance_analysis.get("is_demo_relevant", False) and relevance_analysis.get("relevance_score", 0) < min_relevance_score:
+                    self.skipped_urls.add(url)
+                    return None
             
             self.scraped_urls.add(url)
             self.demo_relevant_urls.add(url)
+            
+            logger.info(f"Successfully scraped: {title_text} ({len(content)} chars)")
             
             return {
                 "title": title_text,

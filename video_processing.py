@@ -51,26 +51,34 @@ def initialize_processors():
             logger.error("❌ OPENAI_API_KEY not found")
             return False
         
-        # Initialize Gemini processor
-        logger.info("🔧 Initializing Gemini Transcription Processor...")
-        gemini_processor = GeminiTranscriptionProcessor(
-            gemini_api_key=gemini_api_key,
-            pinecone_api_key=pinecone_api_key,
-            openai_api_key=openai_api_key
-        )
-        logger.info("✅ Gemini processor initialized")
+        logger.info("Initializing Gemini Transcription Processor...")
         
-        # Initialize Loom processor
-        logger.info("🔧 Initializing Loom Video Processor...")
-        loom_processor = LoomVideoProcessor(
-            openai_api_key=openai_api_key,
-            pinecone_api_key=pinecone_api_key
-        )
-        logger.info("✅ Loom processor initialized")
+        try:
+            gemini_processor = GeminiTranscriptionProcessor(
+                gemini_api_key=os.getenv('GEMINI_API_KEY'),
+                pinecone_api_key=os.getenv('PINECONE_API_KEY'),
+                openai_api_key=os.getenv('OPENAI_API_KEY')
+            )
+            logger.info("Gemini processor initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Gemini processor: {e}")
+            gemini_processor = None
+        
+        logger.info("Initializing Loom Video Processor...")
+        
+        try:
+            loom_processor = LoomVideoProcessor(
+                openai_api_key=os.getenv('OPENAI_API_KEY'),
+                pinecone_api_key=os.getenv('PINECONE_API_KEY')
+            )
+            logger.info("Loom processor initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Loom processor: {e}")
+            loom_processor = None
         
         return True
     except Exception as e:
-        logger.error(f"❌ Failed to initialize processors: {e}")
+        logger.error(f"Failed to initialize processors: {e}")
         return False
 
 def process_video(video_url: str, company_name: str, bucket_name: Optional[str] = None, 
@@ -222,18 +230,18 @@ def fetch_video_urls_from_supabase() -> Dict[str, str]:
         for row in response.data:
             mappings[row['video_name']] = row['video_url']
         
-        logger.info(f"📝 Fetched {len(mappings)} video mappings from Supabase")
+        logger.info(f"Fetched {len(mappings)} video mappings from Supabase")
         return mappings
         
     except Exception as e:
-        logger.error(f"❌ Failed to fetch video mappings from Supabase: {e}")
+        logger.error(f"Failed to fetch video mappings from Supabase: {e}")
         return {}
 
 def initialize_existing_mappings():
     """Initialize video URL mappings from Supabase"""
     global VIDEO_URL_MAPPING
     VIDEO_URL_MAPPING.update(fetch_video_urls_from_supabase())
-    logger.info(f"📝 Initialized {len(VIDEO_URL_MAPPING)} video mappings")
+    logger.info(f"Initialized {len(VIDEO_URL_MAPPING)} video mappings")
 
 def get_video_mappings() -> Dict[str, str]:
     """Get current video mappings"""
@@ -242,14 +250,14 @@ def get_video_mappings() -> Dict[str, str]:
 def get_processors_status() -> Dict[str, str]:
     """Get status of video processors"""
     return {
-        "gemini": "✅ Available" if gemini_processor else "❌ Not available",
-        "loom": "✅ Available" if loom_processor else "❌ Not available"
+        "gemini": "Available" if gemini_processor else "Not available",
+        "loom": "Available" if loom_processor else "Not available"
     }
 
 def process_video_with_semantic_chunking(video_url: str, company_name: str) -> Dict:
     """Process video with semantic chunking for enhanced retrieval"""
     try:
-        logger.info(f"🎬 Processing video with semantic chunking: {video_url}")
+        logger.info(f"Processing video with semantic chunking: {video_url}")
         
         # Determine processor based on video type
         is_loom = "loom.com" in video_url.lower()
@@ -258,7 +266,7 @@ def process_video_with_semantic_chunking(video_url: str, company_name: str) -> D
             if not loom_processor:
                 raise Exception("Loom processor not initialized")
             
-            logger.info(f"🎬 Using Loom processor for: {video_url}")
+            logger.info(f"Using Loom processor for: {video_url}")
             # Download and transcribe video
             transcription_data = loom_processor._download_and_transcribe(video_url)
             if not transcription_data:
@@ -267,7 +275,7 @@ def process_video_with_semantic_chunking(video_url: str, company_name: str) -> D
             transcription = transcription_data.get('transcription', '')
             segments = transcription_data.get('segments', [])
             
-            logger.info(f"✅ Loom transcription successful: {len(transcription)} chars, {len(segments)} segments")
+            logger.info(f"Loom transcription successful: {len(transcription)} chars, {len(segments)} segments")
             
             # Create semantic chunks from transcription
             return _create_semantic_chunks_from_transcription(
@@ -280,7 +288,7 @@ def process_video_with_semantic_chunking(video_url: str, company_name: str) -> D
             if not gemini_processor:
                 raise Exception("Gemini processor not initialized")
             
-            logger.info(f"🎬 Using Gemini processor for: {video_url}")
+            logger.info(f"Using Gemini processor for: {video_url}")
             # Use the correct method for Gemini processor
             transcription_data = gemini_processor.extract_transcription_with_gemini(video_url)
             if not transcription_data:
@@ -294,7 +302,7 @@ def process_video_with_semantic_chunking(video_url: str, company_name: str) -> D
             if not segments and transcription:
                 segments = [{'text': transcription, 'start': 0, 'end': 0}]
             
-            logger.info(f"✅ Gemini transcription successful: {len(transcription)} chars, {len(segments)} segments")
+            logger.info(f"Gemini transcription successful: {len(transcription)} chars, {len(segments)} segments")
             
             # Create semantic chunks from transcription
             return _create_semantic_chunks_from_transcription(
@@ -305,9 +313,9 @@ def process_video_with_semantic_chunking(video_url: str, company_name: str) -> D
             )
             
     except Exception as e:
-        logger.error(f"❌ Error in semantic chunking video processing: {e}")
+        logger.error(f"Error in semantic chunking video processing: {e}")
         import traceback
-        logger.error(f"🔍 Full traceback: {traceback.format_exc()}")
+        logger.error(f"Full traceback: {traceback.format_exc()}")
         return {
             "success": False,
             "error": str(e),

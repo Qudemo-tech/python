@@ -42,7 +42,7 @@ class ProgressTracker:
                 "timestamp": datetime.now().isoformat(),
                 "message": message
             })
-        logger.info(f"📊 Progress [{self.task_id}]: {status} - {message}")
+        logger.info(f"Progress [{self.task_id}]: {status} - {message}")
     
     def update_progress(self, current: int, total: int, url: str = ""):
         """Update progress counters"""
@@ -56,7 +56,7 @@ class ProgressTracker:
             elapsed = time.time() - self.start_time
             eta = (elapsed / current) * (total - current) if current > 0 else 0
             
-            logger.info(f"📊 Progress [{self.task_id}]: {current}/{total} ({percentage:.1f}%) - ETA: {eta/60:.1f}min")
+            logger.info(f"Progress [{self.task_id}]: {current}/{total} ({percentage:.1f}%) - ETA: {eta/60:.1f}min")
     
     def update_stats(self, **kwargs):
         """Update statistics"""
@@ -70,7 +70,7 @@ class ProgressTracker:
             "timestamp": datetime.now().isoformat(),
             "error": error
         })
-        logger.error(f"❌ Error [{self.task_id}]: {error}")
+        logger.error(f"Error [{self.task_id}]: {error}")
     
     def add_warning(self, warning: str):
         """Add warning message"""
@@ -78,7 +78,7 @@ class ProgressTracker:
             "timestamp": datetime.now().isoformat(),
             "warning": warning
         })
-        logger.warning(f"⚠️ Warning [{self.task_id}]: {warning}")
+        logger.warning(f"Warning [{self.task_id}]: {warning}")
     
     def get_progress_summary(self) -> Dict[str, Any]:
         """Get current progress summary"""

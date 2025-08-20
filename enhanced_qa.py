@@ -93,13 +93,24 @@ class EnhancedQASystem:
                 }
                 
                 # Store content using semantic chunking
-                stored_chunks = self.knowledge_integrator.store_semantic_chunks(
-                    text=content.get('content', ''),
-                    company_name=company_name,
-                    source_info=source_info
+                # Create a chunk dictionary from the content
+                chunk_data = {
+                    'text': content.get('content', ''),
+                    'full_context': content.get('content', ''),
+                    'source': source_info.get('source', 'web_scraping'),
+                    'title': source_info.get('title', 'Untitled'),
+                    'url': source_info.get('url', url),
+                    'processed_at': source_info.get('processed_at', ''),
+                }
+                
+                stored_result = self.knowledge_integrator.store_semantic_chunks(
+                    chunks=[chunk_data],
+                    company_name=company_name
                 )
                 
-                total_stored_chunks.extend(stored_chunks)
+                # Add the chunk data to our tracking list if storage was successful
+                if stored_result.get('success', False):
+                    total_stored_chunks.append(chunk_data)
             
             # If we couldn't store any chunks, clean up and return error
             if not total_stored_chunks:
@@ -189,8 +200,8 @@ class EnhancedQASystem:
         try:
             print(f"🔍 Processing question: '{question}' for company: {company_name}")
             
-            # Use hybrid search for better results
-            search_results = self.knowledge_integrator.hybrid_search(
+            # Use search with context for better results
+            search_results = self.knowledge_integrator.search_with_context(
                 query=question,
                 company_name=company_name,
                 top_k=20  # Get more results to ensure we have both video and website sources
@@ -297,7 +308,7 @@ Please provide a comprehensive and accurate answer based only on the information
             
             if self.knowledge_integrator is None:
                 print("❌ Error: knowledge_integrator is None!")
-            return {
+                return {
                     "success": False,
                     "message": "Knowledge integrator not initialized",
                     "answer": "I'm sorry, the knowledge system is not properly initialized. Please try again later.",
@@ -565,7 +576,7 @@ Please provide a comprehensive and accurate answer based only on the information
             if settle_help_center_data["chunks"] > 0:
                 final_sources.insert(0, settle_help_center_data)  # Put it first
             
-                return {
+            return {
                 "success": True,
                 "data": {
                     "company_name": company_name,
@@ -650,10 +661,10 @@ Please provide a comprehensive and accurate answer based only on the information
                 
                 # Clean up the text formatting
                 combined_text = self._clean_text_formatting(combined_text)
-            
-            return {
-                "success": True,
-                "data": {
+                
+                return {
+                    "success": True,
+                    "data": {
                         "source_id": source_id,
                         "company_name": company_name,
                         "text": combined_text,
@@ -664,9 +675,9 @@ Please provide a comprehensive and accurate answer based only on the information
                         "url": source_metadata.get('url', '') if source_metadata else ''
                     }
                 }
-            
-            print(f"⚠️ Source content not found: {source_id}")
-            return None
+            else:
+                print(f"⚠️ Source content not found: {source_id}")
+                return None
                 
         except Exception as e:
             print(f"❌ Error getting source content: {e}")

@@ -350,13 +350,27 @@ def _create_semantic_chunks_from_transcription(transcription: str, segments: lis
         }
         
         # Store transcription using semantic chunking
-        stored_chunks = integrator.store_semantic_chunks(
-            text=transcription,
-            company_name=company_name,
-            source_info=source_info
+        # Create a chunk dictionary from the transcription
+        chunk_data = {
+            'text': transcription,
+            'full_context': transcription,
+            'source': source_info.get('source', 'video'),
+            'title': source_info.get('title', f'Video Transcription - {company_name}'),
+            'url': source_info.get('url', video_url),
+            'processed_at': source_info.get('processed_at', ''),
+        }
+        
+        stored_result = integrator.store_semantic_chunks(
+            chunks=[chunk_data],
+            company_name=company_name
         )
         
-        logger.info(f"✅ Successfully stored {len(stored_chunks)} semantic chunks for video")
+        if stored_result.get('success', False):
+            chunks_stored = stored_result.get('chunks_stored', 0)
+            logger.info(f"✅ Successfully stored {chunks_stored} semantic chunks for video")
+        else:
+            chunks_stored = 0
+            logger.error(f"❌ Failed to store semantic chunks: {stored_result.get('error', 'Unknown error')}")
         
         return {
             "success": True,
@@ -364,7 +378,7 @@ def _create_semantic_chunks_from_transcription(transcription: str, segments: lis
             "company_name": company_name,
             "video_url": video_url,
             "result": {
-                "chunks_stored": len(stored_chunks),
+                "chunks_stored": chunks_stored,
                 "transcription_length": len(transcription),
                 "segment_count": len(segments),
                 "processing_method": "semantic_chunking"

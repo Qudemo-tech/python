@@ -1543,14 +1543,27 @@ class LoomVideoProcessor:
             }
             
             # Store using semantic chunking
-            stored_chunks = integrator.store_semantic_chunks(
-                text=transcription,
-                company_name=company_name,
-                source_info=source_info
+            # Create a chunk dictionary from the transcription
+            chunk_data = {
+                'text': transcription,
+                'full_context': transcription,
+                'source': source_info.get('source', 'video_transcription'),
+                'title': source_info.get('title', f'Video: {video_url}'),
+                'url': source_info.get('url', video_url),
+                'processed_at': source_info.get('processed_at', ''),
+            }
+            
+            stored_result = integrator.store_semantic_chunks(
+                chunks=[chunk_data],
+                company_name=company_name
             )
             
-            logger.info(f"Stored {len(stored_chunks)} semantic chunks in Pinecone")
-            return stored_chunks
+            if stored_result.get('success', False):
+                logger.info(f"Stored {stored_result.get('chunks_stored', 0)} semantic chunks in Pinecone")
+                return [chunk_data]  # Return the chunk data for consistency
+            else:
+                logger.error(f"Failed to store semantic chunks: {stored_result.get('error', 'Unknown error')}")
+                return []
             
         except Exception as e:
             logger.error(f"Error creating semantic chunks: {e}")

@@ -197,3 +197,22 @@ class EnhancedKnowledgeIntegrator:
                 'success': False,
                 'error': str(e)
             }
+    
+    def generate_answer(self, prompt: str) -> str:
+        """Generate an answer using OpenAI GPT"""
+        try:
+            response = self.openai_client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that provides accurate and concise answers based on the information provided."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=1000,
+                temperature=0.7
+            )
+            
+            return response.choices[0].message.content.strip()
+            
+        except Exception as e:
+            logger.error(f"❌ Error generating answer: {e}")
+            return "I'm sorry, I couldn't generate an answer at this time."

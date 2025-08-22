@@ -45,3 +45,9 @@ requests>=2.31.0
 
 # Cloud storage
 google-cloud-storage>=2.10.0 
+
+# Add database connectivity for qudemo-specific Q&A
+psycopg2-binary==2.9.9
+
+# Add HTTP client for Node.js API communication
+aiohttp==3.9.1 

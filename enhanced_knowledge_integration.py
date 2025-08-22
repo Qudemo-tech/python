@@ -4,215 +4,135 @@ Enhanced Knowledge Integration System
 Handles Pinecone vector database operations for knowledge storage and retrieval
 """
 
+import requests
+import json
 import os
-import logging
-from typing import List, Dict, Optional, Any
-from pinecone import Pinecone, ServerlessSpec
-import openai
-from openai import OpenAI
+from datetime import datetime
 
-logger = logging.getLogger(__name__)
+# Configuration
+NODE_API_URL = os.getenv('NODE_API_URL', 'http://localhost:3001')
+PYTHON_API_URL = os.getenv('PYTHON_API_URL', 'http://localhost:5000')
 
-class EnhancedKnowledgeIntegrator:
-    def __init__(self, openai_api_key: str, pinecone_api_key: str, pinecone_index: str = "qudemo-knowledge"):
-        """Initialize the Enhanced Knowledge Integrator"""
-        try:
-            # Initialize OpenAI
-            self.openai_client = OpenAI(api_key=openai_api_key)
+def process_qudemo_knowledge_source(qudemo_id, source_id, source_url, source_type, title):
+    """
+    Process a knowledge source for a specific qudemo
+    """
+    try:
+        print(f"🔍 Processing knowledge source {source_id} for qudemo {qudemo_id}")
+        
+        # Call Python backend for processing
+        python_payload = {
+            "source_url": source_url,
+            "source_type": source_type,
+            "title": title,
+            "qudemo_id": str(qudemo_id),
+            "source_id": str(source_id)
+        }
+        
+        response = requests.post(
+            f"{PYTHON_API_URL}/process_knowledge_source",
+            json=python_payload,
+            headers={'Content-Type': 'application/json'},
+            timeout=300
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
             
-            # Initialize Pinecone
-            self.pc = Pinecone(api_key=pinecone_api_key)
-            self.pinecone_environment = "us-east-1"  # Default environment
-            self.index_name = pinecone_index or "qudemo-knowledge"
-            
-            # Create or connect to index
-            self._ensure_index_exists()
-            self.index = self.pc.Index(self.index_name)
-            
-            logger.info("✅ Enhanced Knowledge Integrator initialized successfully")
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize Enhanced Knowledge Integrator: {e}")
-            raise
-    
-    def _ensure_index_exists(self):
-        """Ensure the Pinecone index exists"""
-        try:
-            # Check if index exists
-            existing_indexes = [index.name for index in self.pc.list_indexes()]
-            
-            if self.index_name not in existing_indexes:
-                logger.info(f"Creating Pinecone index: {self.index_name}")
-                self.pc.create_index(
-                    name=self.index_name,
-                    dimension=1536,  # OpenAI embedding dimension
-                    metric='cosine',
-                    spec=ServerlessSpec(
-                        cloud='aws',
-                        region=self.pinecone_environment
-                    )
-                )
-                logger.info(f"✅ Created Pinecone index: {self.index_name}")
-            else:
-                logger.info(f"✅ Using existing Pinecone index: {self.index_name}")
-                
-        except Exception as e:
-            logger.error(f"❌ Error ensuring index exists: {e}")
-            raise
-    
-    def generate_embedding(self, text: str) -> List[float]:
-        """Generate OpenAI embedding for text"""
-        try:
-            response = self.openai_client.embeddings.create(
-                model="text-embedding-ada-002",
-                input=text
-            )
-            return response.data[0].embedding
-        except Exception as e:
-            logger.error(f"❌ Error generating embedding: {e}")
-            raise
-    
-    def store_semantic_chunks(self, chunks: List[Dict], company_name: str) -> Dict:
-        """Store semantic chunks in Pinecone"""
-        try:
-            vectors_to_upsert = []
-            
-            for i, chunk in enumerate(chunks):
-                # Generate embedding for the chunk
-                embedding = self.generate_embedding(chunk.get('text', ''))
-                
-                # Create metadata
-                metadata = {
-                    'company_name': company_name,
-                    'chunk_index': i,
-                    'text': chunk.get('text', ''),
-                    'full_context': chunk.get('full_context', ''),
-                    'source': chunk.get('source', 'web_scraping'),
-                    'title': chunk.get('title', 'Unknown'),
-                    'url': chunk.get('url', ''),
-                    'processed_at': chunk.get('processed_at', ''),
-                    'chunk_id': f"{company_name}_{i}"
-                }
-                
-                # Add to vectors list
-                vectors_to_upsert.append({
-                    'id': f"{company_name}_{i}_{hash(chunk.get('text', ''))}",
-                    'values': embedding,
-                    'metadata': metadata
-                })
-            
-            # Upsert vectors in batches
-            batch_size = 100
-            for i in range(0, len(vectors_to_upsert), batch_size):
-                batch = vectors_to_upsert[i:i + batch_size]
-                self.index.upsert(vectors=batch)
-            
-            logger.info(f"✅ Stored {len(vectors_to_upsert)} semantic chunks for {company_name}")
-            
-            return {
-                'success': True,
-                'chunks_stored': len(vectors_to_upsert),
-                'company_name': company_name
+            # Update source status in Node.js database
+            update_payload = {
+                "status": "processed",
+                "processed_at": datetime.now().isoformat(),
+                "metadata": result.get("metadata", {})
             }
             
-        except Exception as e:
-            logger.error(f"❌ Error storing semantic chunks: {e}")
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    def search_with_context(self, query: str, company_name: str, top_k: int = 10) -> List[Dict]:
-        """Search for relevant chunks with context"""
-        try:
-            # Generate embedding for query
-            if query:
-                query_embedding = self.generate_embedding(query)
-            else:
-                # For empty queries, use a neutral embedding
-                query_embedding = [0.0] * 1536
-            
-            # Search in Pinecone
-            results = self.index.query(
-                vector=query_embedding,
-                top_k=top_k,
-                include_metadata=True,
-                filter={'company_name': company_name}
+            update_response = requests.put(
+                f"{NODE_API_URL}/api/qudemos/{qudemo_id}/knowledge/{source_id}/status",
+                json=update_payload,
+                headers={'Content-Type': 'application/json'}
             )
             
-            # Format results
-            formatted_results = []
-            for match in results.matches:
-                formatted_results.append({
-                    'id': match.id,
-                    'score': match.score,
-                    'text': match.metadata.get('text', ''),
-                    'full_context': match.metadata.get('full_context', ''),
-                    'chunk_index': match.metadata.get('chunk_index', 0),
-                    'metadata': match.metadata
-                })
+            if update_response.status_code == 200:
+                print(f"✅ Successfully processed knowledge source {source_id}")
+                return True
+            else:
+                print(f"❌ Failed to update source status: {update_response.text}")
+                return False
+        else:
+            print(f"❌ Python processing failed: {response.text}")
             
-            return formatted_results
+            # Update source status to failed
+            update_payload = {
+                "status": "failed",
+                "processed_at": datetime.now().isoformat(),
+                "metadata": {"error": response.text}
+            }
             
-        except Exception as e:
-            logger.error(f"❌ Error searching with context: {e}")
+            requests.put(
+                f"{NODE_API_URL}/api/qudemos/{qudemo_id}/knowledge/{source_id}/status",
+                json=update_payload,
+                headers={'Content-Type': 'application/json'}
+            )
+            
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error processing knowledge source: {str(e)}")
+        
+        # Update source status to failed
+        try:
+            update_payload = {
+                "status": "failed",
+                "processed_at": datetime.now().isoformat(),
+                "metadata": {"error": str(e)}
+            }
+            
+            requests.put(
+                f"{NODE_API_URL}/api/qudemos/{qudemo_id}/knowledge/{source_id}/status",
+                json=update_payload,
+                headers={'Content-Type': 'application/json'}
+            )
+        except:
+            pass
+            
+        return False
+
+def get_pending_knowledge_sources():
+    """
+    Get all pending knowledge sources from Node.js backend
+    """
+    try:
+        response = requests.get(
+            f"{NODE_API_URL}/api/knowledge/pending",
+            headers={'Content-Type': 'application/json'}
+        )
+        
+        if response.status_code == 200:
+            return response.json().get("data", [])
+        else:
+            print(f"❌ Failed to get pending sources: {response.text}")
             return []
+            
+    except Exception as e:
+        print(f"❌ Error getting pending sources: {str(e)}")
+        return []
+
+def process_all_pending_sources():
+    """
+    Process all pending knowledge sources
+    """
+    pending_sources = get_pending_knowledge_sources()
     
-    def delete_company_knowledge(self, company_name: str) -> Dict:
-        """Delete all knowledge for a company"""
-        try:
-            # Delete all vectors for the company
-            self.index.delete(filter={'company_name': company_name})
-            
-            logger.info(f"✅ Deleted all knowledge for company: {company_name}")
-            
-            return {
-                'success': True,
-                'company_name': company_name
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Error deleting company knowledge: {e}")
-            return {
-                'success': False,
-                'error': str(e)
-            }
+    print(f"🔍 Found {len(pending_sources)} pending knowledge sources")
     
-    def get_company_stats(self, company_name: str) -> Dict:
-        """Get statistics for a company's knowledge"""
-        try:
-            # Query to get all chunks for the company
-            results = self.search_with_context("", company_name, top_k=10000)
-            
-            return {
-                'success': True,
-                'company_name': company_name,
-                'total_chunks': len(results),
-                'last_updated': max([r.get('metadata', {}).get('processed_at', '') for r in results], default='Unknown')
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Error getting company stats: {e}")
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    def generate_answer(self, prompt: str) -> str:
-        """Generate an answer using OpenAI GPT"""
-        try:
-            response = self.openai_client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that provides accurate and concise answers based on the information provided."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=1000,
-                temperature=0.7
-            )
-            
-            return response.choices[0].message.content.strip()
-            
-        except Exception as e:
-            logger.error(f"❌ Error generating answer: {e}")
-            return "I'm sorry, I couldn't generate an answer at this time."
+    for source in pending_sources:
+        process_qudemo_knowledge_source(
+            source["qudemo_id"],
+            source["id"],
+            source["source_url"],
+            source["source_type"],
+            source["title"]
+        )
+
+if __name__ == "__main__":
+    process_all_pending_sources()

@@ -1522,14 +1522,8 @@ class LoomVideoProcessor:
             List of stored chunk information
         """
         try:
-            # Initialize knowledge integrator for semantic chunking
-            from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
-            
-            integrator = EnhancedKnowledgeIntegrator(
-                openai_api_key=self.openai_api_key,
-                pinecone_api_key=self.pinecone_api_key,
-                pinecone_index=self.default_index_name
-            )
+            # Note: EnhancedKnowledgeIntegrator is no longer available - knowledge integration is handled by Node.js backend
+            # For now, we'll return a placeholder response since the knowledge integration is handled elsewhere
             
             # Prepare source information
             source_info = {
@@ -1539,31 +1533,14 @@ class LoomVideoProcessor:
                 'content_type': 'video',
                 'segments_count': len(segments),
                 'transcription_length': len(transcription),
-                'processing_method': 'semantic_chunking'
+                'processing_method': 'transcription_only'
             }
             
-            # Store using semantic chunking
-            # Create a chunk dictionary from the transcription
-            chunk_data = {
-                'text': transcription,
-                'full_context': transcription,
-                'source': source_info.get('source', 'video_transcription'),
-                'title': source_info.get('title', f'Video: {video_url}'),
-                'url': source_info.get('url', video_url),
-                'processed_at': source_info.get('processed_at', ''),
-            }
+            # Note: Semantic chunking is now handled by the Node.js backend
+            # This function is kept for compatibility but doesn't perform actual storage
             
-            stored_result = integrator.store_semantic_chunks(
-                chunks=[chunk_data],
-                company_name=company_name
-            )
-            
-            if stored_result.get('success', False):
-                logger.info(f"Stored {stored_result.get('chunks_stored', 0)} semantic chunks in Pinecone")
-                return [chunk_data]  # Return the chunk data for consistency
-            else:
-                logger.error(f"Failed to store semantic chunks: {stored_result.get('error', 'Unknown error')}")
-                return []
+            logger.info(f"Video transcription processed (knowledge integration handled by Node.js backend)")
+            return []  # Return empty list since storage is handled elsewhere
             
         except Exception as e:
             logger.error(f"Error creating semantic chunks: {e}")

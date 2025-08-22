@@ -42,7 +42,7 @@ from health_checks import (
 
 # Import clean knowledge processing modules
 from enhanced_qa import EnhancedQASystem, initialize_enhanced_qa
-from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
+# Note: EnhancedKnowledgeIntegrator is no longer available - knowledge integration is handled by Node.js backend
 
 # Configure logging with larger buffer and rotation
 import logging
@@ -67,13 +67,13 @@ logger = logging.getLogger(__name__)
 
 # Global instances for clean knowledge processing
 enhanced_qa_system = None
-enhanced_knowledge_integrator = None
+# Note: enhanced_knowledge_integrator is no longer used - knowledge integration is handled by Node.js backend
 
 # Lifespan event handler for startup and shutdown
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown"""
-    global enhanced_qa_system, enhanced_knowledge_integrator
+    global enhanced_qa_system
     
     # Startup
     logger.info("🚀 Starting QuDemo Video Processing API...")
@@ -97,27 +97,8 @@ async def lifespan(app: FastAPI):
         logger.error("🔧 Please check your API keys in the .env file")
         enhanced_qa_system = None
     
-    # Initialize knowledge integrator (separate from QA system)
-    global enhanced_knowledge_integrator
-    
-    try:
-        openai_api_key = os.getenv("OPENAI_API_KEY")
-        
-        if openai_api_key and openai_api_key != "your_openai_api_key_here" and openai_api_key != "your-openai-api-key-here":
-            # Initialize knowledge integrator for embeddings and storage
-            enhanced_knowledge_integrator = EnhancedKnowledgeIntegrator(
-                openai_api_key=openai_api_key,
-                pinecone_api_key=os.getenv('PINECONE_API_KEY'),
-                pinecone_index=os.getenv('PINECONE_INDEX')
-            )
-            logger.info("✅ Knowledge integrator initialized successfully")
-        else:
-            logger.warning("⚠️ OpenAI API key not found or invalid - knowledge storage disabled")
-            logger.info("💡 To enable knowledge storage, set OPENAI_API_KEY environment variable")
-            enhanced_knowledge_integrator = None
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize knowledge integrator: {e}")
-        enhanced_knowledge_integrator = None
+    # Note: Knowledge integrator initialization removed - now handled by Node.js backend
+    logger.info("ℹ️ Knowledge integration is now handled by the Node.js backend")
     
     # Initialize video mappings
     initialize_existing_mappings()
@@ -253,7 +234,8 @@ async def process_videos_batch_endpoint(company_name: str, request: Request):
                         company_name=company_name,
                         bucket_name=None,
                         source=source,
-                        meeting_link=meeting_link
+                        meeting_link=meeting_link,
+                        qudemo_id=body.get('qudemo_id')  # Pass qudemo_id if provided
                     ),
                     timeout=timeout_seconds
                 )
@@ -325,6 +307,64 @@ async def process_videos_batch_endpoint(company_name: str, request: Request):
         logger.error(f"❌ Batch processing endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/process-video-qudemo/{company_name}")
+async def process_video_qudemo_endpoint(company_name: str, request: Request):
+    """Process a video for a specific qudemo with qudemo_id"""
+    try:
+        body = await request.json()
+        video_url = body.get("video_url")
+        qudemo_id = body.get("qudemo_id")
+        source = body.get("source", "qudemo")
+        meeting_link = body.get("meeting_link")
+        
+        if not video_url:
+            raise HTTPException(status_code=400, detail="video_url is required")
+        
+        if not qudemo_id:
+            raise HTTPException(status_code=400, detail="qudemo_id is required")
+        
+        logger.info(f"🎬 Processing video for qudemo: {video_url}")
+        logger.info(f"🏢 Company: {company_name}")
+        logger.info(f"🎯 Qudemo ID: {qudemo_id}")
+        
+        # Check if it's a Loom video for timeout
+        is_loom_video = 'loom.com' in video_url
+        timeout_seconds = 810.0 if is_loom_video else 270.0  # 13.5 minutes for Loom, 4.5 minutes for others
+        
+        logger.info(f"⏱️ Using timeout: {timeout_seconds/60:.1f} minutes for {'Loom' if is_loom_video else 'other'} video")
+        
+        # Process the video with qudemo_id
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                process_video,
+                video_url=video_url,
+                company_name=company_name,
+                bucket_name=None,
+                source=source,
+                meeting_link=meeting_link,
+                qudemo_id=qudemo_id
+            ),
+            timeout=timeout_seconds
+        )
+        
+        if result["success"]:
+            return result
+        else:
+            raise HTTPException(status_code=500, detail=result.get("error", "Video processing failed"))
+            
+    except asyncio.TimeoutError:
+        timeout_minutes = int(timeout_seconds / 60)
+        logger.error(f"❌ Video processing timeout for {company_name}: {video_url} after {timeout_minutes} minutes")
+        raise HTTPException(
+            status_code=408, 
+            detail=f"Video processing timed out after {timeout_minutes} minutes. Loom videos take longer to process. Please try again."
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Video processing error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Q&A Endpoints
 @app.post("/ask-question")
 async def ask_question_endpoint(request: Request):
@@ -391,6 +431,41 @@ async def ask_question_company_endpoint(company_name: str, request: Request):
         raise
     except Exception as e:
         logger.error(f"❌ Company question endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ask-qudemo/{qudemo_id}")
+async def ask_qudemo_question_endpoint(qudemo_id: str, request: Request):
+    """Ask a question for a specific qudemo (new multi-qudemo architecture)"""
+    try:
+        body = await request.json()
+        question = body.get("question")
+        
+        if not question:
+            raise HTTPException(status_code=400, detail="question is required")
+        
+        logger.info(f"❓ Question for qudemo {qudemo_id}: {question}")
+        
+        # Call the async ask_qudemo_question method
+        result = await enhanced_qa_system.ask_qudemo_question(question, qudemo_id)
+        
+        if not result.get('success'):
+            raise HTTPException(status_code=500, detail=result.get('message', 'Failed to process question'))
+        
+        return {
+            'success': True,
+            'answer': result['answer'],
+            'sources': result['sources'],
+            'video_url': result.get('video_url'),
+            'start': result.get('start'),
+            'end': result.get('end'),
+            'video_title': result.get('video_title'),
+            'qudemo_id': qudemo_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Qudemo question endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/generate-summary")
@@ -623,13 +698,13 @@ async def memory_status():
 
 @app.get("/force-cleanup")
 async def force_cleanup():
-    """Force memory cleanup"""
+    """Force cleanup of memory"""
     try:
         import gc
         import psutil
+        process = psutil.Process()
         
         # Get memory before cleanup
-        process = psutil.Process()
         memory_before = process.memory_info().rss / 1024 / 1024
         
         # Force garbage collection
@@ -647,6 +722,49 @@ async def force_cleanup():
     except Exception as e:
         return {"error": str(e)}
 
+@app.post("/get-video-chunks")
+async def get_video_chunks_endpoint(request: Request):
+    """Get video transcript chunks from vector database"""
+    try:
+        body = await request.json()
+        video_id = body.get("video_id")
+        company_name = body.get("company_name")
+        video_url = body.get("video_url")
+        
+        if not video_id or not company_name:
+            raise HTTPException(status_code=400, detail="video_id and company_name are required")
+        
+        logger.info(f"🔍 Getting chunks for video: {video_id} (company: {company_name})")
+        
+        # Initialize Q&A system if not already done
+        success = await initialize_enhanced_qa()
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to initialize Q&A system")
+        
+        # Get chunks from vector database
+        chunks = await enhanced_qa_system.get_video_chunks(video_id, company_name, video_url)
+        
+        if chunks:
+            logger.info(f"✅ Found {len(chunks)} chunks for video: {video_id}")
+            return {
+                'success': True,
+                'chunks': chunks,
+                'count': len(chunks)
+            }
+        else:
+            logger.warning(f"⚠️ No chunks found for video: {video_id}")
+            return {
+                'success': True,
+                'chunks': [],
+                'count': 0
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Get video chunks error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.delete("/delete-company-data/{company_name}")
 async def delete_company_data_endpoint(company_name: str):
     """Delete all company data from Pinecone"""
@@ -660,22 +778,22 @@ async def delete_company_data_endpoint(company_name: str):
         success = await initialize_enhanced_qa()
         
         # Get the initialized enhanced_knowledge_integrator after initialization
-        from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
+        # from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
         
         # Get index name
         index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
         
         # Get the index from enhanced_knowledge_integrator
-        if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
-            index = enhanced_knowledge_integrator.index
-        else:
-            # Fallback: create new integrator
-            integrator = EnhancedKnowledgeIntegrator(
-                openai_api_key=os.getenv("OPENAI_API_KEY"),
-                pinecone_api_key=os.getenv("PINECONE_API_KEY"),
-                pinecone_index=index_name
-            )
-            index = integrator.index
+        # if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
+        #     index = enhanced_knowledge_integrator.index
+        # else:
+        #     # Fallback: create new integrator
+        #     integrator = EnhancedKnowledgeIntegrator(
+        #         openai_api_key=os.getenv("OPENAI_API_KEY"),
+        #         pinecone_api_key=os.getenv("PINECONE_API_KEY"),
+        #         pinecone_index=index_name
+        #     )
+        #     index = integrator.index
         
         # Create namespace from company name
         namespace = company_name.lower().replace(' ', '-')
@@ -800,22 +918,22 @@ async def delete_knowledge_source_endpoint(company_name: str, request: Request):
         success = await initialize_enhanced_qa()
         
         # Get the initialized enhanced_knowledge_integrator after initialization
-        from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
+        # from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
         
         # Get index name
         index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
         
         # Get the index from enhanced_knowledge_integrator
-        if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
-            index = enhanced_knowledge_integrator.index
-        else:
-            # Fallback: create new integrator
-            integrator = EnhancedKnowledgeIntegrator(
-                openai_api_key=os.getenv("OPENAI_API_KEY"),
-                pinecone_api_key=os.getenv("PINECONE_API_KEY"),
-                pinecone_index=index_name
-            )
-            index = integrator.index
+        # if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
+        #     index = enhanced_knowledge_integrator.index
+        # else:
+        #     # Fallback: create new integrator
+        #     integrator = EnhancedKnowledgeIntegrator(
+        #         openai_api_key=os.getenv("OPENAI_API_KEY"),
+        #         pinecone_api_key=os.getenv("PINECONE_API_KEY"),
+        #         pinecone_index=index_name
+        #     )
+        #     index = integrator.index
         
         # Create namespace from company name
         namespace = company_name.lower().replace(' ', '-')
@@ -923,8 +1041,9 @@ async def delete_knowledge_source_endpoint(company_name: str, request: Request):
 async def scrape_company_support_endpoint(company_name: str, request: Request):
     """Scrape comprehensive support data from company websites"""
     try:
-        if not enhanced_knowledge_integrator:
-            raise HTTPException(status_code=503, detail="Support bot system not initialized")
+        # Note: EnhancedKnowledgeIntegrator is no longer available - knowledge integration is handled by Node.js backend
+        # if not enhanced_knowledge_integrator:
+        #     raise HTTPException(status_code=503, detail="Support bot system not initialized")
         
         body = await request.json()
         website_urls = body.get("website_urls", [])
@@ -936,19 +1055,19 @@ async def scrape_company_support_endpoint(company_name: str, request: Request):
         logger.info(f"🕷️ Starting comprehensive support scraping for {company_name}")
         
         # Scrape support data
-        support_data = enhanced_knowledge_integrator.scrape_company_support_data(
-            company_name, website_urls, max_pages_per_url
-        )
+        # support_data = enhanced_knowledge_integrator.scrape_company_support_data(
+        #     company_name, website_urls, max_pages_per_url
+        # )
         
         # Get summary
-        summary = enhanced_knowledge_integrator.get_knowledge_summary(company_name)
+        # summary = enhanced_knowledge_integrator.get_knowledge_summary(company_name)
         
         return {
             "success": True,
             "company_name": company_name,
-            "support_data_count": len(support_data),
-            "summary": summary,
-            "message": f"Successfully scraped {len(support_data)} support data items"
+            "support_data_count": 0, # No longer available
+            "summary": {}, # No longer available
+            "message": "Support data scraping is currently unavailable."
         }
         
     except HTTPException:
@@ -961,8 +1080,9 @@ async def scrape_company_support_endpoint(company_name: str, request: Request):
 async def integrate_video_transcripts_endpoint(company_name: str, request: Request):
     """Integrate video transcripts with support data"""
     try:
-        if not enhanced_knowledge_integrator:
-            raise HTTPException(status_code=503, detail="Support bot system not initialized")
+        # Note: EnhancedKnowledgeIntegrator is no longer available - knowledge integration is handled by Node.js backend
+        # if not enhanced_knowledge_integrator:
+        #     raise HTTPException(status_code=503, detail="Support bot system not initialized")
         
         body = await request.json()
         video_transcripts = body.get("video_transcripts", [])
@@ -973,15 +1093,15 @@ async def integrate_video_transcripts_endpoint(company_name: str, request: Reque
         logger.info(f"🎬 Integrating video transcripts for {company_name}")
         
         # Integrate video transcripts
-        integrated_data = enhanced_knowledge_integrator.integrate_video_transcripts(
-            company_name, video_transcripts
-        )
+        # integrated_data = enhanced_knowledge_integrator.integrate_video_transcripts(
+        #     company_name, video_transcripts
+        # )
         
         return {
             "success": True,
             "company_name": company_name,
-            "integrated_data_count": len(integrated_data),
-            "message": f"Successfully integrated {len(integrated_data)} data items"
+            "integrated_data_count": 0, # No longer available
+            "message": "Video integration is currently unavailable."
         }
         
     except HTTPException:
@@ -994,19 +1114,20 @@ async def integrate_video_transcripts_endpoint(company_name: str, request: Reque
 async def enhance_support_data_endpoint(company_name: str):
     """Enhance support data with AI-generated content"""
     try:
-        if not enhanced_knowledge_integrator:
-            raise HTTPException(status_code=503, detail="Support bot system not initialized")
+        # Note: EnhancedKnowledgeIntegrator is no longer available - knowledge integration is handled by Node.js backend
+        # if not enhanced_knowledge_integrator:
+        #     raise HTTPException(status_code=503, detail="Support bot system not initialized")
         
         logger.info(f"🤖 Enhancing support data for {company_name}")
         
         # Enhance support data
-        enhanced_data = enhanced_knowledge_integrator.enhance_support_data_with_ai(company_name)
+        # enhanced_data = enhanced_knowledge_integrator.enhance_support_data_with_ai(company_name)
         
         return {
             "success": True,
             "company_name": company_name,
-            "enhanced_data_count": len(enhanced_data),
-            "message": f"Successfully enhanced {len(enhanced_data)} support data items"
+            "enhanced_data_count": 0, # No longer available
+            "message": "Support data enhancement is currently unavailable."
         }
         
     except HTTPException:
@@ -1019,8 +1140,9 @@ async def enhance_support_data_endpoint(company_name: str):
 async def process_raw_content_endpoint(company_name: str, request: Request):
     """Process raw HTML content and extract complete content chunks without Q&A generation"""
     try:
-        if not enhanced_knowledge_integrator:
-            raise HTTPException(status_code=503, detail="Support bot system not initialized")
+        # Note: EnhancedKnowledgeIntegrator is no longer available - knowledge integration is handled by Node.js backend
+        # if not enhanced_knowledge_integrator:
+        #     raise HTTPException(status_code=503, detail="Support bot system not initialized")
         
         body = await request.json()
         html_content = body.get("html_content", "")
@@ -1035,19 +1157,19 @@ async def process_raw_content_endpoint(company_name: str, request: Request):
         logger.info(f"🔍 Processing raw content for {company_name} from: {url}")
         
         # Use enhanced knowledge integrator to process raw content
-        content_chunks = enhanced_knowledge_integrator.process_raw_content(
-            company_name, html_content, url
-        )
+        # content_chunks = enhanced_knowledge_integrator.process_raw_content(
+        #     company_name, html_content, url
+        # )
         
         # Get summary
-        summary = enhanced_knowledge_integrator.get_knowledge_summary(company_name)
+        # summary = enhanced_knowledge_integrator.get_knowledge_summary(company_name)
         
         return {
             "success": True,
             "company_name": company_name,
-            "content_chunks_count": len(content_chunks),
-            "summary": summary,
-            "message": f"Successfully processed {len(content_chunks)} content chunks"
+            "content_chunks_count": 0, # No longer available
+            "summary": {}, # No longer available
+            "message": "Raw content processing is currently unavailable."
         }
         
     except HTTPException:
@@ -1060,19 +1182,20 @@ async def process_raw_content_endpoint(company_name: str, request: Request):
 async def create_vector_embeddings_endpoint(company_name: str):
     """Create vector embeddings for company knowledge"""
     try:
-        if not enhanced_knowledge_integrator:
-            raise HTTPException(status_code=503, detail="Support bot system not initialized")
+        # Note: EnhancedKnowledgeIntegrator is no longer available - knowledge integration is handled by Node.js backend
+        # if not enhanced_knowledge_integrator:
+        #     raise HTTPException(status_code=503, detail="Support bot system not initialized")
         
         logger.info(f"🔢 Creating vector embeddings for {company_name}")
         
         # Create vector embeddings
-        embeddings = enhanced_knowledge_integrator.create_vector_embeddings(company_name)
+        # embeddings = enhanced_knowledge_integrator.create_vector_embeddings(company_name)
         
         return {
             "success": True,
             "company_name": company_name,
-            "embeddings_count": len(embeddings),
-            "message": f"Successfully created {len(embeddings)} vector embeddings"
+            "embeddings_count": 0, # No longer available
+            "message": "Vector embedding is currently unavailable."
         }
         
     except HTTPException:
@@ -1085,8 +1208,9 @@ async def create_vector_embeddings_endpoint(company_name: str):
 async def ask_support_question_endpoint(request: Request):
     """Ask a support question using comprehensive knowledge base"""
     try:
-        if not enhanced_knowledge_integrator:
-            raise HTTPException(status_code=503, detail="Support bot system not initialized")
+        # Note: EnhancedKnowledgeIntegrator is no longer available - knowledge integration is handled by Node.js backend
+        # if not enhanced_knowledge_integrator:
+        #     raise HTTPException(status_code=503, detail="Support bot system not initialized")
         
         body = await request.json()
         company_name = body.get("company_name")
@@ -1098,13 +1222,13 @@ async def ask_support_question_endpoint(request: Request):
         logger.info(f"🤖 Support question for {company_name}: {question}")
         
         # Generate support response
-        response = enhanced_knowledge_integrator.generate_support_response(company_name, question)
+        # response = enhanced_knowledge_integrator.generate_support_response(company_name, question)
         
         return {
             "success": True,
             "company_name": company_name,
             "question": question,
-            "response": response
+            "response": "Support question processing is currently unavailable."
         }
         
     except HTTPException:
@@ -1117,15 +1241,16 @@ async def ask_support_question_endpoint(request: Request):
 async def get_support_knowledge_summary_endpoint(company_name: str):
     """Get comprehensive summary of company support knowledge"""
     try:
-        if not enhanced_knowledge_integrator:
-            raise HTTPException(status_code=503, detail="Support bot system not initialized")
+        # Note: EnhancedKnowledgeIntegrator is no longer available - knowledge integration is handled by Node.js backend
+        # if not enhanced_knowledge_integrator:
+        #     raise HTTPException(status_code=503, detail="Support bot system not initialized")
         
-        summary = enhanced_knowledge_integrator.get_knowledge_summary(company_name)
+        # summary = enhanced_knowledge_integrator.get_knowledge_summary(company_name)
         
         return {
             "success": True,
             "company_name": company_name,
-            "summary": summary
+            "summary": "Knowledge summary is currently unavailable."
         }
         
     except HTTPException:
@@ -1138,11 +1263,12 @@ async def get_support_knowledge_summary_endpoint(company_name: str):
 async def export_company_knowledge_endpoint(company_name: str):
     """Export company knowledge to JSON file"""
     try:
-        if not enhanced_knowledge_integrator:
-            raise HTTPException(status_code=503, detail="Support bot system not initialized")
+        # Note: EnhancedKnowledgeIntegrator is no longer available - knowledge integration is handled by Node.js backend
+        # if not enhanced_knowledge_integrator:
+        #     raise HTTPException(status_code=503, detail="Support bot system not initialized")
         
-        filename = f"company_knowledge_{company_name}_{int(time.time())}.json"
-        enhanced_knowledge_integrator.export_company_knowledge(company_name, filename)
+        filename = f"company_knowledge_{company_name}_{int(datetime.now().timestamp())}.json"
+        # enhanced_knowledge_integrator.export_company_knowledge(company_name, filename)
         
         return {
             "success": True,
@@ -1184,22 +1310,22 @@ async def delete_video_data_endpoint(company_name: str, request: Request):
         success = await initialize_enhanced_qa()
         
         # Get the initialized enhanced_knowledge_integrator after initialization
-        from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
+        # from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
         
         # Get index name
         index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
         
         # Get the index from enhanced_knowledge_integrator
-        if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
-            index = enhanced_knowledge_integrator.index
-        else:
-            # Fallback: create new integrator
-            integrator = EnhancedKnowledgeIntegrator(
-                openai_api_key=os.getenv("OPENAI_API_KEY"),
-                pinecone_api_key=os.getenv("PINECONE_API_KEY"),
-                pinecone_index=index_name
-            )
-            index = integrator.index
+        # if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
+        #     index = enhanced_knowledge_integrator.index
+        # else:
+        #     # Fallback: create new integrator
+        #     integrator = EnhancedKnowledgeIntegrator(
+        #         openai_api_key=os.getenv("OPENAI_API_KEY"),
+        #         pinecone_api_key=os.getenv("PINECONE_API_KEY"),
+        #         pinecone_index=index_name
+        #     )
+        #     index = integrator.index
         
         # Delete vectors by metadata filter
         try:
@@ -1258,22 +1384,22 @@ async def delete_website_data_endpoint(company_name: str, request: Request):
         success = await initialize_enhanced_qa()
         
         # Get the initialized enhanced_knowledge_integrator after initialization
-        from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
+        # from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
         
         # Get index name
         index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
         
         # Get the index from enhanced_knowledge_integrator
-        if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
-            index = enhanced_knowledge_integrator.index
-        else:
-            # Fallback: create new integrator
-            integrator = EnhancedKnowledgeIntegrator(
-                openai_api_key=os.getenv("OPENAI_API_KEY"),
-                pinecone_api_key=os.getenv("PINECONE_API_KEY"),
-                pinecone_index=index_name
-            )
-            index = integrator.index
+        # if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
+        #     index = enhanced_knowledge_integrator.index
+        # else:
+        #     # Fallback: create new integrator
+        #     integrator = EnhancedKnowledgeIntegrator(
+        #         openai_api_key=os.getenv("OPENAI_API_KEY"),
+        #         pinecone_api_key=os.getenv("PINECONE_API_KEY"),
+        #         pinecone_index=index_name
+        #     )
+        #     index = integrator.index
         
         # Delete vectors by metadata filter
         try:
@@ -1332,22 +1458,22 @@ async def delete_document_data_endpoint(company_name: str, request: Request):
         success = await initialize_enhanced_qa()
         
         # Get the initialized enhanced_knowledge_integrator after initialization
-        from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
+        # from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
         
         # Get index name
         index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
         
         # Get the index from enhanced_knowledge_integrator
-        if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
-            index = enhanced_knowledge_integrator.index
-        else:
-            # Fallback: create new integrator
-            integrator = EnhancedKnowledgeIntegrator(
-                openai_api_key=os.getenv("OPENAI_API_KEY"),
-                pinecone_api_key=os.getenv("PINECONE_API_KEY"),
-                pinecone_index=index_name
-            )
-            index = integrator.index
+        # if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
+        #     index = enhanced_knowledge_integrator.index
+        # else:
+        #     # Fallback: create new integrator
+        #     integrator = EnhancedKnowledgeIntegrator(
+        #         openai_api_key=os.getenv("OPENAI_API_KEY"),
+        #         pinecone_api_key=os.getenv("PINECONE_API_KEY"),
+        #         pinecone_index=index_name
+        #     )
+        #     index = integrator.index
         
         # Delete vectors by metadata filter
         try:

@@ -128,9 +128,9 @@ app.add_middleware(
 )
 
 # Video Processing Endpoints
-@app.post("/process-video/{company_name}")
-async def process_video_endpoint(company_name: str, request: Request):
-    """Process a video for a specific company"""
+@app.post("/process-video/{company_name}/{qudemo_id}")
+async def process_video_endpoint(company_name: str, qudemo_id: str, request: Request):
+    """Process a video for a specific qudemo within a company"""
     try:
         # Parse request body
         body = await request.json()
@@ -142,7 +142,7 @@ async def process_video_endpoint(company_name: str, request: Request):
         if not video_url:
             raise HTTPException(status_code=400, detail="video_url is required")
         
-        logger.info(f"🎬 Processing video for {company_name}: {video_url}")
+        logger.info(f"🎬 Processing video for {company_name} qudemo {qudemo_id}: {video_url}")
         
         # Process the video with extended timeout for Loom videos
         is_loom_video = 'loom.com' in video_url
@@ -156,6 +156,7 @@ async def process_video_endpoint(company_name: str, request: Request):
                     process_video,
                     video_url=video_url,
                     company_name=company_name,
+                    qudemo_id=qudemo_id,
                     bucket_name=bucket_name,
                     source=source,
                     meeting_link=meeting_link
@@ -164,7 +165,7 @@ async def process_video_endpoint(company_name: str, request: Request):
             )
         except asyncio.TimeoutError:
             timeout_minutes = int(timeout_seconds / 60)
-            logger.error(f"❌ Video processing timeout for {company_name}: {video_url} after {timeout_minutes} minutes")
+            logger.error(f"❌ Video processing timeout for {company_name} qudemo {qudemo_id}: {video_url} after {timeout_minutes} minutes")
             raise HTTPException(
                 status_code=408, 
                 detail=f"Video processing timed out after {timeout_minutes} minutes. Loom videos take longer to process. Please try again."
@@ -182,9 +183,9 @@ async def process_video_endpoint(company_name: str, request: Request):
         logger.error(f"❌ Video processing endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/process-videos-batch/{company_name}")
-async def process_videos_batch_endpoint(company_name: str, request: Request):
-    """Process multiple videos for a specific company sequentially"""
+@app.post("/process-videos-batch/{company_name}/{qudemo_id}")
+async def process_videos_batch_endpoint(company_name: str, qudemo_id: str, request: Request):
+    """Process multiple videos for a specific qudemo sequentially"""
     try:
         # Parse request body
         body = await request.json()
@@ -198,12 +199,13 @@ async def process_videos_batch_endpoint(company_name: str, request: Request):
         if len(video_urls) > 10:  # Limit batch size
             raise HTTPException(status_code=400, detail="Maximum 10 videos per batch")
         
-        logger.info(f"🎬 Starting batch processing for {company_name}: {len(video_urls)} videos")
+        logger.info(f"🎬 Starting batch processing for {company_name} qudemo {qudemo_id}: {len(video_urls)} videos")
         
         # Initialize batch results
         batch_results = {
             "success": True,
             "company_name": company_name,
+            "qudemo_id": qudemo_id,
             "total_videos": len(video_urls),
             "processed_videos": 0,
             "failed_videos": 0,
@@ -232,10 +234,10 @@ async def process_videos_batch_endpoint(company_name: str, request: Request):
                         process_video,
                         video_url=video_url,
                         company_name=company_name,
+                        qudemo_id=qudemo_id,
                         bucket_name=None,
                         source=source,
-                        meeting_link=meeting_link,
-                        qudemo_id=body.get('qudemo_id')  # Pass qudemo_id if provided
+                        meeting_link=meeting_link
                     ),
                     timeout=timeout_seconds
                 )
@@ -293,7 +295,7 @@ async def process_videos_batch_endpoint(company_name: str, request: Request):
         batch_results["success"] = batch_results["failed_videos"] == 0
         
         # Log batch completion
-        logger.info(f"🎬 Batch processing completed for {company_name}:")
+        logger.info(f"🎬 Batch processing completed for {company_name} qudemo {qudemo_id}:")
         logger.info(f"   ✅ Processed: {batch_results['processed_videos']}/{batch_results['total_videos']}")
         logger.info(f"   ❌ Failed: {batch_results['failed_videos']}/{batch_results['total_videos']}")
         logger.info(f"   ⏱️ Total duration: {total_duration/60:.1f} minutes")
@@ -307,68 +309,10 @@ async def process_videos_batch_endpoint(company_name: str, request: Request):
         logger.error(f"❌ Batch processing endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/process-video-qudemo/{company_name}")
-async def process_video_qudemo_endpoint(company_name: str, request: Request):
-    """Process a video for a specific qudemo with qudemo_id"""
-    try:
-        body = await request.json()
-        video_url = body.get("video_url")
-        qudemo_id = body.get("qudemo_id")
-        source = body.get("source", "qudemo")
-        meeting_link = body.get("meeting_link")
-        
-        if not video_url:
-            raise HTTPException(status_code=400, detail="video_url is required")
-        
-        if not qudemo_id:
-            raise HTTPException(status_code=400, detail="qudemo_id is required")
-        
-        logger.info(f"🎬 Processing video for qudemo: {video_url}")
-        logger.info(f"🏢 Company: {company_name}")
-        logger.info(f"🎯 Qudemo ID: {qudemo_id}")
-        
-        # Check if it's a Loom video for timeout
-        is_loom_video = 'loom.com' in video_url
-        timeout_seconds = 810.0 if is_loom_video else 270.0  # 13.5 minutes for Loom, 4.5 minutes for others
-        
-        logger.info(f"⏱️ Using timeout: {timeout_seconds/60:.1f} minutes for {'Loom' if is_loom_video else 'other'} video")
-        
-        # Process the video with qudemo_id
-        result = await asyncio.wait_for(
-            asyncio.to_thread(
-                process_video,
-                video_url=video_url,
-                company_name=company_name,
-                bucket_name=None,
-                source=source,
-                meeting_link=meeting_link,
-                qudemo_id=qudemo_id
-            ),
-            timeout=timeout_seconds
-        )
-        
-        if result["success"]:
-            return result
-        else:
-            raise HTTPException(status_code=500, detail=result.get("error", "Video processing failed"))
-            
-    except asyncio.TimeoutError:
-        timeout_minutes = int(timeout_seconds / 60)
-        logger.error(f"❌ Video processing timeout for {company_name}: {video_url} after {timeout_minutes} minutes")
-        raise HTTPException(
-            status_code=408, 
-            detail=f"Video processing timed out after {timeout_minutes} minutes. Loom videos take longer to process. Please try again."
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Video processing error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 # Q&A Endpoints
-@app.post("/ask-question")
-async def ask_question_endpoint(request: Request):
-    """Ask a question with company name in request body"""
+@app.post("/ask-question/{qudemo_id}")
+async def ask_question_endpoint(qudemo_id: str, request: Request):
+    """Ask a question for a specific qudemo"""
     try:
         body = await request.json()
         company_name = body.get("company_name")
@@ -377,9 +321,9 @@ async def ask_question_endpoint(request: Request):
         if not company_name or not question:
             raise HTTPException(status_code=400, detail="company_name and question are required")
         
-        logger.info(f"❓ Question for {company_name}: {question}")
+        logger.info(f"❓ Question for {company_name} qudemo {qudemo_id}: {question}")
         
-        result = enhanced_qa_system.ask_question(question, company_name)
+        result = enhanced_qa_system.ask_question(question, company_name, qudemo_id)
         
         if 'error' in result:
             raise HTTPException(status_code=500, detail=result['error'])
@@ -399,9 +343,9 @@ async def ask_question_endpoint(request: Request):
         logger.error(f"❌ Question endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/ask/{company_name}")
-async def ask_question_company_endpoint(company_name: str, request: Request):
-    """Ask a question for a specific company"""
+@app.post("/ask/{company_name}/{qudemo_id}")
+async def ask_question_company_endpoint(company_name: str, qudemo_id: str, request: Request):
+    """Ask a question for a specific qudemo in a company"""
     try:
         body = await request.json()
         question = body.get("question")
@@ -409,10 +353,10 @@ async def ask_question_company_endpoint(company_name: str, request: Request):
         if not question:
             raise HTTPException(status_code=400, detail="question is required")
         
-        logger.info(f"❓ Question for {company_name}: {question}")
+        logger.info(f"❓ Question for {company_name} qudemo {qudemo_id}: {question}")
         
         # Call the async ask_question method
-        result = await enhanced_qa_system.ask_question(question, company_name)
+        result = await enhanced_qa_system.ask_question(question, company_name, qudemo_id)
         
         if not result.get('success'):
             raise HTTPException(status_code=500, detail=result.get('message', 'Failed to process question'))
@@ -433,44 +377,9 @@ async def ask_question_company_endpoint(company_name: str, request: Request):
         logger.error(f"❌ Company question endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/ask-qudemo/{qudemo_id}")
-async def ask_qudemo_question_endpoint(qudemo_id: str, request: Request):
-    """Ask a question for a specific qudemo (new multi-qudemo architecture)"""
-    try:
-        body = await request.json()
-        question = body.get("question")
-        
-        if not question:
-            raise HTTPException(status_code=400, detail="question is required")
-        
-        logger.info(f"❓ Question for qudemo {qudemo_id}: {question}")
-        
-        # Call the async ask_qudemo_question method
-        result = await enhanced_qa_system.ask_qudemo_question(question, qudemo_id)
-        
-        if not result.get('success'):
-            raise HTTPException(status_code=500, detail=result.get('message', 'Failed to process question'))
-        
-        return {
-            'success': True,
-            'answer': result['answer'],
-            'sources': result['sources'],
-            'video_url': result.get('video_url'),
-            'start': result.get('start'),
-            'end': result.get('end'),
-            'video_title': result.get('video_title'),
-            'qudemo_id': qudemo_id
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Qudemo question endpoint error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/generate-summary")
-async def generate_summary_endpoint(request: Request):
-    """Generate a summary from questions and answers"""
+@app.post("/generate-summary/{qudemo_id}")
+async def generate_summary_endpoint(qudemo_id: str, request: Request):
+    """Generate a summary from questions and answers for a specific qudemo"""
     try:
         body = await request.json()
         questions_and_answers = body.get("questions_and_answers", [])
@@ -480,9 +389,9 @@ async def generate_summary_endpoint(request: Request):
         if not questions_and_answers or not company_name:
             raise HTTPException(status_code=400, detail="questions_and_answers and company_name are required")
         
-        logger.info(f"📝 Generating summary for {company_name}")
+        logger.info(f"📝 Generating summary for {company_name} qudemo {qudemo_id}")
         
-        result = enhanced_qa_system.get_knowledge_summary(company_name)
+        result = enhanced_qa_system.get_knowledge_summary(company_name, qudemo_id)
         
         if result['success']:
             return result
@@ -496,9 +405,9 @@ async def generate_summary_endpoint(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 # Knowledge Processing Endpoints
-@app.post("/process-website/{company_name}")
-async def process_website_endpoint(company_name: str, request: Request):
-    """Process website knowledge for a company - comprehensive website crawling"""
+@app.post("/process-website/{company_name}/{qudemo_id}")
+async def process_website_endpoint(company_name: str, qudemo_id: str, request: Request):
+    """Process website knowledge for a specific qudemo - comprehensive website crawling"""
     global enhanced_qa_system
     
     try:
@@ -516,7 +425,7 @@ async def process_website_endpoint(company_name: str, request: Request):
         if not website_url:
             raise HTTPException(status_code=400, detail="Website URL is required")
         
-        logger.info(f"🌐 Processing website for {company_name}: {website_url}")
+        logger.info(f"🌐 Processing website for {company_name} qudemo {qudemo_id}: {website_url}")
         logger.info(f"📊 COMPREHENSIVE MODE: Up to 50 collections × 100 articles per collection")
         logger.info(f"🌐 DOMAIN RESTRICTION: Will only crawl within the same domain")
         logger.info(f"⏱️ EXTENDED TIMEOUT: 300 minutes (5 hours) for very large website crawling")
@@ -524,11 +433,11 @@ async def process_website_endpoint(company_name: str, request: Request):
         # Process website knowledge with extended timeout for comprehensive scraping
         try:
             result = await asyncio.wait_for(
-                enhanced_qa_system.process_website_knowledge(website_url, company_name),
+                enhanced_qa_system.process_website_knowledge(website_url, company_name, qudemo_id),
                 timeout=18000.0  # 300 minutes (5 hours) timeout for very large websites
             )
         except asyncio.TimeoutError:
-            logger.error(f"❌ Website processing timeout for {company_name}: {website_url}")
+            logger.error(f"❌ Website processing timeout for {company_name} qudemo {qudemo_id}: {website_url}")
             raise HTTPException(status_code=408, detail="Website processing timed out after 5 hours. This is normal for very large websites. Consider processing in smaller batches or using background job processing.")
         
         if result.get('success'):
@@ -551,6 +460,7 @@ async def process_website_endpoint(company_name: str, request: Request):
                     }
                 },
                 "company_name": company_name,
+                "qudemo_id": qudemo_id,
                 "website_url": website_url
             }
         else:
@@ -563,13 +473,9 @@ async def process_website_endpoint(company_name: str, request: Request):
         logger.error(f"❌ Website processing error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Removed document processing endpoint - using clean system instead
-
-# Removed old enhanced website processing endpoint - using clean scraper instead
-
-@app.get("/knowledge/sources/{company_name}")
-async def get_knowledge_sources_endpoint(company_name: str):
-    """Get all knowledge sources for a company"""
+@app.get("/knowledge/sources/{company_name}/{qudemo_id}")
+async def get_knowledge_sources_endpoint(company_name: str, qudemo_id: str):
+    """Get all knowledge sources for a specific qudemo"""
     global enhanced_qa_system
     
     try:
@@ -579,10 +485,10 @@ async def get_knowledge_sources_endpoint(company_name: str):
                 detail="Knowledge retrieval not available. Please set OPENAI_API_KEY environment variable to enable this feature."
             )
         
-        logger.info(f"📄 Getting knowledge sources for company: {company_name}")
+        logger.info(f"📄 Getting knowledge sources for company: {company_name} qudemo: {qudemo_id}")
         
         # Get knowledge summary which includes all sources
-        summary_data = enhanced_qa_system.get_knowledge_summary(company_name)
+        summary_data = enhanced_qa_system.get_knowledge_summary(company_name, qudemo_id)
         
         if summary_data and summary_data.get("success"):
             return summary_data
@@ -593,9 +499,9 @@ async def get_knowledge_sources_endpoint(company_name: str):
         logger.error(f"❌ Knowledge sources endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/knowledge/source/{source_id}/content")
-async def get_knowledge_source_content_endpoint(source_id: str, company_name: str = Query(None)):
-    """Get knowledge source content from Pinecone for preview"""
+@app.get("/knowledge/source/{source_id}/content/{qudemo_id}")
+async def get_knowledge_source_content_endpoint(source_id: str, qudemo_id: str, company_name: str = Query(None)):
+    """Get knowledge source content from Pinecone for preview for a specific qudemo"""
     global enhanced_qa_system
     
     try:
@@ -605,10 +511,10 @@ async def get_knowledge_source_content_endpoint(source_id: str, company_name: st
                 detail="Knowledge retrieval not available. Please set OPENAI_API_KEY environment variable to enable this feature."
             )
         
-        logger.info(f"📄 Getting knowledge source content: {source_id} (company: {company_name})")
+        logger.info(f"📄 Getting knowledge source content: {source_id} (company: {company_name}, qudemo: {qudemo_id})")
         
-        # Get content from Pinecone using the source ID and company name
-        content_data = enhanced_qa_system.get_source_content(source_id, company_name)
+        # Get content from Pinecone using the source ID, company name, and qudemo ID
+        content_data = enhanced_qa_system.get_source_content(source_id, company_name, qudemo_id)
         
         if content_data and content_data.get("success"):
             return content_data
@@ -619,9 +525,9 @@ async def get_knowledge_source_content_endpoint(source_id: str, company_name: st
         logger.error(f"❌ Knowledge source content endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/ask-enhanced/{company_name}")
-async def ask_enhanced_question_endpoint(company_name: str, request: Request):
-    """Ask a question using enhanced Q&A with all knowledge sources"""
+@app.post("/ask-enhanced/{company_name}/{qudemo_id}")
+async def ask_enhanced_question_endpoint(company_name: str, qudemo_id: str, request: Request):
+    """Ask a question using enhanced Q&A with all knowledge sources for a specific qudemo"""
     global enhanced_qa_system
     
     try:
@@ -635,10 +541,10 @@ async def ask_enhanced_question_endpoint(company_name: str, request: Request):
         if not question:
             raise HTTPException(status_code=400, detail="question is required")
         
-        logger.info(f"🤖 Enhanced Q&A for {company_name}: {question}")
+        logger.info(f"🤖 Enhanced Q&A for {company_name} qudemo {qudemo_id}: {question}")
         
         # Get enhanced answer
-        result = enhanced_qa_system.ask_question(question, company_name)
+        result = enhanced_qa_system.ask_question(question, company_name, qudemo_id)
         
         return {
             "success": True,
@@ -655,121 +561,12 @@ async def ask_enhanced_question_endpoint(company_name: str, request: Request):
         logger.error(f"❌ Enhanced Q&A endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Removed old knowledge summary and scraping stats endpoints - using clean system instead
-
-# Health Check Endpoints
-@app.get("/status")
-async def status_check():
-    """Get system status"""
-    return get_system_status()
-
-@app.get("/memory-status")
-async def memory_status():
-    """Get current memory usage status"""
+# Data Management Endpoints
+@app.delete("/delete-qudemo-data/{company_name}/{qudemo_id}")
+async def delete_qudemo_data_endpoint(company_name: str, qudemo_id: str):
+    """Delete all data for a specific qudemo from Pinecone"""
     try:
-        import psutil
-        import gc
-        
-        # Get process info
-        process = psutil.Process()
-        memory_info = process.memory_info()
-        memory_mb = memory_info.rss / 1024 / 1024
-        
-        # Get system memory
-        system_memory = psutil.virtual_memory()
-        
-        # Force garbage collection
-        gc.collect()
-        
-        # Get memory after GC
-        memory_after_gc = process.memory_info().rss / 1024 / 1024
-        
-        return {
-            "process_memory_mb": memory_mb,
-            "memory_after_gc_mb": memory_after_gc,
-            "memory_freed_mb": memory_mb - memory_after_gc,
-            "system_total_mb": system_memory.total / 1024 / 1024,
-            "system_available_mb": system_memory.available / 1024 / 1024,
-            "system_percent": system_memory.percent,
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.get("/force-cleanup")
-async def force_cleanup():
-    """Force cleanup of memory"""
-    try:
-        import gc
-        import psutil
-        process = psutil.Process()
-        
-        # Get memory before cleanup
-        memory_before = process.memory_info().rss / 1024 / 1024
-        
-        # Force garbage collection
-        gc.collect()
-        
-        # Get memory after cleanup
-        memory_after = process.memory_info().rss / 1024 / 1024
-        
-        return {
-            "memory_before_mb": memory_before,
-            "memory_after_mb": memory_after,
-            "memory_freed_mb": memory_before - memory_after,
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.post("/get-video-chunks")
-async def get_video_chunks_endpoint(request: Request):
-    """Get video transcript chunks from vector database"""
-    try:
-        body = await request.json()
-        video_id = body.get("video_id")
-        company_name = body.get("company_name")
-        video_url = body.get("video_url")
-        
-        if not video_id or not company_name:
-            raise HTTPException(status_code=400, detail="video_id and company_name are required")
-        
-        logger.info(f"🔍 Getting chunks for video: {video_id} (company: {company_name})")
-        
-        # Initialize Q&A system if not already done
-        success = await initialize_enhanced_qa()
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to initialize Q&A system")
-        
-        # Get chunks from vector database
-        chunks = await enhanced_qa_system.get_video_chunks(video_id, company_name, video_url)
-        
-        if chunks:
-            logger.info(f"✅ Found {len(chunks)} chunks for video: {video_id}")
-            return {
-                'success': True,
-                'chunks': chunks,
-                'count': len(chunks)
-            }
-        else:
-            logger.warning(f"⚠️ No chunks found for video: {video_id}")
-            return {
-                'success': True,
-                'chunks': [],
-                'count': 0
-            }
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Get video chunks error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.delete("/delete-company-data/{company_name}")
-async def delete_company_data_endpoint(company_name: str):
-    """Delete all company data from Pinecone"""
-    try:
-        logger.info(f"🗑️ Deleting all data for company: {company_name}")
+        logger.info(f"🗑️ Deleting all data for company: {company_name} qudemo: {qudemo_id}")
         
         # Initialize Q&A system if not already done
         import os
@@ -778,25 +575,25 @@ async def delete_company_data_endpoint(company_name: str):
         success = await initialize_enhanced_qa()
         
         # Get the initialized enhanced_knowledge_integrator after initialization
-        # from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
+        from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
         
         # Get index name
         index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
         
         # Get the index from enhanced_knowledge_integrator
-        # if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
-        #     index = enhanced_knowledge_integrator.index
-        # else:
-        #     # Fallback: create new integrator
-        #     integrator = EnhancedKnowledgeIntegrator(
-        #         openai_api_key=os.getenv("OPENAI_API_KEY"),
-        #         pinecone_api_key=os.getenv("PINECONE_API_KEY"),
-        #         pinecone_index=index_name
-        #     )
-        #     index = integrator.index
+        if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
+            index = enhanced_knowledge_integrator.index
+        else:
+            # Fallback: create new integrator
+            integrator = EnhancedKnowledgeIntegrator(
+                openai_api_key=os.getenv("OPENAI_API_KEY"),
+                pinecone_api_key=os.getenv("PINECONE_API_KEY"),
+                pinecone_index=index_name
+            )
+            index = integrator.index
         
-        # Create namespace from company name
-        namespace = company_name.lower().replace(' ', '-')
+        # Create namespace from company name and qudemo ID
+        namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
         logger.info(f"🗑️ Deleting namespace: {namespace} from index: {index_name}")
         
         # Get index stats to check if namespace exists
@@ -893,408 +690,14 @@ async def delete_company_data_endpoint(company_name: str):
             }
             
     except Exception as e:
-        logger.error(f"❌ Delete company data error: {e}")
+        logger.error(f"❌ Delete qudemo data error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.delete("/delete-knowledge-source/{company_name}")
-async def delete_knowledge_source_endpoint(company_name: str, request: Request):
-    """Delete specific knowledge source from Pinecone"""
+@app.delete("/delete-video-data/{company_name}/{qudemo_id}")
+async def delete_video_data_endpoint(company_name: str, qudemo_id: str, request: Request):
+    """Delete video data from Pinecone when processing fails for a specific qudemo"""
     try:
-        logger.info(f"🗑️ Deleting knowledge source for company: {company_name}")
-        
-        body = await request.json()
-        source_id = body.get("source_id")
-        source_type = body.get("source_type")
-        source_url = body.get("source_url")
-        title = body.get("title")
-        
-        if not source_id:
-            raise HTTPException(status_code=400, detail="source_id is required")
-        
-        # Initialize Q&A system if not already done
-        import os
-        
-        # Initialize if not already done
-        success = await initialize_enhanced_qa()
-        
-        # Get the initialized enhanced_knowledge_integrator after initialization
-        # from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
-        
-        # Get index name
-        index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
-        
-        # Get the index from enhanced_knowledge_integrator
-        # if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
-        #     index = enhanced_knowledge_integrator.index
-        # else:
-        #     # Fallback: create new integrator
-        #     integrator = EnhancedKnowledgeIntegrator(
-        #         openai_api_key=os.getenv("OPENAI_API_KEY"),
-        #         pinecone_api_key=os.getenv("PINECONE_API_KEY"),
-        #         pinecone_index=index_name
-        #     )
-        #     index = integrator.index
-        
-        # Create namespace from company name
-        namespace = company_name.lower().replace(' ', '-')
-        logger.info(f"🗑️ Deleting knowledge source from namespace: {namespace}")
-        
-        # Query for vectors that match the source criteria
-        dummy_embedding = [0.0] * 1536  # OpenAI embedding dimension
-        
-        try:
-            # Get all vectors in the namespace
-            query_response = index.query(
-                vector=dummy_embedding,
-                top_k=10000,  # Get all vectors (max limit)
-                include_metadata=True,
-                namespace=namespace
-            )
-            
-            if not query_response.matches:
-                logger.info(f"✅ No vectors found in namespace '{namespace}'")
-                return {
-                    "success": True,
-                    "message": "No data found in namespace",
-                    "deleted_count": 0,
-                    "namespace": namespace
-                }
-            
-            # Filter vectors that match the source criteria
-            vectors_to_delete = []
-            for match in query_response.matches:
-                metadata = match.metadata or {}
-                
-                # Check if this vector belongs to the source we want to delete
-                # Match by source_id, source_url, or title
-                if (metadata.get("source_id") == source_id or
-                    metadata.get("source_url") == source_url or
-                    metadata.get("title") == title or
-                    metadata.get("source_type") == source_type):
-                    vectors_to_delete.append(match.id)
-            
-            if not vectors_to_delete:
-                logger.info(f"✅ No vectors found matching source criteria")
-                return {
-                    "success": True,
-                    "message": "No matching vectors found",
-                    "deleted_count": 0,
-                    "namespace": namespace,
-                    "source_id": source_id
-                }
-            
-            logger.info(f"🗑️ Found {len(vectors_to_delete)} vectors to delete for source: {source_id}")
-            
-            # Delete vectors by ID
-            if vectors_to_delete:
-                # Delete in batches of 1000 (Pinecone limit)
-                batch_size = 1000
-                total_deleted = 0
-                
-                for i in range(0, len(vectors_to_delete), batch_size):
-                    batch = vectors_to_delete[i:i + batch_size]
-                    logger.info(f"🗑️ Deleting batch {i//batch_size + 1}: {len(batch)} vectors")
-                    
-                    try:
-                        index.delete(ids=batch, namespace=namespace)
-                        total_deleted += len(batch)
-                        logger.info(f"✅ Deleted batch {i//batch_size + 1}: {len(batch)} vectors")
-                    except Exception as batch_error:
-                        logger.error(f"❌ Failed to delete batch {i//batch_size + 1}: {batch_error}")
-                        # Continue with other batches
-                
-                logger.info(f"🎉 Successfully deleted {total_deleted} vectors for source: {source_id}")
-                
-                return {
-                    "success": True,
-                    "message": f"Successfully deleted {total_deleted} vectors",
-                    "deleted_count": total_deleted,
-                    "namespace": namespace,
-                    "source_id": source_id,
-                    "index": index_name
-                }
-            else:
-                return {
-                    "success": True,
-                    "message": "No vectors found to delete",
-                    "deleted_count": 0,
-                    "namespace": namespace,
-                    "source_id": source_id
-                }
-                
-        except Exception as query_error:
-            logger.error(f"❌ Error querying namespace '{namespace}': {query_error}")
-            return {
-                "success": False,
-                "error": f"Failed to query namespace: {str(query_error)}",
-                "namespace": namespace
-            }
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Delete knowledge source error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Comprehensive Support Bot Endpoints
-@app.post("/scrape-company-support/{company_name}")
-async def scrape_company_support_endpoint(company_name: str, request: Request):
-    """Scrape comprehensive support data from company websites"""
-    try:
-        # Note: EnhancedKnowledgeIntegrator is no longer available - knowledge integration is handled by Node.js backend
-        # if not enhanced_knowledge_integrator:
-        #     raise HTTPException(status_code=503, detail="Support bot system not initialized")
-        
-        body = await request.json()
-        website_urls = body.get("website_urls", [])
-        max_pages_per_url = body.get("max_pages_per_url", 10)
-        
-        if not website_urls:
-            raise HTTPException(status_code=400, detail="website_urls is required")
-        
-        logger.info(f"🕷️ Starting comprehensive support scraping for {company_name}")
-        
-        # Scrape support data
-        # support_data = enhanced_knowledge_integrator.scrape_company_support_data(
-        #     company_name, website_urls, max_pages_per_url
-        # )
-        
-        # Get summary
-        # summary = enhanced_knowledge_integrator.get_knowledge_summary(company_name)
-        
-        return {
-            "success": True,
-            "company_name": company_name,
-            "support_data_count": 0, # No longer available
-            "summary": {}, # No longer available
-            "message": "Support data scraping is currently unavailable."
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Support scraping error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/integrate-video-transcripts/{company_name}")
-async def integrate_video_transcripts_endpoint(company_name: str, request: Request):
-    """Integrate video transcripts with support data"""
-    try:
-        # Note: EnhancedKnowledgeIntegrator is no longer available - knowledge integration is handled by Node.js backend
-        # if not enhanced_knowledge_integrator:
-        #     raise HTTPException(status_code=503, detail="Support bot system not initialized")
-        
-        body = await request.json()
-        video_transcripts = body.get("video_transcripts", [])
-        
-        if not video_transcripts:
-            raise HTTPException(status_code=400, detail="video_transcripts is required")
-        
-        logger.info(f"🎬 Integrating video transcripts for {company_name}")
-        
-        # Integrate video transcripts
-        # integrated_data = enhanced_knowledge_integrator.integrate_video_transcripts(
-        #     company_name, video_transcripts
-        # )
-        
-        return {
-            "success": True,
-            "company_name": company_name,
-            "integrated_data_count": 0, # No longer available
-            "message": "Video integration is currently unavailable."
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Video integration error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/enhance-support-data/{company_name}")
-async def enhance_support_data_endpoint(company_name: str):
-    """Enhance support data with AI-generated content"""
-    try:
-        # Note: EnhancedKnowledgeIntegrator is no longer available - knowledge integration is handled by Node.js backend
-        # if not enhanced_knowledge_integrator:
-        #     raise HTTPException(status_code=503, detail="Support bot system not initialized")
-        
-        logger.info(f"🤖 Enhancing support data for {company_name}")
-        
-        # Enhance support data
-        # enhanced_data = enhanced_knowledge_integrator.enhance_support_data_with_ai(company_name)
-        
-        return {
-            "success": True,
-            "company_name": company_name,
-            "enhanced_data_count": 0, # No longer available
-            "message": "Support data enhancement is currently unavailable."
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Support data enhancement error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/process-raw-content/{company_name}")
-async def process_raw_content_endpoint(company_name: str, request: Request):
-    """Process raw HTML content and extract complete content chunks without Q&A generation"""
-    try:
-        # Note: EnhancedKnowledgeIntegrator is no longer available - knowledge integration is handled by Node.js backend
-        # if not enhanced_knowledge_integrator:
-        #     raise HTTPException(status_code=503, detail="Support bot system not initialized")
-        
-        body = await request.json()
-        html_content = body.get("html_content", "")
-        url = body.get("url", "")
-        
-        if not html_content:
-            raise HTTPException(status_code=400, detail="html_content is required")
-        
-        if not url:
-            raise HTTPException(status_code=400, detail="url is required")
-        
-        logger.info(f"🔍 Processing raw content for {company_name} from: {url}")
-        
-        # Use enhanced knowledge integrator to process raw content
-        # content_chunks = enhanced_knowledge_integrator.process_raw_content(
-        #     company_name, html_content, url
-        # )
-        
-        # Get summary
-        # summary = enhanced_knowledge_integrator.get_knowledge_summary(company_name)
-        
-        return {
-            "success": True,
-            "company_name": company_name,
-            "content_chunks_count": 0, # No longer available
-            "summary": {}, # No longer available
-            "message": "Raw content processing is currently unavailable."
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Process raw content error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/create-vector-embeddings/{company_name}")
-async def create_vector_embeddings_endpoint(company_name: str):
-    """Create vector embeddings for company knowledge"""
-    try:
-        # Note: EnhancedKnowledgeIntegrator is no longer available - knowledge integration is handled by Node.js backend
-        # if not enhanced_knowledge_integrator:
-        #     raise HTTPException(status_code=503, detail="Support bot system not initialized")
-        
-        logger.info(f"🔢 Creating vector embeddings for {company_name}")
-        
-        # Create vector embeddings
-        # embeddings = enhanced_knowledge_integrator.create_vector_embeddings(company_name)
-        
-        return {
-            "success": True,
-            "company_name": company_name,
-            "embeddings_count": 0, # No longer available
-            "message": "Vector embedding is currently unavailable."
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Vector embedding error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/ask-support-question")
-async def ask_support_question_endpoint(request: Request):
-    """Ask a support question using comprehensive knowledge base"""
-    try:
-        # Note: EnhancedKnowledgeIntegrator is no longer available - knowledge integration is handled by Node.js backend
-        # if not enhanced_knowledge_integrator:
-        #     raise HTTPException(status_code=503, detail="Support bot system not initialized")
-        
-        body = await request.json()
-        company_name = body.get("company_name")
-        question = body.get("question")
-        
-        if not company_name or not question:
-            raise HTTPException(status_code=400, detail="company_name and question are required")
-        
-        logger.info(f"🤖 Support question for {company_name}: {question}")
-        
-        # Generate support response
-        # response = enhanced_knowledge_integrator.generate_support_response(company_name, question)
-        
-        return {
-            "success": True,
-            "company_name": company_name,
-            "question": question,
-            "response": "Support question processing is currently unavailable."
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Support question error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/support-knowledge-summary/{company_name}")
-async def get_support_knowledge_summary_endpoint(company_name: str):
-    """Get comprehensive summary of company support knowledge"""
-    try:
-        # Note: EnhancedKnowledgeIntegrator is no longer available - knowledge integration is handled by Node.js backend
-        # if not enhanced_knowledge_integrator:
-        #     raise HTTPException(status_code=503, detail="Support bot system not initialized")
-        
-        # summary = enhanced_knowledge_integrator.get_knowledge_summary(company_name)
-        
-        return {
-            "success": True,
-            "company_name": company_name,
-            "summary": "Knowledge summary is currently unavailable."
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Knowledge summary error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/export-company-knowledge/{company_name}")
-async def export_company_knowledge_endpoint(company_name: str):
-    """Export company knowledge to JSON file"""
-    try:
-        # Note: EnhancedKnowledgeIntegrator is no longer available - knowledge integration is handled by Node.js backend
-        # if not enhanced_knowledge_integrator:
-        #     raise HTTPException(status_code=503, detail="Support bot system not initialized")
-        
-        filename = f"company_knowledge_{company_name}_{int(datetime.now().timestamp())}.json"
-        # enhanced_knowledge_integrator.export_company_knowledge(company_name, filename)
-        
-        return {
-            "success": True,
-            "company_name": company_name,
-            "filename": filename,
-            "message": f"Successfully exported company knowledge to {filename}"
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Knowledge export error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Startup and shutdown events are now handled by the lifespan event handler above
-
-# Main entry point
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5001))
-    uvicorn.run(app, host="0.0.0.0", port=port)
-
-@app.delete("/delete-video-data/{company_name}")
-async def delete_video_data_endpoint(company_name: str, request: Request):
-    """Delete video data from Pinecone when processing fails"""
-    try:
-        logger.info(f"🗑️ Deleting video data from Pinecone for company: {company_name}")
+        logger.info(f"🗑️ Deleting video data from Pinecone for company: {company_name} qudemo: {qudemo_id}")
         
         body = await request.json()
         video_id = body.get("video_id")
@@ -1310,41 +713,45 @@ async def delete_video_data_endpoint(company_name: str, request: Request):
         success = await initialize_enhanced_qa()
         
         # Get the initialized enhanced_knowledge_integrator after initialization
-        # from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
+        from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
         
         # Get index name
         index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
         
         # Get the index from enhanced_knowledge_integrator
-        # if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
-        #     index = enhanced_knowledge_integrator.index
-        # else:
-        #     # Fallback: create new integrator
-        #     integrator = EnhancedKnowledgeIntegrator(
-        #         openai_api_key=os.getenv("OPENAI_API_KEY"),
-        #         pinecone_api_key=os.getenv("PINECONE_API_KEY"),
-        #         pinecone_index=index_name
-        #     )
-        #     index = integrator.index
+        if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
+            index = enhanced_knowledge_integrator.index
+        else:
+            # Fallback: create new integrator
+            integrator = EnhancedKnowledgeIntegrator(
+                openai_api_key=os.getenv("OPENAI_API_KEY"),
+                pinecone_api_key=os.getenv("PINECONE_API_KEY"),
+                pinecone_index=index_name
+            )
+            index = integrator.index
+        
+        # Create namespace from company name and qudemo ID
+        namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
         
         # Delete vectors by metadata filter
         try:
             # Delete by video_id if provided
             if video_id:
-                index.delete(filter={"video_id": video_id})
+                index.delete(filter={"video_id": video_id}, namespace=namespace)
                 logger.info(f"✅ Deleted vectors with video_id: {video_id}")
             
             # Delete by video_url if provided
             if video_url:
-                index.delete(filter={"video_url": video_url})
+                index.delete(filter={"video_url": video_url}, namespace=namespace)
                 logger.info(f"✅ Deleted vectors with video_url: {video_url}")
             
-            # Also delete by company_name and source type
+            # Also delete by company_name, qudemo_id and source type
             index.delete(filter={
                 "company_name": company_name,
+                "qudemo_id": qudemo_id,
                 "source": "video"
-            })
-            logger.info(f"✅ Deleted video vectors for company: {company_name}")
+            }, namespace=namespace)
+            logger.info(f"✅ Deleted video vectors for company: {company_name} qudemo: {qudemo_id}")
             
             return {
                 "success": True,
@@ -1364,11 +771,11 @@ async def delete_video_data_endpoint(company_name: str, request: Request):
         logger.error(f"❌ Delete video data error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.delete("/delete-website-data/{company_name}")
-async def delete_website_data_endpoint(company_name: str, request: Request):
-    """Delete website data from Pinecone when processing fails"""
+@app.delete("/delete-website-data/{company_name}/{qudemo_id}")
+async def delete_website_data_endpoint(company_name: str, qudemo_id: str, request: Request):
+    """Delete website data from Pinecone when processing fails for a specific qudemo"""
     try:
-        logger.info(f"🗑️ Deleting website data from Pinecone for company: {company_name}")
+        logger.info(f"🗑️ Deleting website data from Pinecone for company: {company_name} qudemo: {qudemo_id}")
         
         body = await request.json()
         website_url = body.get("website_url")
@@ -1384,41 +791,45 @@ async def delete_website_data_endpoint(company_name: str, request: Request):
         success = await initialize_enhanced_qa()
         
         # Get the initialized enhanced_knowledge_integrator after initialization
-        # from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
+        from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
         
         # Get index name
         index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
         
         # Get the index from enhanced_knowledge_integrator
-        # if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
-        #     index = enhanced_knowledge_integrator.index
-        # else:
-        #     # Fallback: create new integrator
-        #     integrator = EnhancedKnowledgeIntegrator(
-        #         openai_api_key=os.getenv("OPENAI_API_KEY"),
-        #         pinecone_api_key=os.getenv("PINECONE_API_KEY"),
-        #         pinecone_index=index_name
-        #     )
-        #     index = integrator.index
+        if enhanced_knowledge_integrator and enhanced_knowledge_integrator.index:
+            index = enhanced_knowledge_integrator.index
+        else:
+            # Fallback: create new integrator
+            integrator = EnhancedKnowledgeIntegrator(
+                openai_api_key=os.getenv("OPENAI_API_KEY"),
+                pinecone_api_key=os.getenv("PINECONE_API_KEY"),
+                pinecone_index=index_name
+            )
+            index = integrator.index
+        
+        # Create namespace from company name and qudemo ID
+        namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
         
         # Delete vectors by metadata filter
         try:
             # Delete by website_url if provided
             if website_url:
-                index.delete(filter={"url": website_url})
+                index.delete(filter={"url": website_url}, namespace=namespace)
                 logger.info(f"✅ Deleted vectors with website_url: {website_url}")
             
             # Delete by knowledge_source_id if provided
             if knowledge_source_id:
-                index.delete(filter={"knowledge_source_id": knowledge_source_id})
+                index.delete(filter={"knowledge_source_id": knowledge_source_id}, namespace=namespace)
                 logger.info(f"✅ Deleted vectors with knowledge_source_id: {knowledge_source_id}")
             
-            # Also delete by company_name and source type
+            # Also delete by company_name, qudemo_id and source type
             index.delete(filter={
                 "company_name": company_name,
+                "qudemo_id": qudemo_id,
                 "source": "web_scraping"
-            })
-            logger.info(f"✅ Deleted website vectors for company: {company_name}")
+            }, namespace=namespace)
+            logger.info(f"✅ Deleted website vectors for company: {company_name} qudemo: {qudemo_id}")
             
             return {
                 "success": True,
@@ -1511,3 +922,73 @@ async def delete_document_data_endpoint(company_name: str, request: Request):
     except Exception as e:
         logger.error(f"❌ Delete document data error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# Health Check Endpoints
+@app.get("/status")
+async def status_check():
+    """Get system status"""
+    return get_system_status()
+
+@app.get("/memory-status")
+async def memory_status():
+    """Get current memory usage status"""
+    try:
+        import psutil
+        import gc
+        
+        # Get process info
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        memory_mb = memory_info.rss / 1024 / 1024
+        
+        # Get system memory
+        system_memory = psutil.virtual_memory()
+        
+        # Force garbage collection
+        gc.collect()
+        
+        # Get memory after GC
+        memory_after_gc = process.memory_info().rss / 1024 / 1024
+        
+        return {
+            "process_memory_mb": memory_mb,
+            "memory_after_gc_mb": memory_after_gc,
+            "memory_freed_mb": memory_mb - memory_after_gc,
+            "system_total_mb": system_memory.total / 1024 / 1024,
+            "system_available_mb": system_memory.available / 1024 / 1024,
+            "system_percent": system_memory.percent,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/force-cleanup")
+async def force_cleanup():
+    """Force memory cleanup"""
+    try:
+        import gc
+        import psutil
+        
+        # Get memory before cleanup
+        process = psutil.Process()
+        memory_before = process.memory_info().rss / 1024 / 1024
+        
+        # Force garbage collection
+        gc.collect()
+        
+        # Get memory after cleanup
+        memory_after = process.memory_info().rss / 1024 / 1024
+        
+        return {
+            "memory_before_mb": memory_before,
+            "memory_after_mb": memory_after,
+            "memory_freed_mb": memory_before - memory_after,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+# Main entry point
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 5001))
+    uvicorn.run(app, host="0.0.0.0", port=port)

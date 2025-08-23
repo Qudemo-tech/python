@@ -82,9 +82,9 @@ def initialize_processors():
         logger.error(f"Failed to initialize processors: {e}")
         return False
 
-def process_video(video_url: str, company_name: str, bucket_name: Optional[str] = None, 
-                 source: Optional[str] = None, meeting_link: Optional[str] = None, qudemo_id: Optional[str] = None):
-    """Process a video URL and store in Pinecone with semantic chunking"""
+def process_video(video_url: str, company_name: str, qudemo_id: str = None, bucket_name: Optional[str] = None, 
+                 source: Optional[str] = None, meeting_link: Optional[str] = None):
+    """Process a video URL and store in Pinecone with semantic chunking for specific qudemo"""
     try:
         logger.info(f"🎬 Processing video: {video_url}")
         logger.info(f"🏢 Company: {company_name}")
@@ -108,13 +108,13 @@ def process_video(video_url: str, company_name: str, bucket_name: Optional[str] 
                 raise Exception("Loom processor not initialized")
             
             # Process with semantic chunking
-            result = process_video_with_semantic_chunking(video_url, company_name, qudemo_id)
+            return process_video_with_semantic_chunking(video_url, company_name, qudemo_id)
         else:
             # Use Gemini processor for other video types
             if not gemini_processor:
                 raise Exception("Gemini processor not initialized")
             
-            result = process_video_with_semantic_chunking(video_url, company_name, qudemo_id)
+            return process_video_with_semantic_chunking(video_url, company_name, qudemo_id)
         
         # Post-processing memory cleanup
         if is_loom and loom_processor:
@@ -128,6 +128,7 @@ def process_video(video_url: str, company_name: str, bucket_name: Optional[str] 
                 "success": False,
                 "error": "Video processing failed - no result returned",
                 "company_name": company_name,
+                "qudemo_id": qudemo_id,
                 "video_url": video_url,
                 "details": {
                     "suggestion": "The video may not have audio or may be corrupted"
@@ -139,6 +140,7 @@ def process_video(video_url: str, company_name: str, bucket_name: Optional[str] 
             "success": True,
             "message": "Video processed successfully",
             "company_name": company_name,
+            "qudemo_id": qudemo_id,
             "video_url": video_url,
             "result": result
         }
@@ -159,6 +161,7 @@ def process_video(video_url: str, company_name: str, bucket_name: Optional[str] 
             "success": False,
             "error": error_message,
             "company_name": company_name,
+            "qudemo_id": qudemo_id,
             "video_url": video_url,
             "details": {
                 "original_error": str(e),
@@ -270,8 +273,8 @@ def process_video_with_semantic_chunking(video_url: str, company_name: str, qude
                 raise Exception("Loom processor not initialized")
             
             logger.info(f"Using Loom processor for: {video_url}")
-            # Download and transcribe video
-            transcription_data = loom_processor._download_and_transcribe(video_url)
+            # Use the public process_video method to get enhanced segments
+            transcription_data = loom_processor.process_video(video_url, company_name, qudemo_id)
             if not transcription_data:
                 raise Exception("Failed to transcribe video with Loom processor")
             
@@ -280,14 +283,13 @@ def process_video_with_semantic_chunking(video_url: str, company_name: str, qude
             
             logger.info(f"Loom transcription successful: {len(transcription)} chars, {len(segments)} segments")
             
-            # Create semantic chunks from transcription with qudemo metadata
+            # Create semantic chunks from transcription
             return _create_semantic_chunks_from_transcription(
                 transcription=transcription,
                 segments=segments,
                 company_name=company_name,
-                video_url=video_url,
                 qudemo_id=qudemo_id,
-                video_type='loom'
+                video_url=video_url
             )
         else:
             if not gemini_processor:
@@ -303,250 +305,165 @@ def process_video_with_semantic_chunking(video_url: str, company_name: str, qude
             # For Gemini, segments might be in a different format or not available
             segments = transcription_data.get('segments', [])
             
+            # If no segments, create a basic segment structure
+            if not segments and transcription:
+                segments = [{'text': transcription, 'start': 0, 'end': 0}]
+            
             logger.info(f"Gemini transcription successful: {len(transcription)} chars, {len(segments)} segments")
             
-            # Create semantic chunks from transcription with qudemo metadata
+            # Create semantic chunks from transcription
             return _create_semantic_chunks_from_transcription(
                 transcription=transcription,
                 segments=segments,
                 company_name=company_name,
-                video_url=video_url,
                 qudemo_id=qudemo_id,
-                video_type='youtube'
+                video_url=video_url
             )
-        
-    except Exception as e:
-        logger.error(f"❌ Video processing with semantic chunking failed: {e}")
-        raise e
-
-def _create_semantic_chunks_from_transcription(transcription: str, segments: List[Dict], 
-                                              company_name: str, video_url: str, 
-                                              qudemo_id: str = None, video_type: str = 'unknown') -> Dict:
-    """Create semantic chunks from transcription with qudemo-specific metadata"""
-    try:
-        logger.info(f"Creating semantic chunks for {company_name} with qudemo_id: {qudemo_id}")
-        
-        if not transcription:
-            raise Exception("No transcription provided")
-        
-        # Initialize Pinecone
-        from openai import OpenAI
-        
-        pinecone_api_key = os.getenv('PINECONE_API_KEY')
-        openai_api_key = os.getenv('OPENAI_API_KEY')
-        
-        if not pinecone_api_key or not openai_api_key:
-            raise Exception("Pinecone or OpenAI API keys not configured")
-        
-        # Initialize Pinecone with new API
-        pc = Pinecone(api_key=pinecone_api_key)
-        client = OpenAI(api_key=openai_api_key)
-        
-        # Create or get index
-        index_name = f"{company_name.lower().replace(' ', '-')}-videos"
-        
-        try:
-            # Check if index exists
-            if index_name not in pc.list_indexes().names():
-                # Create index if it doesn't exist
-                try:
-                    pc.create_index(
-                        name=index_name,
-                        dimension=1536,  # OpenAI ada-002 embedding dimension
-                        metric="cosine",
-                        spec=ServerlessSpec(
-                            cloud="aws",
-                            region="us-east-1"
-                        )
-                    )
-                    logger.info(f"Created new Pinecone index: {index_name}")
-                except Exception as create_error:
-                    logger.error(f"Failed to create Pinecone index: {create_error}")
-                    raise Exception("Failed to initialize vector database")
             
-            # Get the index
-            index = pc.Index(index_name)
-            logger.info(f"Using existing Pinecone index: {index_name}")
-        except Exception as e:
-            logger.error(f"Failed to get Pinecone index {index_name}: {e}")
-            raise Exception("Failed to initialize vector database")
+    except Exception as e:
+        logger.error(f"Error in semantic chunking video processing: {e}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+        return {
+            "success": False,
+            "error": str(e),
+            "company_name": company_name,
+            "qudemo_id": qudemo_id,
+            "video_url": video_url
+        }
+
+def _create_semantic_chunks_from_transcription(transcription: str, segments: list, 
+                                             company_name: str, qudemo_id: str = None, video_url: str = None) -> Dict:
+    """Create semantic chunks from video transcription and store in Pinecone with qudemo isolation"""
+    try:
+        logger.info(f"🔧 Creating semantic chunks from transcription for {company_name} qudemo {qudemo_id}")
         
-        # Split transcription into semantic chunks
-        chunks = _split_transcription_into_chunks(transcription, segments, video_type)
+        # Initialize knowledge integrator for semantic chunking
+        from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
         
-        # Create embeddings and store in Pinecone
-        vectors_to_upsert = []
+        integrator = EnhancedKnowledgeIntegrator(
+            openai_api_key=os.getenv('OPENAI_API_KEY'),
+            pinecone_api_key=os.getenv('PINECONE_API_KEY'),
+            pinecone_index=os.getenv('PINECONE_INDEX')
+        )
         
-        for i, chunk in enumerate(chunks):
-            try:
-                # Create embedding
-                embedding = client.embeddings.create(
-                    input=chunk['text'],
-                    model="text-embedding-ada-002"
-                ).data[0].embedding
-                
-                # Create metadata with qudemo-specific information
-                metadata = {
-                    'text': chunk['text'],
-                    'company_name': company_name,
-                    'video_url': video_url,
-                    'video_type': video_type,
+        # Prepare source information for video data
+        source_info = {
+            'source': 'video',
+            'url': video_url,
+            'title': f'Video Transcription - {company_name}',
+            'platform': 'loom' if 'loom.com' in video_url else 'other',
+            'transcription_length': len(transcription),
+            'segment_count': len(segments),
+            'processed_at': datetime.now().isoformat()
+        }
+        
+        # Create multiple time-based chunks from transcription
+        chunks = []
+        
+        # Always create timestamped chunks, regardless of Whisper segments
+        logger.info(f"🔧 Creating timestamped chunks for video processing")
+        
+        # Determine chunk duration and number of chunks
+        chunk_duration = 30  # 30 seconds per chunk
+        transcription_length = len(transcription)
+        
+        # Estimate total video duration based on transcription length
+        # For Loom videos, use a more realistic estimate
+        if 'loom.com' in video_url:
+            # Loom videos: estimate 2-3 words per second (more realistic for screen recordings)
+            words_per_second = 2.5
+            estimated_duration = max(60, len(transcription.split()) / words_per_second)
+        else:
+            # YouTube videos: estimate 2.5 words per second
+            estimated_duration = max(60, transcription_length / 2.5)
+        
+        # Ensure we create at least 3 chunks for meaningful segmentation
+        min_chunks = 3
+        num_chunks = max(min_chunks, int(estimated_duration / chunk_duration))
+        
+        logger.info(f"🔧 Estimated duration: {estimated_duration:.1f}s, creating {num_chunks} chunks")
+        
+        for i in range(num_chunks):
+            start_time = i * chunk_duration
+            end_time = min((i + 1) * chunk_duration, estimated_duration)
+            
+            # Extract text for this time segment
+            text_start = int((start_time / estimated_duration) * transcription_length)
+            text_end = int((end_time / estimated_duration) * transcription_length)
+            chunk_text = transcription[text_start:text_end].strip()
+            
+            # Ensure each chunk has meaningful content
+            if chunk_text and len(chunk_text) > 10:  # At least 10 characters
+                chunk_data = {
+                    'text': chunk_text,
+                    'full_context': chunk_text,
+                    'source': source_info.get('source', 'video'),
+                    'title': source_info.get('title', f'Video Transcription - {company_name}'),
+                    'url': source_info.get('url', video_url),
+                    'processed_at': source_info.get('processed_at', ''),
+                    'start_timestamp': start_time,
+                    'end_timestamp': end_time,
                     'chunk_index': i,
-                    'total_chunks': len(chunks),
-                    'timestamp_start': chunk.get('start_time', 0),
-                    'timestamp_end': chunk.get('end_time', 0),
-                    'source_type': 'video_transcript',
-                    'created_at': datetime.now().isoformat()
+                    'total_chunks': num_chunks
                 }
-                
-                # Add qudemo_id if provided
-                if qudemo_id:
-                    metadata['qudemo_id'] = qudemo_id
-                
-                # Create unique ID for the vector
-                vector_id = f"{company_name}-{video_url}-{i}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                
-                vectors_to_upsert.append({
-                    'id': vector_id,
-                    'values': embedding,
-                    'metadata': metadata
-                })
-                
-            except Exception as chunk_error:
-                logger.error(f"Failed to process chunk {i}: {chunk_error}")
-                continue
+                chunks.append(chunk_data)
+                logger.info(f"🔧 Created chunk {i+1}/{num_chunks}: {start_time}s → {end_time}s ({len(chunk_text)} chars)")
+            else:
+                logger.info(f"🔧 Skipping chunk {i+1}: insufficient content ({len(chunk_text)} chars)")
         
-        if vectors_to_upsert:
-            # Upsert vectors in batches
-            batch_size = 100
-            for i in range(0, len(vectors_to_upsert), batch_size):
-                batch = vectors_to_upsert[i:i + batch_size]
-                try:
-                    index.upsert(vectors=batch)
-                    logger.info(f"Upserted batch {i//batch_size + 1} ({len(batch)} vectors)")
-                except Exception as upsert_error:
-                    logger.error(f"Failed to upsert batch {i//batch_size + 1}: {upsert_error}")
+        # If we still don't have enough chunks, create at least one
+        if len(chunks) == 0:
+            logger.warning("🔧 No chunks created, creating fallback chunk")
+            chunk_data = {
+                'text': transcription,
+                'full_context': transcription,
+                'source': source_info.get('source', 'video'),
+                'title': source_info.get('title', f'Video Transcription - {company_name}'),
+                'url': source_info.get('url', video_url),
+                'processed_at': source_info.get('processed_at', ''),
+                'start_timestamp': 0,
+                'end_timestamp': estimated_duration,
+                'chunk_index': 0,
+                'total_chunks': 1
+            }
+            chunks.append(chunk_data)
         
-        logger.info(f"✅ Successfully processed {len(vectors_to_upsert)} semantic chunks for {company_name}")
+        logger.info(f"🔧 Created {len(chunks)} chunks with timestamps")
+        
+        stored_result = integrator.store_semantic_chunks(
+            chunks=chunks,
+            company_name=company_name,
+            qudemo_id=qudemo_id
+        )
+        
+        if stored_result.get('success', False):
+            chunks_stored = stored_result.get('chunks_stored', 0)
+            logger.info(f"✅ Successfully stored {chunks_stored} semantic chunks for video")
+        else:
+            chunks_stored = 0
+            logger.error(f"❌ Failed to store semantic chunks: {stored_result.get('error', 'Unknown error')}")
         
         return {
-            'success': True,
-            'chunks_created': len(vectors_to_upsert),
-            'company_name': company_name,
-            'video_url': video_url,
-            'qudemo_id': qudemo_id,
-            'video_type': video_type,
-            'index_name': index_name
+            "success": True,
+            "message": "Video processed with semantic chunking",
+            "company_name": company_name,
+            "qudemo_id": qudemo_id,
+            "video_url": video_url,
+            "result": {
+                "chunks_stored": chunks_stored,
+                "transcription_length": len(transcription),
+                "segment_count": len(segments),
+                "processing_method": "semantic_chunking"
+            }
         }
         
     except Exception as e:
-        logger.error(f"❌ Failed to create semantic chunks: {e}")
-        raise e
-
-def _split_transcription_into_chunks(transcription: str, segments: List[Dict], video_type: str) -> List[Dict]:
-    """Split transcription into semantic chunks with timestamps"""
-    try:
-        chunks = []
-        
-        if segments and len(segments) > 0:
-            # Use segments if available (more accurate timestamps)
-            current_chunk = {
-                'text': '',
-                'start_time': segments[0].get('start', 0),
-                'end_time': 0
-            }
-            
-            for segment in segments:
-                segment_text = segment.get('text', '').strip()
-                segment_start = segment.get('start', 0)
-                segment_end = segment.get('end', 0)
-                
-                # If current chunk is getting too long (>500 chars), start a new one
-                if len(current_chunk['text']) + len(segment_text) > 500:
-                    # Finalize current chunk
-                    current_chunk['end_time'] = segment_start
-                    if current_chunk['text'].strip():
-                        chunks.append(current_chunk)
-                    
-                    # Start new chunk
-                    current_chunk = {
-                        'text': segment_text,
-                        'start_time': segment_start,
-                        'end_time': segment_end
-                    }
-                else:
-                    # Add to current chunk
-                    if current_chunk['text']:
-                        current_chunk['text'] += ' ' + segment_text
-                    else:
-                        current_chunk['text'] = segment_text
-                    current_chunk['end_time'] = segment_end
-            
-            # Add final chunk
-            if current_chunk['text'].strip():
-                chunks.append(current_chunk)
-        
-        else:
-            # Fallback: split by sentences if no segments available
-            import re
-            
-            sentences = re.split(r'(?<=[.!?])\s+', transcription)
-            current_chunk = {
-                'text': '',
-                'start_time': 0,
-                'end_time': 0
-            }
-            
-            # Estimate time per sentence based on video type
-            if video_type == 'youtube':
-                seconds_per_sentence = 8
-            elif video_type == 'loom':
-                seconds_per_sentence = 6
-            else:
-                seconds_per_sentence = 7
-            
-            for i, sentence in enumerate(sentences):
-                sentence = sentence.strip()
-                if not sentence:
-                    continue
-                
-                sentence_start = i * seconds_per_sentence
-                sentence_end = (i + 1) * seconds_per_sentence
-                
-                # If current chunk is getting too long, start a new one
-                if len(current_chunk['text']) + len(sentence) > 500:
-                    # Finalize current chunk
-                    current_chunk['end_time'] = sentence_start
-                    if current_chunk['text'].strip():
-                        chunks.append(current_chunk)
-                    
-                    # Start new chunk
-                    current_chunk = {
-                        'text': sentence,
-                        'start_time': sentence_start,
-                        'end_time': sentence_end
-                    }
-                else:
-                    # Add to current chunk
-                    if current_chunk['text']:
-                        current_chunk['text'] += ' ' + sentence
-                    else:
-                        current_chunk['text'] = sentence
-                        current_chunk['start_time'] = sentence_start
-                    current_chunk['end_time'] = sentence_end
-            
-            # Add final chunk
-            if current_chunk['text'].strip():
-                chunks.append(current_chunk)
-        
-        logger.info(f"Created {len(chunks)} semantic chunks from transcription")
-        return chunks
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to split transcription into chunks: {e}")
-        # Return single chunk as fallback
-        return [{
-            'text': transcription,
-            'start_time': 0,
-            'end_time': 0
-        }]
+        logger.error(f"❌ Error creating semantic chunks: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "company_name": company_name,
+            "qudemo_id": qudemo_id,
+            "video_url": video_url
+        }

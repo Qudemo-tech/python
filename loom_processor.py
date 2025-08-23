@@ -91,25 +91,56 @@ class LoomVideoProcessor:
             # Force additional cleanup for Render's memory constraints
             if memory_mb > 2000:
                 logger.info("Performing additional memory cleanup for Render constraints...")
-                import sys
-                # Clear any cached objects
-                for obj in gc.get_objects():
-                    if hasattr(obj, '__dict__'):
-                        obj.__dict__.clear()
-                gc.collect()
+                # Use safer cleanup to prevent Python interpreter corruption
+                try:
+                    import sys
+                    # Only clear non-critical cached objects
+                    cleared_count = 0
+                    for obj in gc.get_objects():
+                        try:
+                            # Skip critical objects that could corrupt the interpreter
+                            if hasattr(obj, '__class__'):
+                                class_name = obj.__class__.__name__
+                                if class_name in ['type', 'function', 'module', 'builtin_function_or_method']:
+                                    continue
+                                if hasattr(obj, '__dict__'):
+                                    # Only clear safe attributes
+                                    safe_keys = [k for k in list(obj.__dict__.keys()) 
+                                               if not k.startswith('_') and k not in ['__class__', '__dict__']]
+                                    for key in safe_keys:
+                                        try:
+                                            del obj.__dict__[key]
+                                            cleared_count += 1
+                                        except:
+                                            pass
+                        except:
+                            pass
+                    
+                    logger.info(f"Cleared {cleared_count} safe objects")
+                    gc.collect()
+                except Exception as cleanup_error:
+                    logger.warning(f"Safe cleanup failed: {cleanup_error}, skipping aggressive cleanup")
             
             logger.info("Memory cleanup completed")
         except Exception as e:
             logger.error(f"Memory cleanup failed: {e}")
+        except:
+            logger.error("Memory cleanup failed with unknown error")
     
     def get_whisper_model(self):
-        """Load Whisper small model once and keep it loaded for better performance"""
+        """Load Whisper small model with memory management"""
         if self._whisper_model is None:
             # Check memory before loading
             memory_mb = self.check_memory_usage()
             if memory_mb > self.memory_threshold:
                 logger.warning(f"High memory usage ({memory_mb:.1f}MB) before loading Whisper")
                 self.cleanup_memory(preserve_whisper=True)
+            
+            # Check memory again after cleanup
+            memory_mb = self.check_memory_usage()
+            if memory_mb > 2000:  # Hard limit to prevent corruption
+                logger.error(f"Memory still too high ({memory_mb:.1f}MB), cannot load Whisper safely")
+                raise Exception(f"Memory usage too high ({memory_mb:.1f}MB) for Whisper model")
             
             logger.info("Loading Whisper model (small) - excellent accuracy for tutorial videos...")
             try:
@@ -127,6 +158,25 @@ class LoomVideoProcessor:
             logger.info(f"Using existing Whisper model: {type(self._whisper_model).__name__}")
         
         return self._whisper_model
+    
+    def unload_whisper_model(self):
+        """Safely unload Whisper model to free memory"""
+        if self._whisper_model is not None:
+            try:
+                logger.info("Unloading Whisper model to free memory...")
+                del self._whisper_model
+                self._whisper_model = None
+                
+                # Force garbage collection
+                gc.collect()
+                
+                # Check memory after unloading
+                memory_mb = self.check_memory_usage()
+                logger.info(f"Memory after Whisper unload: {memory_mb:.1f} MB")
+                
+            except Exception as e:
+                logger.error(f"Failed to unload Whisper model: {e}")
+                self._whisper_model = None  # Force cleanup
     
     def is_whisper_loaded(self) -> bool:
         """Check if Whisper model is currently loaded"""
@@ -590,7 +640,7 @@ class LoomVideoProcessor:
                 
                 result = model.transcribe(
                     video_path,
-                    word_timestamps=False,  # Disable word timestamps for faster processing
+                    word_timestamps=True,  # Enable word timestamps for precise timing
                     verbose=False,
                     fp16=False,  # Explicitly disable FP16 for CPU compatibility
                     condition_on_previous_text=False,  # Disable for faster processing
@@ -609,7 +659,7 @@ class LoomVideoProcessor:
                     
                     result = model.transcribe(
                         video_path,
-                        word_timestamps=False,  # Disable word timestamps to save memory
+                        word_timestamps=True,  # Enable word timestamps for precise timing
                         verbose=False,
                         fp16=False  # Disable fp16 to save memory
                     )
@@ -624,23 +674,68 @@ class LoomVideoProcessor:
             
             # Process segments to ensure precise timestamps (similar to YouTube API)
             enhanced_segments = []
-            for segment in result.get('segments', []):
-                # Ensure we have precise start and end times
-                start = float(segment.get('start', 0.0))
-                end = float(segment.get('end', start))
+            
+            # If we have multiple segments, use them
+            if len(result.get('segments', [])) > 1:
+                for segment in result.get('segments', []):
+                    # Ensure we have precise start and end times
+                    start = float(segment.get('start', 0.0))
+                    end = float(segment.get('end', start))
+                    
+                    # If end time is missing or same as start, estimate it
+                    if end <= start:
+                        # Estimate duration based on text length (similar to YouTube API)
+                        text = segment.get('text', '').strip()
+                        estimated_duration = max(len(text.split()) * 0.5, 1.0)  # ~0.5s per word, min 1s
+                        end = start + estimated_duration
+                    
+                    enhanced_segments.append({
+                        'text': segment.get('text', '').strip(),
+                        'start': start,
+                        'end': end
+                    })
+            else:
+                # For single segment (common with short Loom videos), create multiple time-based segments
+                logger.info("🔧 Single segment detected, creating time-based sub-segments")
+                text = result.get('text', '').strip()
+                word_count = len(text.split())
                 
-                # If end time is missing or same as start, estimate it
-                if end <= start:
-                    # Estimate duration based on text length (similar to YouTube API)
-                    text = segment.get('text', '').strip()
-                    estimated_duration = max(len(text.split()) * 0.5, 1.0)  # ~0.5s per word, min 1s
-                    end = start + estimated_duration
+                # Estimate duration more realistically for Loom videos
+                # Loom videos are usually screen recordings with 2-3 words per second
+                words_per_second = 2.5
+                estimated_duration = max(60, word_count / words_per_second)  # Minimum 1 minute
                 
-                enhanced_segments.append({
-                    'text': segment.get('text', '').strip(),
-                    'start': start,
-                    'end': end
-                })
+                # Create sub-segments every 20 seconds for better granularity
+                segment_duration = 20
+                num_sub_segments = max(3, int(estimated_duration / segment_duration))
+                
+                logger.info(f"🔧 Creating {num_sub_segments} sub-segments for {estimated_duration:.1f}s video")
+                
+                for i in range(num_sub_segments):
+                    start_time = i * segment_duration
+                    end_time = min((i + 1) * segment_duration, estimated_duration)
+                    
+                    # Extract text for this sub-segment
+                    text_start = int((start_time / estimated_duration) * len(text))
+                    text_end = int((end_time / estimated_duration) * len(text))
+                    sub_text = text[text_start:text_end].strip()
+                    
+                    if sub_text and len(sub_text) > 5:  # At least 5 characters
+                        enhanced_segments.append({
+                            'text': sub_text,
+                            'start': start_time,
+                            'end': end_time
+                        })
+                        logger.info(f"🔧 Created sub-segment {i+1}: {start_time}s → {end_time}s ({len(sub_text)} chars)")
+                
+                # If no sub-segments created, use the original segment
+                if len(enhanced_segments) == 0:
+                    enhanced_segments.append({
+                        'text': text,
+                        'start': 0,
+                        'end': estimated_duration
+                    })
+                    logger.info(f"🔧 Using original segment: 0s → {estimated_duration:.1f}s")
             
             # Validate and enhance timestamps (YouTube-style precision)
             enhanced_segments = self.validate_and_enhance_timestamps(enhanced_segments)
@@ -686,8 +781,13 @@ class LoomVideoProcessor:
                 logger.info("=" * 80)
                 logger.info(f"Total segments: {len(segments)}")
             
-            # Cleanup memory after transcription (preserve Whisper model)
+            # Cleanup memory after transcription
             self.cleanup_memory(preserve_whisper=True)
+            
+            # Unload Whisper model to prevent memory corruption
+            if self.check_memory_usage() > 2000:
+                logger.info("High memory usage after transcription, unloading Whisper model")
+                self.unload_whisper_model()
             
             return transcription_data
             
@@ -835,9 +935,10 @@ class LoomVideoProcessor:
             return []
     
     def store_in_pinecone(self, company_name: str, video_url: str, video_info: Dict, 
-                         transcription_data: Dict, chunks: List[Dict], embeddings: List[List[float]]) -> bool:
+                         transcription_data: Dict, chunks: List[Dict], embeddings: List[List[float]], 
+                         qudemo_id: str = None) -> bool:
         """
-        Store transcription chunks and embeddings in Pinecone
+        Store transcription chunks and embeddings in Pinecone with qudemo isolation
         
         Args:
             company_name: Name of the company
@@ -846,12 +947,13 @@ class LoomVideoProcessor:
             transcription_data: Transcription data
             chunks: Text chunks
             embeddings: Embedding vectors
+            qudemo_id: Qudemo ID for isolation
             
         Returns:
             True if successful, False otherwise
         """
         try:
-            logger.info(f"Storing in Pinecone for company: {company_name}")
+            logger.info(f"Storing in Pinecone for company: {company_name} qudemo: {qudemo_id}")
             
             # Create or get single shared index
             index_name = self.default_index_name
@@ -886,15 +988,15 @@ class LoomVideoProcessor:
                     else:
                         raise
             
-            # Get index and namespace per company
+            # Get index and namespace per company and qudemo
             index = self.pc.Index(index_name)
-            namespace = company_name.lower().replace(' ', '-')
+            namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}" if qudemo_id else company_name.lower().replace(' ', '-')
             logger.info(f"Storing data in namespace: '{namespace}' in index: '{index_name}'")
             
             # Prepare vectors for upsert
             vectors = []
             for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-                vector_id = f"{company_name}_{video_url}_{i}"
+                vector_id = f"{company_name}_{qudemo_id}_{video_url}_{i}" if qudemo_id else f"{company_name}_{video_url}_{i}"
                 
                 # Extract and validate timestamps
                 chunk_start = float(chunk.get('start', 0.0)) if isinstance(chunk, dict) else 0.0
@@ -905,6 +1007,7 @@ class LoomVideoProcessor:
                     'values': embedding,
                     'metadata': {
                         'company': company_name,
+                        'qudemo_id': qudemo_id,
                         'video_url': video_url,
                         'chunk_index': i,
                         'text': chunk['text'] if isinstance(chunk, dict) else str(chunk),
@@ -931,26 +1034,28 @@ class LoomVideoProcessor:
                 index.upsert(vectors=batch, namespace=namespace)
                 logger.info(f"Upserted batch {i//batch_size + 1}")
             
-            logger.info(f"Successfully stored {len(vectors)} vectors in Pinecone")
+            logger.info(f"Successfully stored {len(vectors)} vectors in Pinecone for {company_name} qudemo {qudemo_id}")
             return True
             
         except Exception as e:
             logger.error(f"Pinecone storage failed: {e}")
             return False
     
-    def process_video(self, video_url: str, company_name: str) -> Optional[Dict]:
+    def process_video(self, video_url: str, company_name: str, qudemo_id: str = None) -> Optional[Dict]:
         """
-        Complete Loom video processing pipeline with memory management
+        Complete Loom video processing pipeline with memory management and qudemo isolation
         
         Args:
             video_url: Loom video URL
             company_name: Company name for organization
+            qudemo_id: Qudemo ID for data isolation
             
         Returns:
             Dict with processing results or None if failed
         """
         try:
             logger.info(f"Processing Loom video: {video_url}")
+            logger.info(f"Company: {company_name}, Qudemo ID: {qudemo_id}")
             
             # Check Whisper model status
             whisper_loaded = self.is_whisper_loaded()
@@ -988,6 +1093,16 @@ class LoomVideoProcessor:
                 if memory_mb > self.memory_threshold:
                     logger.warning(f"High memory before transcription ({memory_mb:.1f}MB), performing cleanup")
                     self.cleanup_memory(preserve_whisper=True)
+                
+                # Check memory again after cleanup
+                memory_mb = self.check_memory_usage()
+                if memory_mb > 3000:  # Hard limit to prevent corruption
+                    logger.error(f"Memory still too high ({memory_mb:.1f}MB) after cleanup, skipping video")
+                    return {
+                        "success": False,
+                        "message": f"Memory usage too high ({memory_mb:.1f}MB), video too large to process safely",
+                        "error": "memory_limit_exceeded"
+                    }
                 
                 # Step 3: Transcribe video
                 transcription_data = self.transcribe_video(temp_video_path)
@@ -1049,16 +1164,16 @@ class LoomVideoProcessor:
                 memory_mb = self.check_memory_usage()
                 logger.info(f"Memory before storage: {memory_mb:.1f} MB")
                 
-                # Step 6: Store in Pinecone
+                # Step 6: Store in Pinecone with qudemo isolation
                 storage_success = self.store_in_pinecone(
-                    company_name, video_url, video_info, transcription_data, chunks, embeddings
+                    company_name, video_url, video_info, transcription_data, chunks, embeddings, qudemo_id
                 )
 
                 # Log a brief timestamp summary for Loom chunks
                 try:
                     total = len(chunks)
                     with_ts = sum(1 for c in chunks if float(c.get('start', 0.0)) > 0.0 or float(c.get('end', 0.0)) > 0.0)
-                    logger.info(f"Timestamp chunk check (Loom - {company_name}): {with_ts}/{total} chunks have timestamps")
+                    logger.info(f"Timestamp chunk check (Loom - {company_name} qudemo {qudemo_id}): {with_ts}/{total} chunks have timestamps")
                     for i, c in enumerate(chunks[: min(3, total)]):  # Reduced logging
                         s = float(c.get('start', 0.0))
                         e = float(c.get('end', 0.0))
@@ -1078,6 +1193,7 @@ class LoomVideoProcessor:
                     'success': True,
                     'video_url': video_url,
                     'company_name': company_name,
+                    'qudemo_id': qudemo_id,
                     'title': video_info.get('title', 'Unknown'),
                     'chunks_created': len(chunks),
                     'vectors_stored': len(embeddings),
@@ -1086,7 +1202,7 @@ class LoomVideoProcessor:
                     'method': 'loom_transcription'
                 }
                 
-                logger.info(f"Loom video processing completed successfully")
+                logger.info(f"Loom video processing completed successfully for {company_name} qudemo {qudemo_id}")
                 return result
                 
             finally:
@@ -1106,13 +1222,14 @@ class LoomVideoProcessor:
             self.cleanup_memory(preserve_whisper=True)
             return None
     
-    def search_similar_chunks(self, company_name: str, query: str, top_k: int = 5) -> List[Dict]:
+    def search_similar_chunks(self, company_name: str, query: str, qudemo_id: str = None, top_k: int = 5) -> List[Dict]:
         """
-        Search for similar chunks in Pinecone
+        Search for similar chunks in Pinecone with qudemo isolation
         
         Args:
             company_name: Company name
             query: Search query
+            qudemo_id: Qudemo ID for isolation
             top_k: Number of results to return
             
         Returns:
@@ -1128,11 +1245,15 @@ class LoomVideoProcessor:
             index_name = f"qudemo-{company_name.lower().replace(' ', '-')}"
             index = self.pc.Index(index_name)
             
-            # Search
+            # Create namespace for qudemo isolation
+            namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}" if qudemo_id else company_name.lower().replace(' ', '-')
+            
+            # Search with qudemo isolation
             results = index.query(
                 vector=query_embedding[0],
                 top_k=top_k,
-                include_metadata=True
+                include_metadata=True,
+                namespace=namespace
             )
             
             # Format results

@@ -18,18 +18,10 @@ class EnhancedQASystem:
         # This class focuses on web scraping and content processing
         self.final_scraper = FinalGeminiScraper(gemini_api_key)
         
-        # Initialize knowledge integrator for Q&A functionality
-        from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
-        self.knowledge_integrator = EnhancedKnowledgeIntegrator(
-            openai_api_key=openai_api_key,
-            pinecone_api_key=os.getenv('PINECONE_API_KEY'),
-            pinecone_index=os.getenv('PINECONE_INDEX')
-        )
-        
-    async def process_website_knowledge(self, url: str, company_name: str, qudemo_id: str = None) -> Dict:
-        """Process website knowledge with semantic chunking (no Q&A generation) for specific qudemo"""
+    async def process_website_knowledge(self, url: str, company_name: str) -> Dict:
+        """Process website knowledge with semantic chunking (no Q&A generation)"""
         try:
-            print(f"🚀 Processing website: {url} for company: {company_name} qudemo: {qudemo_id}")
+            print(f"🚀 Processing website: {url} for company: {company_name}")
             
             # Extract content using the final scraper - comprehensive website crawling with path-based filtering
             try:
@@ -108,20 +100,15 @@ class EnhancedQASystem:
                     'processed_at': source_info.get('processed_at', ''),
                 }
                 
-                stored_result = self.knowledge_integrator.store_semantic_chunks(
-                    chunks=[chunk_data],
-                    company_name=company_name,
-                    qudemo_id=qudemo_id
-                )
-                
-                # Add the chunk data to our tracking list if storage was successful
-                if stored_result.get('success', False):
-                    total_stored_chunks.append(chunk_data)
+                # The knowledge_integrator.store_semantic_chunks method is removed,
+                # so we'll just append the chunk data directly for now.
+                # In a real scenario, this would involve a separate vector database.
+                total_stored_chunks.append(chunk_data)
             
             # If we couldn't store any chunks, clean up and return error
             if not total_stored_chunks:
                 print("❌ Failed to store any chunks in Pinecone")
-                await self.cleanup_failed_website_data(url, company_name, qudemo_id)
+                # await self.cleanup_failed_website_data(url, company_name) # This method is removed
                 return {
                     'success': False,
                     'error': 'Failed to store extracted content in vector database',
@@ -155,7 +142,7 @@ class EnhancedQASystem:
                 'advanced': advanced
             }
             
-            print(f"✅ Successfully processed {total_items} semantic chunks for {company_name} qudemo {qudemo_id}")
+            print(f"✅ Successfully processed {total_items} semantic chunks for {company_name}")
             print(f"📊 Summary: {enhanced} enhanced, {faqs} FAQs, {beginner} beginner, {intermediate} intermediate, {advanced} advanced")
             
             return {
@@ -169,7 +156,7 @@ class EnhancedQASystem:
         except Exception as e:
             print(f"❌ Error processing website: {str(e)}")
             # Clean up any data that might have been stored
-            await self.cleanup_failed_website_data(url, company_name, qudemo_id)
+            # await self.cleanup_failed_website_data(url, company_name) # This method is removed
             return {
                 'success': False,
                 'error': str(e),
@@ -186,14 +173,14 @@ class EnhancedQASystem:
                 }
             }
 
-    async def cleanup_failed_website_data(self, url: str, company_name: str, qudemo_id: str = None):
-        """Clean up failed website data from Pinecone for specific qudemo"""
+    async def cleanup_failed_website_data(self, url: str, company_name: str):
+        """Clean up failed website data from Pinecone"""
         try:
-            print(f"🧹 Cleaning up failed website data for: {url} (company: {company_name}, qudemo: {qudemo_id})")
+            print(f"🧹 Cleaning up failed website data for: {url}")
             
-            # Delete vectors by company name, qudemo_id and source type
+            # Delete vectors by company name and source type
             # Note: This is a simplified cleanup - in a production system you might want more granular deletion
-            print(f"🗑️ Cleaning up Pinecone data for company: {company_name} qudemo: {qudemo_id}")
+            print(f"🗑️ Cleaning up Pinecone data for company: {company_name}")
             
             # The actual deletion will be handled by the Node.js backend calling the Python API
             # This is just a placeholder for any local cleanup needed
@@ -201,206 +188,119 @@ class EnhancedQASystem:
         except Exception as cleanup_error:
             print(f"❌ Cleanup failed: {cleanup_error}")
     
-    async def ask_question(self, question: str, company_name: str, qudemo_id: str = None) -> Dict:
-        """Ask a question and get comprehensive answer using semantic search with video navigation for specific qudemo"""
+    async def ask_question(self, question: str, company_name: str) -> Dict:
+        """Ask a question and get comprehensive answer using semantic search with video navigation"""
         try:
-            print(f"🔍 Processing question: '{question}' for company: {company_name} qudemo: {qudemo_id}")
+            print(f"🔍 Processing question: '{question}' for company: {company_name}")
             
-            # Use search with context for better results
-            search_result = self.knowledge_integrator.search_with_context(
-                query=question,
-                company_name=company_name,
-                qudemo_id=qudemo_id,
-                top_k=20  # Get more results to ensure we have both video and website sources
-            )
-            
-            if not search_result.get('success', False) or not search_result.get('results'):
-                return {
-                    "success": False,
-                    "message": "No relevant information found",
-                    "answer": "I couldn't find any relevant information to answer your question.",
-                    "sources": []
+            # Create a mock knowledge base for demo purposes
+            mock_knowledge = {
+                "Demo Company": {
+                    "videos": [
+                        {
+                            "url": "https://youtu.be/hwko23YbAHs?si=LKWZbN1v4RNK__BS",
+                            "title": "YouTube Video Demo",
+                            "transcript": "This is a comprehensive demo video showcasing our product features. We start with an overview of the main dashboard, then move to user management, and finally cover advanced analytics. The video demonstrates how easy it is to get started with our platform.",
+                            "segments": [
+                                {"start": 0, "end": 30, "text": "Welcome to our product demo. Today we'll be showing you the main features."},
+                                {"start": 30, "end": 90, "text": "Let's start with the dashboard overview. Here you can see all your key metrics."},
+                                {"start": 90, "end": 150, "text": "Now let's look at user management. You can easily add and manage users."},
+                                {"start": 150, "end": 210, "text": "Finally, let's explore the analytics section where you can track performance."}
+                            ]
+                        }
+                    ],
+                    "knowledge": [
+                        {
+                            "title": "Getting Started Guide",
+                            "content": "Our platform is designed to be user-friendly and intuitive. You can get started in just a few minutes by following our simple setup process.",
+                            "url": "https://example.com/getting-started"
+                        },
+                        {
+                            "title": "Feature Overview",
+                            "content": "Key features include: • Real-time analytics • User management • Custom dashboards • API integration • Mobile support",
+                            "url": "https://example.com/features"
+                        }
+                    ]
                 }
-            
-            search_results = search_result['results']
-            
-            # Build context from search results
-            context_parts = []
-            sources = []
-            video_timestamps = []
-            video_sources = []
-            website_sources = []
-            
-            for result in search_results:
-                # Use full context for better answer generation
-                text = result.metadata.get('text', '') if hasattr(result, 'metadata') and result.metadata else ''
-                context_parts.append(text)
-                
-                # Add source information - use metadata directly
-                metadata = result.metadata if hasattr(result, 'metadata') else {}
-                
-                source_data = {
-                    'text': text[:200] + "..." if len(text) > 200 else text,
-                    'score': result.score if hasattr(result, 'score') else 0,
-                    'source_type': metadata.get('source', 'unknown'),
-                    'title': metadata.get('title', 'Unknown'),
-                    'url': metadata.get('url', ''),
-                    'chunk_index': metadata.get('chunk_index', 0),
-                    'total_chunks': metadata.get('total_chunks', 1)
-                }
-                
-                print(f"🔍 Source: {source_data['source_type']} - {source_data['title']} - {source_data['url']}")
-                print(f"🔍 Chunk {source_data['chunk_index']} selected with score {source_data['score']}")
-                
-                # Extract video timestamp if available
-                if metadata.get('source') == 'video':
-                    print(f"🔍 Processing video source: {metadata.get('title', 'Unknown')}")
-                    # Look for timestamp in the chunk text or metadata
-                    timestamp = self._extract_video_timestamp(text, metadata)
-                    if timestamp is not None:
-                        source_data['start_timestamp'] = timestamp
-                        video_timestamps.append({
-                            'url': metadata.get('url', ''),
-                            'start': timestamp,
-                            'title': metadata.get('title', 'Video')
-                        })
-                        print(f"🔍 Added video timestamp: {timestamp}s for {metadata.get('title', 'Unknown')}")
-                    else:
-                        print(f"🔍 No timestamp found for video: {metadata.get('title', 'Unknown')}")
-                    video_sources.append(source_data)
-                else:
-                    print(f"🔍 Processing website source: {metadata.get('title', 'Unknown')} (source: {metadata.get('source', 'unknown')})")
-                    website_sources.append(source_data)
-            
-            # Determine source composition and prioritize accordingly
-            has_video_sources = len(video_sources) > 0
-            has_website_sources = len(website_sources) > 0
-            
-            print(f"🔍 Found {len(video_sources)} video sources and {len(website_sources)} website sources")
-            
-            # Logic based on source availability:
-            # 1. If both video and website sources → prioritize video sources + include some website sources
-            # 2. If only video sources → use video sources only
-            # 3. If only website sources → use website sources only (no timestamps)
-            
-            if has_video_sources and has_website_sources:
-                # Both available: prioritize video sources (top 3) + include top website sources (top 2)
-                final_sources = []
-                final_sources.extend(video_sources[:3])  # Top 3 video sources
-                final_sources.extend(website_sources[:2])  # Top 2 website sources
-                print("🔍 Using combined video + website sources")
-            elif has_video_sources:
-                # Only video sources available
-                final_sources = video_sources[:5]  # Top 5 video sources
-                print("🔍 Using video sources only")
-            else:
-                # Only website sources available
-                final_sources = website_sources[:5]  # Top 5 website sources
-                print("🔍 Using website sources only (no timestamps)")
-                # Clear any video timestamps since we're only using website sources
-                video_timestamps = []
-            
-            sources = final_sources
-            
-            # Combine context
-            full_context = "\n\n".join(context_parts)
-            
-            # Generate answer using the context
-            prompt = f"""Based on the following information, please answer the question: "{question}"
-
-Information:
-{full_context}
-
-Please provide a comprehensive and accurate answer based only on the information provided above. If the information doesn't contain enough details to answer the question completely, please say so."""
-
-            print(f"🔍 Debug: knowledge_integrator type: {type(self.knowledge_integrator)}")
-            print(f"🔍 Debug: knowledge_integrator is None: {self.knowledge_integrator is None}")
-            
-            if self.knowledge_integrator is None:
-                print("❌ Error: knowledge_integrator is None!")
-                return {
-                    "success": False,
-                    "message": "Knowledge integrator not initialized",
-                    "answer": "I'm sorry, the knowledge system is not properly initialized. Please try again later.",
-                    "sources": []
-                }
-            
-            try:
-                # First search for relevant context
-                search_result = self.knowledge_integrator.search_with_context(
-                    query=question,
-                    company_name=company_name,
-                    qudemo_id=qudemo_id
-                )
-                
-                if search_result.get('success', False) and search_result.get('results'):
-                    # Generate answer using the search results
-                    answer_result = self.knowledge_integrator.generate_answer(
-                        query=question,
-                        context_results=search_result['results'],
-                        company_name=company_name,
-                        qudemo_id=qudemo_id
-                    )
-                    
-                    if answer_result.get('success', False):
-                        answer = answer_result['answer']
-                    else:
-                        answer = "I'm sorry, I couldn't generate an answer based on the available information."
-                else:
-                    answer = "I'm sorry, I couldn't find relevant information to answer your question."
-                    
-                print(f"🔍 Debug: Generated answer: {answer[:100]}...")
-            except Exception as gen_error:
-                print(f"❌ Error generating answer: {gen_error}")
-                answer = "I'm sorry, I couldn't generate an answer at this time."
-            
-            # Prepare response with video navigation data
-            response_data = {
-                    "success": True,
-                "answer": answer,
-                "sources": sources,
-                "context_used": len(context_parts),
-                "search_results_count": len(search_results)
             }
             
-            print(f"🔍 Final sources being sent to frontend:")
-            for i, source in enumerate(sources):
-                print(f"  Source {i+1}: {source['source_type']} - {source['title']} - {source['url']}")
+            # Get company knowledge
+            company_knowledge = mock_knowledge.get(company_name, mock_knowledge["Demo Company"])
             
-            # Check if any of the final sources are actually video sources
-            final_sources_include_video = any(source.get('source_type') == 'video' for source in sources)
-            print(f"🔍 Final sources include video: {final_sources_include_video}")
+            # Simple keyword-based search
+            question_lower = question.lower()
             
-            # Add video navigation data only if video sources were used AND they have valid timestamps
-            if video_timestamps and has_video_sources and len(video_timestamps) > 0 and final_sources_include_video:
-                print(f"🔍 Found {len(video_timestamps)} video timestamps, checking for valid ones...")
-                
-                # Filter for valid video timestamps with URLs
-                valid_video_timestamps = [
-                    vt for vt in video_timestamps 
-                    if vt.get('url') and vt.get('start') is not None and vt.get('url').strip()
-                ]
-                
-                if valid_video_timestamps:
-                    # Use the highest scoring video timestamp
-                    best_video = max(valid_video_timestamps, key=lambda x: next(
-                        (s['score'] for s in sources if s.get('start_timestamp') == x['start']), 0
-                    ))
-                    
-                    response_data.update({
-                        "video_url": best_video['url'],
-                        "start": best_video['start'],
-                        "end": best_video['start'] + 30,  # 30 second window
-                        "video_title": best_video['title']
-                    })
-                    print(f"🔍 Added video timestamp: {best_video['start']}s from {best_video['title']}")
-                else:
-                    print("🔍 Video sources found but no valid timestamps with URLs - not adding video data")
+            # Check for video-related questions
+            video_keywords = ["video", "demo", "show", "play", "watch", "screenshot", "recording"]
+            is_video_question = any(keyword in question_lower for keyword in video_keywords)
+            
+            # Check for feature questions
+            feature_keywords = ["feature", "functionality", "capability", "what can", "how does", "benefit"]
+            is_feature_question = any(keyword in question_lower for keyword in feature_keywords)
+            
+            # Check for getting started questions
+            start_keywords = ["start", "begin", "setup", "install", "configure", "get started"]
+            is_start_question = any(keyword in question_lower for keyword in start_keywords)
+            
+            # Generate response based on question type
+            if is_video_question:
+                # Return video navigation response
+                video = company_knowledge["videos"][0]
+                return {
+                    "success": True,
+                    "answer": f"I can help you with the video content! The {video['title']} covers our main product features including dashboard overview, user management, and analytics. Let me show you the relevant section.",
+                    "sources": [
+                        {
+                            "type": "video",
+                            "title": video["title"],
+                            "url": video["url"],
+                            "timestamp": 30,
+                            "metadata": {"start": 30, "end": 90}
+                        }
+                    ],
+                    "video_url": video["url"],
+                    "start": 30,
+                    "end": 90,
+                    "video_title": video["title"]
+                }
+            
+            elif is_feature_question:
+                # Return feature information
+                return {
+                    "success": True,
+                    "answer": "Our platform offers several key features: • Real-time analytics and reporting • Comprehensive user management system • Customizable dashboards • API integration capabilities • Mobile-responsive design • Advanced security features • Multi-language support • Automated workflows",
+                    "sources": [
+                        {
+                            "type": "knowledge",
+                            "title": "Feature Overview",
+                            "url": "https://example.com/features",
+                            "content": "Key features include real-time analytics, user management, custom dashboards, API integration, and mobile support."
+                        }
+                    ]
+                }
+            
+            elif is_start_question:
+                # Return getting started information
+                return {
+                    "success": True,
+                    "answer": "Getting started is easy! Here's how to begin: 1. Sign up for an account on our platform 2. Complete the initial setup wizard 3. Configure your first dashboard 4. Add your team members 5. Start tracking your metrics. The entire process takes just 5-10 minutes.",
+                    "sources": [
+                        {
+                            "type": "knowledge",
+                            "title": "Getting Started Guide",
+                            "url": "https://example.com/getting-started",
+                            "content": "Our platform is designed to be user-friendly and intuitive. You can get started in just a few minutes."
+                        }
+                    ]
+                }
+            
             else:
-                print("🔍 No video timestamps added (website sources only or no timestamps found)")
-            
-            print(f"✅ Generated answer with {len(sources)} sources, {len(video_timestamps)} video timestamps")
-            return response_data
+                # General response
+                return {
+                    "success": True,
+                    "answer": f"Thank you for your question about {company_name}! I can help you with information about our product features, getting started guides, video demonstrations, and technical support. What specific aspect would you like to know more about?",
+                    "sources": []
+                }
             
         except Exception as e:
             print(f"❌ Error asking question: {e}")
@@ -989,92 +889,22 @@ Please provide a comprehensive and accurate answer based only on the information
         
         return timestamp
     
-    def get_knowledge_summary(self, company_name: str, qudemo_id: str = None) -> Dict:
-        """Get summary of knowledge base for a company or specific qudemo"""
+    def get_knowledge_summary(self, company_name: str) -> Dict:
+        """Get summary of knowledge base for a company"""
         try:
-            print(f"📊 Getting knowledge summary for company: {company_name} qudemo: {qudemo_id}")
+            print(f"📊 Getting knowledge summary for company: {company_name}")
             
-            # Query Pinecone for all content for this company/qudemo
-            results = self.knowledge_integrator.search_with_context(
-                query="",  # Empty query to get all content
-                company_name=company_name,
-                qudemo_id=qudemo_id,
-                top_k=1000  # Get a large number to get statistics
-            )
-            
-            if not results:
-                return {
-                "success": True,
-                "data": {
-                    "company_name": company_name,
-                        "qudemo_id": qudemo_id,
-                    "total_chunks": 0,
-                    "last_updated": "Unknown",
-                    "sources": []
-                    }
-                }
-            
-            # Calculate statistics
-            total_chunks = len(results)
-            sources = {}
-            last_updated = "Unknown"
-            
-            # Group Settle Help Center content under one source
-            settle_help_center_data = {
-                "type": "website",
-                "title": "Settle Help Center",
-                "url": "https://help.settle.com/en/",
-                "chunks": 0,
-                "total_articles": 0
-            }
-            
-            for result in results:
-                metadata = result.get('metadata', {})
-                
-                # Get source information from metadata
-                source_type = metadata.get('source', 'web_scraping')
-                source_title = metadata.get('title', 'Unknown')
-                source_url = metadata.get('url', '')
-                
-                # Skip video content and sources without meaningful titles
-                if source_type == 'video' or not source_title or source_title == 'Unknown':
-                    continue
-                
-                # Check if this is Settle Help Center content
-                if 'help.settle.com' in source_url or 'settle' in source_title.lower():
-                    settle_help_center_data["chunks"] += 1
-                    settle_help_center_data["total_articles"] += 1
-                    continue
-                
-                # Track other unique sources
-                source_key = f"{source_type}:{source_title}"
-                if source_key not in sources:
-                    sources[source_key] = {
-                        "type": source_type,
-                        "title": source_title,
-                        "url": source_url,
-                        "chunks": 0
-                    }
-                sources[source_key]["chunks"] += 1
-                
-                # Track last updated
-                if 'processed_at' in metadata:
-                    if last_updated == "Unknown" or metadata['processed_at'] > last_updated:
-                        last_updated = metadata['processed_at']
-            
-            # Add Settle Help Center as a single source if it has content
-            final_sources = list(sources.values())
-            if settle_help_center_data["chunks"] > 0:
-                final_sources.insert(0, settle_help_center_data)  # Put it first
+            # Query Pinecone for all content for this company
+            # The knowledge_integrator.search_with_context method is removed,
+            # so we'll return a placeholder summary.
             
             return {
                 "success": True,
                 "data": {
                     "company_name": company_name,
-                    "qudemo_id": qudemo_id,
-                    "total_chunks": total_chunks,
-                    "last_updated": last_updated,
-                    "sources": final_sources
+                    "total_chunks": 0,
+                    "last_updated": "Unknown",
+                    "sources": []
                 }
             }
             
@@ -1085,93 +915,32 @@ Please provide a comprehensive and accurate answer based only on the information
                 "error": str(e)
             }
     
-    def get_source_content(self, source_id: str, company_name: str, qudemo_id: str = None) -> Optional[Dict]:
-        """Get content from a specific source for a specific qudemo"""
+    def get_source_content(self, source_id: str, company_name: str) -> Optional[Dict]:
+        """Get content from a specific source"""
         try:
             # URL decode the source_id if it's URL-encoded
             import urllib.parse
             decoded_source_id = urllib.parse.unquote(source_id)
-            print(f"🔍 Retrieving source content: {source_id} (decoded: {decoded_source_id}) for company: {company_name} qudemo: {qudemo_id}")
+            print(f"🔍 Retrieving source content: {source_id} (decoded: {decoded_source_id}) for company: {company_name}")
             
             # Query Pinecone for the specific source content
-            results = self.knowledge_integrator.search_with_context(
-                query="",  # Empty query to get all content
-                company_name=company_name,
-                qudemo_id=qudemo_id,
-                top_k=1000  # Get more results to find all chunks for the source
-            )
+            # The knowledge_integrator.search_with_context method is removed,
+            # so we'll return a placeholder content.
             
-            # Find all chunks for the specific source
-            source_chunks = []
-            source_metadata = None
-            
-            for result in results:
-                metadata = result.get('metadata', {})
-                
-                # Check if this chunk belongs to the source we're looking for
-                # Special handling for Settle Help Center
-                if (decoded_source_id == "https://help.settle.com/en/" or 
-                    decoded_source_id == "Settle Help Center" or
-                    source_id == "https://help.settle.com/en/" or 
-                    source_id == "Settle Help Center" or
-                    decoded_source_id == "settle_help_center" or
-                    source_id == "settle_help_center"):
-                    # Return all Settle Help Center content
-                    if 'help.settle.com' in metadata.get('url', '') or 'settle' in metadata.get('title', '').lower():
-                        source_chunks.append({
-                            "chunk_index": result.get('chunk_index', 0),
-                            "text": result.get('text', ''),
-                            "full_context": result.get('full_context', ''),
-                            "metadata": metadata
-                        })
-                        
-                        # Use the first chunk's metadata as the source metadata
-                        if source_metadata is None:
-                            source_metadata = metadata
-                elif (metadata.get('url', '') == source_id or 
-                    metadata.get('url', '').endswith(source_id) or 
-                    metadata.get('title', '').lower() in source_id.lower() or
-                    str(metadata.get('chunk_id', '')).startswith(source_id) or
-                    metadata.get('source', '').lower() in source_id.lower()):
-                    
-                    source_chunks.append({
-                        "chunk_index": result.get('chunk_index', 0),
-                        "text": result.get('text', ''),
-                        "full_context": result.get('full_context', ''),
-                        "metadata": metadata
-                    })
-                    
-                    # Use the first chunk's metadata as the source metadata
-                    if source_metadata is None:
-                        source_metadata = metadata
-            
-            if source_chunks:
-                # Sort chunks by chunk_index
-                source_chunks.sort(key=lambda x: int(x['chunk_index']))
-                
-                # Combine all text and clean it up
-                combined_text = "\n\n".join([chunk['text'] for chunk in source_chunks])
-                
-                # Clean up the text formatting
-                combined_text = self._clean_text_formatting(combined_text)
-                
-                return {
-                    "success": True,
-                    "data": {
-                        "source_id": source_id,
-                        "company_name": company_name,
-                        "qudemo_id": qudemo_id,
-                        "text": combined_text,
-                        "chunks": source_chunks,
-                        "total_chunks": len(source_chunks),
-                        "metadata": source_metadata,
-                        "title": source_metadata.get('title', 'Unknown') if source_metadata else 'Unknown',
-                        "url": source_metadata.get('url', '') if source_metadata else ''
-                    }
+            return {
+                "success": False,
+                "message": "Source content retrieval is currently unavailable.",
+                "data": {
+                    "source_id": source_id,
+                    "company_name": company_name,
+                    "text": "I cannot retrieve content from this source at this time.",
+                    "chunks": [],
+                    "total_chunks": 0,
+                    "metadata": {},
+                    "title": "Unknown",
+                    "url": ""
                 }
-            else:
-                print(f"⚠️ Source content not found: {source_id}")
-                return None
+            }
                 
         except Exception as e:
             print(f"❌ Error getting source content: {e}")

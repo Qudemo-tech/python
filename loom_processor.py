@@ -46,47 +46,79 @@ class LoomVideoProcessor:
         # Initialize Whisper model (lazy loading with memory management)
         self._whisper_model = None
         
-        # Memory management
-        self.memory_threshold = 6000  # MB - trigger cleanup at 6GB (leaving 2GB buffer for 8GB RAM)
-        self.max_video_size = 100 * 1024 * 1024  # 100MB max video size
+        # Production memory management for 8GB RAM
+        self.memory_threshold = 4000  # MB - trigger cleanup at 4GB (50% of RAM)
+        self.max_video_size = 50 * 1024 * 1024  # 50MB max video size for production safety
+        self.max_concurrent_videos = 1  # Process one video at a time for memory safety
         
-        # Use small model for tutorial videos (excellent accuracy, perfect for longer videos on 8GB RAM)
+        # Use small model for tutorial videos (excellent accuracy, perfect for 8GB RAM)
         self.model_strategy = "small"
         
-        logger.info("Initializing Loom Video Processor (Memory Optimized)...")
+        # Production memory monitoring
+        self.critical_memory_threshold = 6000  # MB - hard limit (75% of RAM)
+        self.warning_memory_threshold = 3000   # MB - warning level (37.5% of RAM)
+        
+        # Production video processing lock (one video at a time)
+        import threading
+        self.processing_lock = threading.Lock()
+        self.is_processing = False
+        
+        logger.info("Initializing Loom Video Processor (Production Ready - 8GB RAM Optimized)...")
     
     def check_memory_usage(self) -> float:
-        """Check current memory usage and log it"""
+        """Enhanced production memory monitoring with alerts"""
         try:
             process = psutil.Process()
             memory_mb = process.memory_info().rss / 1024 / 1024
-            logger.info(f"Current memory usage: {memory_mb:.1f} MB")
+            
+            # Production memory alerts
+            if memory_mb > self.critical_memory_threshold:
+                logger.critical(f"🚨 CRITICAL MEMORY USAGE: {memory_mb:.1f} MB (75%+ of 8GB RAM)")
+            elif memory_mb > self.memory_threshold:
+                logger.error(f"❌ HIGH MEMORY USAGE: {memory_mb:.1f} MB (50%+ of 8GB RAM)")
+            elif memory_mb > self.warning_memory_threshold:
+                logger.warning(f"⚠️ WARNING: Memory usage {memory_mb:.1f} MB (37.5%+ of 8GB RAM)")
+            else:
+                logger.info(f"✅ Memory usage: {memory_mb:.1f} MB (Safe)")
+            
             return memory_mb
         except Exception as e:
             logger.error(f"Failed to check memory: {e}")
             return 0.0
     
-    def cleanup_memory(self, preserve_whisper: bool = True):
-        """Force garbage collection and memory cleanup"""
+    def cleanup_memory(self, preserve_whisper: bool = False):
+        """Production aggressive memory cleanup - always unload Whisper for safety"""
         try:
-            logger.info("Performing memory cleanup...")
+            logger.info("🧹 Performing production memory cleanup...")
             gc.collect()
             
-            # More aggressive memory cleanup
-            memory_mb = self.check_memory_usage()
+            # Check memory before cleanup
+            memory_before = self.check_memory_usage()
             
-            # If memory is very high (>2500MB), clear Whisper model even if preserve_whisper is True
-            if memory_mb > 2500 and self._whisper_model:
-                logger.warning(f"High memory usage ({memory_mb:.1f}MB), clearing Whisper model for aggressive cleanup")
+            # Production: Always unload Whisper model to free memory
+            if self._whisper_model:
+                logger.info("🗑️ Unloading Whisper model to free memory (Production safety)")
                 del self._whisper_model
                 self._whisper_model = None
                 gc.collect()
-            # Original logic for very high memory
-            elif memory_mb > 6500 and self._whisper_model and not preserve_whisper:
-                logger.warning(f"Critical memory usage ({memory_mb:.1f}MB), clearing Whisper model")
+            
+            # Force additional cleanup for production
+            memory_after = self.check_memory_usage()
+            memory_freed = memory_before - memory_after
+            
+            logger.info(f"🧹 Memory cleanup completed: {memory_before:.1f}MB → {memory_after:.1f}MB (Freed: {memory_freed:.1f}MB)")
+            
+            # If memory is still high, perform deep cleanup
+            if memory_after > self.warning_memory_threshold:
+                logger.warning(f"⚠️ Memory still high after cleanup ({memory_after:.1f}MB), performing deep cleanup")
+                self._deep_cleanup()
+                
+        except Exception as e:
+            logger.error(f"Memory cleanup failed: {e}")
+            # Force Whisper unload even on error
+            if self._whisper_model:
                 del self._whisper_model
                 self._whisper_model = None
-                gc.collect()
             
             # Force additional cleanup for Render's memory constraints
             if memory_mb > 2000:
@@ -127,35 +159,69 @@ class LoomVideoProcessor:
         except:
             logger.error("Memory cleanup failed with unknown error")
     
+    def _deep_cleanup(self):
+        """Production deep memory cleanup for critical situations"""
+        try:
+            logger.warning("🔧 Performing deep memory cleanup...")
+            
+            # Force multiple garbage collection cycles
+            for i in range(3):
+                gc.collect()
+                logger.info(f"Deep cleanup cycle {i+1}/3 completed")
+            
+            # Clear Python's internal caches
+            import sys
+            if hasattr(sys, 'intern'):
+                sys.intern.clear()
+            
+            # Clear any remaining large objects
+            large_objects = [obj for obj in gc.get_objects() 
+                           if hasattr(obj, '__sizeof__') and obj.__sizeof__() > 1024*1024]  # >1MB
+            
+            logger.info(f"Found {len(large_objects)} large objects for cleanup")
+            
+            # Force final cleanup
+            gc.collect()
+            
+            memory_after = self.check_memory_usage()
+            logger.info(f"🔧 Deep cleanup completed. Memory: {memory_after:.1f}MB")
+            
+        except Exception as e:
+            logger.error(f"Deep cleanup failed: {e}")
+    
     def get_whisper_model(self):
-        """Load Whisper small model with memory management"""
+        """Production-safe Whisper model loading with strict memory checks"""
         if self._whisper_model is None:
-            # Check memory before loading
+            # Production memory check before loading
             memory_mb = self.check_memory_usage()
-            if memory_mb > self.memory_threshold:
-                logger.warning(f"High memory usage ({memory_mb:.1f}MB) before loading Whisper")
-                self.cleanup_memory(preserve_whisper=True)
+            if memory_mb > self.warning_memory_threshold:
+                logger.warning(f"⚠️ Memory usage high ({memory_mb:.1f}MB) before loading Whisper")
+                self.cleanup_memory(preserve_whisper=False)  # Always cleanup in production
             
             # Check memory again after cleanup
             memory_mb = self.check_memory_usage()
-            if memory_mb > 2000:  # Hard limit to prevent corruption
-                logger.error(f"Memory still too high ({memory_mb:.1f}MB), cannot load Whisper safely")
-                raise Exception(f"Memory usage too high ({memory_mb:.1f}MB) for Whisper model")
+            if memory_mb > 2500:  # Production hard limit (31% of 8GB)
+                logger.error(f"🚨 Memory too high ({memory_mb:.1f}MB), cannot load Whisper safely")
+                raise Exception(f"Production memory limit exceeded: {memory_mb:.1f}MB (max: 2500MB)")
             
-            logger.info("Loading Whisper model (small) - excellent accuracy for tutorial videos...")
+            logger.info("📥 Loading Whisper model (small) for production...")
             try:
                 self._whisper_model = whisper.load_model("small")
-                logger.info("Whisper model (small) loaded successfully")
+                logger.info("✅ Whisper model (small) loaded successfully")
                 
                 # Check memory after loading
                 memory_mb = self.check_memory_usage()
-                logger.info(f"Memory after Whisper load: {memory_mb:.1f} MB")
+                logger.info(f"📊 Memory after Whisper load: {memory_mb:.1f} MB")
+                
+                # Alert if memory is getting high
+                if memory_mb > self.warning_memory_threshold:
+                    logger.warning(f"⚠️ Memory high after Whisper load: {memory_mb:.1f}MB")
                 
             except Exception as e:
-                logger.error(f"Failed to load Whisper model (small): {e}")
+                logger.error(f"❌ Failed to load Whisper model: {e}")
                 raise
         else:
-            logger.info(f"Using existing Whisper model: {type(self._whisper_model).__name__}")
+            logger.info(f"♻️ Using existing Whisper model: {type(self._whisper_model).__name__}")
         
         return self._whisper_model
     
@@ -999,8 +1065,8 @@ class LoomVideoProcessor:
                 vector_id = f"{company_name}_{qudemo_id}_{video_url}_{i}" if qudemo_id else f"{company_name}_{video_url}_{i}"
                 
                 # Extract and validate timestamps
-                chunk_start = float(chunk.get('start', 0.0)) if isinstance(chunk, dict) else 0.0
-                chunk_end = float(chunk.get('end', 0.0)) if isinstance(chunk, dict) else 0.0
+                chunk_start = float(chunk.get('start_timestamp', 0.0)) if isinstance(chunk, dict) else 0.0
+                chunk_end = float(chunk.get('end_timestamp', 0.0)) if isinstance(chunk, dict) else 0.0
                 
                 vector_data = {
                     'id': vector_id,
@@ -1043,7 +1109,7 @@ class LoomVideoProcessor:
     
     def process_video(self, video_url: str, company_name: str, qudemo_id: str = None) -> Optional[Dict]:
         """
-        Complete Loom video processing pipeline with memory management and qudemo isolation
+        Production-ready Loom video processing pipeline with strict memory management
         
         Args:
             video_url: Loom video URL
@@ -1053,17 +1119,40 @@ class LoomVideoProcessor:
         Returns:
             Dict with processing results or None if failed
         """
+        # Production: Ensure only one video processes at a time
+        if not self.processing_lock.acquire(blocking=False):
+            logger.error("🚫 Another video is currently processing. Please wait.")
+            return {
+                "success": False,
+                "error": "Video processing in progress. Please try again later.",
+                "code": "PROCESSING_LOCKED"
+            }
+        
         try:
-            logger.info(f"Processing Loom video: {video_url}")
-            logger.info(f"Company: {company_name}, Qudemo ID: {qudemo_id}")
+            self.is_processing = True
+            logger.info(f"🎬 Processing Loom video: {video_url}")
+            logger.info(f"🏢 Company: {company_name}, Qudemo ID: {qudemo_id}")
+            
+            # Production memory check before starting
+            memory_mb = self.check_memory_usage()
+            if memory_mb > self.warning_memory_threshold:
+                logger.warning(f"⚠️ High memory before processing: {memory_mb:.1f}MB")
+                self.cleanup_memory(preserve_whisper=False)
+                memory_mb = self.check_memory_usage()
+            
+            if memory_mb > self.memory_threshold:
+                logger.error(f"🚨 Memory too high for processing: {memory_mb:.1f}MB")
+                return {
+                    "success": False,
+                    "error": f"Memory usage too high ({memory_mb:.1f}MB) for video processing",
+                    "code": "MEMORY_LIMIT_EXCEEDED"
+                }
+            
+            logger.info(f"✅ Memory check passed: {memory_mb:.1f}MB")
             
             # Check Whisper model status
             whisper_loaded = self.is_whisper_loaded()
-            logger.info(f"Whisper model loaded: {whisper_loaded}")
-            
-            # Initial memory check
-            memory_mb = self.check_memory_usage()
-            logger.info(f"Initial memory: {memory_mb:.1f} MB")
+            logger.info(f"📊 Whisper model loaded: {whisper_loaded}")
             
             # Step 1: Extract video info
             video_info = self.extract_loom_video_info(video_url)
@@ -1087,140 +1176,173 @@ class LoomVideoProcessor:
             if not download_success:
                 raise Exception("Failed to download video")
             
-            try:
-                # Check memory before transcription
-                memory_mb = self.check_memory_usage()
-                if memory_mb > self.memory_threshold:
-                    logger.warning(f"High memory before transcription ({memory_mb:.1f}MB), performing cleanup")
-                    self.cleanup_memory(preserve_whisper=True)
-                
-                # Check memory again after cleanup
-                memory_mb = self.check_memory_usage()
-                if memory_mb > 3000:  # Hard limit to prevent corruption
-                    logger.error(f"Memory still too high ({memory_mb:.1f}MB) after cleanup, skipping video")
-                    return {
-                        "success": False,
-                        "message": f"Memory usage too high ({memory_mb:.1f}MB), video too large to process safely",
-                        "error": "memory_limit_exceeded"
-                    }
-                
-                # Step 3: Transcribe video
-                transcription_data = self.transcribe_video(temp_video_path)
-                if not transcription_data:
-                    raise Exception("Failed to transcribe video")
-                
-                # Check memory after transcription
-                memory_mb = self.check_memory_usage()
-                logger.info(f"Memory after transcription: {memory_mb:.1f} MB")
-                
-                # Step 4: Chunk the transcription
-                transcription = transcription_data.get('transcription', '')
-                if not transcription:
-                    raise Exception("Empty transcription")
-                segments = transcription_data.get('segments', [])
-                
-                # Use smaller chunks for Loom videos for better timestamp precision
-                chunk_size = 600  # Further reduced for memory optimization
-                max_chunk_duration = 30  # Further reduced for memory optimization
-                
-                chunks = self.chunk_transcription(transcription, segments=segments, 
-                                                chunk_size=chunk_size, 
-                                                max_chunk_duration=max_chunk_duration)
-                if not chunks:
-                    raise Exception("Failed to create chunks")
-                
-                # Log detailed chunk information
-                logger.info(f"Created {len(chunks)} timestamped chunks")
-                logger.info("TRANSCRIPTION CHUNKS WITH TIMESTAMPS:")
-                logger.info("=" * 80)
-                for i, chunk in enumerate(chunks, 1):
-                    start_time = chunk.get('start', 0)
-                    end_time = chunk.get('end', 0)
-                    text = chunk.get('text', '').strip()
-                    
-                    # Format timestamps as MM:SS
-                    start_formatted = f"{int(start_time//60):02d}:{int(start_time%60):02d}"
-                    end_formatted = f"{int(end_time//60):02d}:{int(end_time%60):02d}"
-                    
-                    logger.info(f"Chunk {i:2d} [{start_formatted} → {end_formatted}] ({end_time-start_time:.1f}s):")
-                    logger.info(f"  \"{text}\"")
-                    logger.info("")
-                logger.info("=" * 80)
-                logger.info(f"Total chunks: {len(chunks)}")
-                logger.info(f"Average chunk duration: {sum(chunk.get('end', 0) - chunk.get('start', 0) for chunk in chunks) / len(chunks):.1f}s")
-                
-                # Check memory before embeddings
-                memory_mb = self.check_memory_usage()
-                if memory_mb > self.memory_threshold:
-                    logger.warning(f"High memory before embeddings ({memory_mb:.1f}MB), performing cleanup")
-                    self.cleanup_memory(preserve_whisper=True)
-                
-                # Step 5: Create embeddings
-                embeddings = self.create_embeddings([c['text'] if isinstance(c, dict) else str(c) for c in chunks])
-                if not embeddings or len(embeddings) != len(chunks):
-                    raise Exception("Failed to create embeddings")
-                
-                # Check memory before storage
-                memory_mb = self.check_memory_usage()
-                logger.info(f"Memory before storage: {memory_mb:.1f} MB")
-                
-                # Step 6: Store in Pinecone with qudemo isolation
-                storage_success = self.store_in_pinecone(
-                    company_name, video_url, video_info, transcription_data, chunks, embeddings, qudemo_id
-                )
-
-                # Log a brief timestamp summary for Loom chunks
-                try:
-                    total = len(chunks)
-                    with_ts = sum(1 for c in chunks if float(c.get('start', 0.0)) > 0.0 or float(c.get('end', 0.0)) > 0.0)
-                    logger.info(f"Timestamp chunk check (Loom - {company_name} qudemo {qudemo_id}): {with_ts}/{total} chunks have timestamps")
-                    for i, c in enumerate(chunks[: min(3, total)]):  # Reduced logging
-                        s = float(c.get('start', 0.0))
-                        e = float(c.get('end', 0.0))
-                        t = (c.get('text') or '')[:80].replace('\n', ' ')  # Reduced text length
-                        logger.info(f"    #{i+1}: [{s:.2f} → {e:.2f}] {t}")
-                except Exception:
-                    pass
-                
-                if not storage_success:
-                    raise Exception("Failed to store in Pinecone")
-                
-                # Final memory cleanup
-                self.cleanup_memory(preserve_whisper=True)
-                
-                # Return success result
-                result = {
-                    'success': True,
-                    'video_url': video_url,
-                    'company_name': company_name,
-                    'qudemo_id': qudemo_id,
-                    'title': video_info.get('title', 'Unknown'),
-                    'chunks_created': len(chunks),
-                    'vectors_stored': len(embeddings),
-                    'word_count': transcription_data.get('word_count', 'Unknown'),
-                    'language': transcription_data.get('language', 'Unknown'),
-                    'method': 'loom_transcription'
+            # Production: Check memory before transcription
+            memory_mb = self.check_memory_usage()
+            if memory_mb > self.memory_threshold:
+                logger.warning(f"⚠️ High memory before transcription ({memory_mb:.1f}MB), performing cleanup")
+                self.cleanup_memory(preserve_whisper=False)  # Production: always cleanup
+            
+            # Check memory again after cleanup
+            memory_mb = self.check_memory_usage()
+            if memory_mb > 2500:  # Production hard limit (31% of 8GB)
+                logger.error(f"🚨 Memory still too high ({memory_mb:.1f}MB) after cleanup, skipping video")
+                return {
+                    "success": False,
+                    "message": f"Memory usage too high ({memory_mb:.1f}MB), video too large to process safely",
+                    "error": "memory_limit_exceeded"
                 }
+            
+            # Step 3: Transcribe video
+            transcription_data = self.transcribe_video(temp_video_path)
+            if not transcription_data:
+                raise Exception("Failed to transcribe video")
+            
+            # Check memory after transcription
+            memory_mb = self.check_memory_usage()
+            logger.info(f"Memory after transcription: {memory_mb:.1f} MB")
+            
+            # Step 4: Use enhanced segments directly (same strategy as video_processing.py)
+            transcription = transcription_data.get('transcription', '')
+            if not transcription:
+                raise Exception("Empty transcription")
+            segments = transcription_data.get('segments', [])
+            
+            # Use the enhanced segments directly - they already have proper timestamps
+            chunks = []
+            for i, segment in enumerate(segments):
+                chunk_data = {
+                    'text': segment.get('text', ''),
+                    'full_context': segment.get('text', ''),
+                    'source': 'video',
+                    'title': f'Video Transcription - {company_name}',
+                    'url': video_url,
+                    'processed_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'start_timestamp': segment.get('start', 0),
+                    'end_timestamp': segment.get('end', 0),
+                    'chunk_index': i,
+                    'total_chunks': len(segments)
+                }
+                chunks.append(chunk_data)
+            
+            # Log detailed chunk information
+            logger.info(f"Created {len(chunks)} timestamped chunks from enhanced segments")
+            logger.info("ENHANCED SEGMENT CHUNKS WITH TIMESTAMPS:")
+            logger.info("=" * 80)
+            for i, chunk in enumerate(chunks, 1):
+                start_time = chunk.get('start_timestamp', 0)
+                end_time = chunk.get('end_timestamp', 0)
+                text = chunk.get('text', '').strip()
                 
-                logger.info(f"Loom video processing completed successfully for {company_name} qudemo {qudemo_id}")
-                return result
+                # Format timestamps as MM:SS
+                start_formatted = f"{int(start_time//60):02d}:{int(start_time%60):02d}"
+                end_formatted = f"{int(end_time//60):02d}:{int(end_time%60):02d}"
                 
-            finally:
-                # Clean up temporary file
-                try:
-                    os.unlink(temp_video_path)
-                    logger.info("Cleaned up temporary video file")
-                except:
-                    pass
-                
-                # Final memory cleanup
-                self.cleanup_memory(preserve_whisper=True)
-                
+                logger.info(f"Chunk {i:2d} [{start_formatted} → {end_formatted}] ({end_time-start_time:.1f}s):")
+                logger.info(f"  \"{text}\"")
+                logger.info("")
+            logger.info("=" * 80)
+            logger.info(f"Total chunks: {len(chunks)}")
+            logger.info(f"Average chunk duration: {sum(chunk.get('end_timestamp', 0) - chunk.get('start_timestamp', 0) for chunk in chunks) / len(chunks):.1f}s")
+            
+            # Production: Check memory before embeddings
+            memory_mb = self.check_memory_usage()
+            if memory_mb > self.memory_threshold:
+                logger.warning(f"⚠️ High memory before embeddings ({memory_mb:.1f}MB), performing cleanup")
+                self.cleanup_memory(preserve_whisper=False)  # Production: always cleanup
+            
+            # Step 5: Create embeddings
+            embeddings = self.create_embeddings([c['text'] for c in chunks])
+            if not embeddings or len(embeddings) != len(chunks):
+                raise Exception("Failed to create embeddings")
+            
+            # Check memory before storage
+            memory_mb = self.check_memory_usage()
+            logger.info(f"Memory before storage: {memory_mb:.1f} MB")
+            
+            # Step 6: Store in Pinecone with qudemo isolation
+            storage_success = self.store_in_pinecone(
+                company_name, video_url, video_info, transcription_data, chunks, embeddings, qudemo_id
+            )
+
+            # Log a brief timestamp summary for Loom chunks
+            try:
+                total = len(chunks)
+                with_ts = sum(1 for c in chunks if float(c.get('start_timestamp', 0.0)) > 0.0 or float(c.get('end_timestamp', 0.0)) > 0.0)
+                logger.info(f"Timestamp chunk check (Loom - {company_name} qudemo {qudemo_id}): {with_ts}/{total} chunks have timestamps")
+                for i, c in enumerate(chunks[: min(3, total)]):  # Reduced logging
+                    s = float(c.get('start_timestamp', 0.0))
+                    e = float(c.get('end_timestamp', 0.0))
+                    t = (c.get('text') or '')[:80].replace('\n', ' ')  # Reduced text length
+                    logger.info(f"    #{i+1}: [{s:.2f}s → {e:.2f}s] {t}")
+            except Exception as e:
+                logger.warning(f"Failed to log timestamp summary: {e}")
+                pass
+            
+            if not storage_success:
+                raise Exception("Failed to store in Pinecone")
+            
+            # Production: Final memory cleanup and lock release
+            self.cleanup_memory(preserve_whisper=False)  # Always cleanup in production
+            
+            # Return success result
+            result = {
+                'success': True,
+                'video_url': video_url,
+                'company_name': company_name,
+                'qudemo_id': qudemo_id,
+                'title': video_info.get('title', 'Unknown'),
+                'chunks_created': len(chunks),
+                'vectors_stored': len(embeddings),
+                'word_count': transcription_data.get('word_count', 'Unknown'),
+                'language': transcription_data.get('language', 'Unknown'),
+                'method': 'loom_transcription',
+                'memory_usage_mb': self.check_memory_usage(),
+                'production_mode': True
+            }
+            
+            logger.info(f"✅ Loom video processing completed successfully for {company_name} qudemo {qudemo_id}")
+            
+            # Production: Always cleanup and release lock
+            self.cleanup_memory(preserve_whisper=False)
+            
+            # Release processing lock
+            if hasattr(self, 'processing_lock'):
+                self.processing_lock.release()
+                self.is_processing = False
+                logger.info("🔓 Processing lock released")
+            
+            # Clean up temporary file
+            try:
+                os.unlink(temp_video_path)
+                logger.info("🧹 Cleaned up temporary video file")
+            except:
+                pass
+            
+            return result
+            
         except Exception as e:
-            logger.error(f"Loom video processing failed: {e}")
-            # Cleanup on error
-            self.cleanup_memory(preserve_whisper=True)
-            return None
+            logger.error(f"❌ Loom video processing failed: {e}")
+            # Production: Always cleanup on error
+            self.cleanup_memory(preserve_whisper=False)
+            
+            # Release processing lock
+            if hasattr(self, 'processing_lock'):
+                self.processing_lock.release()
+                self.is_processing = False
+                logger.info("🔓 Processing lock released (error)")
+            
+            # Clean up temporary file
+            try:
+                os.unlink(temp_video_path)
+                logger.info("🧹 Cleaned up temporary video file (error)")
+            except:
+                pass
+            
+            return {
+                "success": False,
+                "error": str(e),
+                "code": "PROCESSING_FAILED"
+            }
     
     def search_similar_chunks(self, company_name: str, query: str, qudemo_id: str = None, top_k: int = 5) -> List[Dict]:
         """
@@ -1500,9 +1622,9 @@ class LoomVideoProcessor:
                 if not embeddings or len(embeddings) != len(chunks):
                     raise Exception("Failed to create embeddings")
                 
-                # Step 6: Store in Pinecone
+                # Step 6: Store in Pinecone with enhanced chunk data
                 storage_success = self.store_in_pinecone(
-                    company_name, video_url, video_info, transcription_data, chunks, embeddings
+                    company_name, video_url, video_info, transcription_data, chunks, embeddings, qudemo_id
                 )
                 
                 if not storage_success:

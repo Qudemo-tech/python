@@ -107,43 +107,56 @@ def process_video(video_url: str, company_name: str, qudemo_id: str = None, buck
             if not loom_processor:
                 raise Exception("Loom processor not initialized")
             
-            # Process with semantic chunking
-            return process_video_with_semantic_chunking(video_url, company_name, qudemo_id)
+            # For Loom videos, use the Loom processor directly to avoid duplicate processing
+            logger.info(f"🎯 Using Loom processor directly for: {video_url}")
+            result = loom_processor.process_video(video_url, company_name, qudemo_id)
+            
+            if result and result.get('success'):
+                logger.info(f"✅ Loom video processed successfully: {result.get('chunks_created', 0)} chunks created")
+                return {
+                    "success": True,
+                    "message": "Loom video processed successfully",
+                    "company_name": company_name,
+                    "qudemo_id": qudemo_id,
+                    "video_url": video_url,
+                    "result": result
+                }
+            else:
+                logger.error(f"❌ Loom video processing failed: {result}")
+                return {
+                    "success": False,
+                    "error": result.get('error', 'Unknown error') if result else 'No result returned',
+                    "company_name": company_name,
+                    "qudemo_id": qudemo_id,
+                    "video_url": video_url
+                }
         else:
             # Use Gemini processor for other video types
             if not gemini_processor:
                 raise Exception("Gemini processor not initialized")
             
-            return process_video_with_semantic_chunking(video_url, company_name, qudemo_id)
-        
-        # Post-processing memory cleanup
-        if is_loom and loom_processor:
-            logger.info("🧹 Post-processing memory cleanup...")
-            loom_processor.cleanup_memory(preserve_whisper=False)
-        
-        # Check if the result is valid (not None)
-        if result is None:
-            logger.error("❌ Video processing failed - result is None")
-            return {
-                "success": False,
-                "error": "Video processing failed - no result returned",
-                "company_name": company_name,
-                "qudemo_id": qudemo_id,
-                "video_url": video_url,
-                "details": {
-                    "suggestion": "The video may not have audio or may be corrupted"
+            logger.info(f"🎯 Using Gemini processor for: {video_url}")
+            result = process_video_with_semantic_chunking(video_url, company_name, qudemo_id)
+            
+            if result and result.get('success'):
+                logger.info(f"✅ Gemini video processed successfully")
+                return {
+                    "success": True,
+                    "message": "Video processed successfully",
+                    "company_name": company_name,
+                    "qudemo_id": qudemo_id,
+                    "video_url": video_url,
+                    "result": result
                 }
-            }
-        
-        logger.info(f"✅ Video processing completed successfully")
-        return {
-            "success": True,
-            "message": "Video processed successfully",
-            "company_name": company_name,
-            "qudemo_id": qudemo_id,
-            "video_url": video_url,
-            "result": result
-        }
+            else:
+                logger.error(f"❌ Gemini video processing failed: {result}")
+                return {
+                    "success": False,
+                    "error": result.get('error', 'Unknown error') if result else 'No result returned',
+                    "company_name": company_name,
+                    "qudemo_id": qudemo_id,
+                    "video_url": video_url
+                }
         
     except Exception as e:
         logger.error(f"❌ Video processing failed: {e}")
@@ -273,6 +286,31 @@ def process_video_with_semantic_chunking(video_url: str, company_name: str, qude
                 raise Exception("Loom processor not initialized")
             
             logger.info(f"Using Loom processor for: {video_url}")
+            
+            # Check if video was already processed by looking for existing data
+            try:
+                from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
+                integrator = EnhancedKnowledgeIntegrator(
+                    openai_api_key=os.getenv('OPENAI_API_KEY'),
+                    pinecone_api_key=os.getenv('PINECONE_API_KEY'),
+                    pinecone_index=os.getenv('PINECONE_INDEX')
+                )
+                
+                # Check if we already have data for this video
+                existing_data = integrator.get_knowledge_summary(company_name, qudemo_id)
+                if existing_data and existing_data.get('success') and existing_data.get('data', {}).get('video_sources'):
+                    logger.info(f"✅ Video already processed for {company_name} qudemo {qudemo_id}, skipping duplicate processing")
+                    return {
+                        "success": True,
+                        "message": "Video already processed successfully",
+                        "company_name": company_name,
+                        "qudemo_id": qudemo_id,
+                        "video_url": video_url,
+                        "details": "Video was already processed by Loom processor"
+                    }
+            except Exception as e:
+                logger.warning(f"Could not check existing data: {e}")
+            
             # Use the public process_video method to get enhanced segments
             transcription_data = loom_processor.process_video(video_url, company_name, qudemo_id)
             if not transcription_data:

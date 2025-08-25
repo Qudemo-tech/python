@@ -17,8 +17,8 @@ from openai import OpenAI
 logger = logging.getLogger(__name__)
 
 # Configuration
-NODE_API_URL = os.getenv('NODE_API_URL', 'http://localhost:3001')
-PYTHON_API_URL = os.getenv('PYTHON_API_URL', 'http://localhost:5000')
+NODE_API_URL = os.getenv('NODE_API_URL', 'http://localhost:5000')
+PYTHON_API_URL = os.getenv('PYTHON_API_URL', 'http://localhost:5001')
 
 class EnhancedKnowledgeIntegrator:
     """Enhanced Knowledge Integrator for Pinecone operations with qudemo isolation"""
@@ -66,6 +66,7 @@ class EnhancedKnowledgeIntegrator:
                     metadata = {
                         'text': chunk['text'],
                         'source': chunk.get('source', 'unknown'),
+                        'source_type': 'video_transcript' if chunk.get('source') == 'video' else 'web_scraping',
                         'title': chunk.get('title', ''),
                         'url': chunk.get('url', ''),
                         'processed_at': chunk.get('processed_at', datetime.now().isoformat()),

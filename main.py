@@ -561,6 +561,61 @@ async def ask_enhanced_question_endpoint(company_name: str, qudemo_id: str, requ
         logger.error(f"❌ Enhanced Q&A endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# Qudemo Content Processing Endpoint
+@app.post("/process-qudemo-content/{company_name}/{qudemo_id}")
+async def process_qudemo_content_endpoint(company_name: str, qudemo_id: str, request: Request):
+    """Process all content for a qudemo automatically - videos first, then website if provided"""
+    global enhanced_qa_system
+    
+    try:
+        if not enhanced_qa_system:
+            logger.error("❌ Enhanced QA system not available")
+            raise HTTPException(
+                status_code=503, 
+                detail="Content processing not available. Please check API keys configuration and restart the server."
+            )
+        
+        # Parse request body
+        body = await request.json()
+        video_urls = body.get('video_urls', [])
+        website_url = body.get('website_url')
+        
+        if not video_urls and not website_url:
+            raise HTTPException(status_code=400, detail="At least one content source (video_urls or website_url) is required")
+        
+        logger.info(f"🚀 Processing qudemo content for {company_name} qudemo {qudemo_id}")
+        logger.info(f"📹 Videos: {len(video_urls) if video_urls else 0}")
+        logger.info(f"🌐 Website: {website_url if website_url else 'None'}")
+        
+        # Process all content automatically
+        result = await enhanced_qa_system.process_qudemo_content(
+            company_name=company_name,
+            qudemo_id=qudemo_id,
+            video_urls=video_urls,
+            website_url=website_url
+        )
+        
+        if result.get('success'):
+            return {
+                "success": True,
+                "message": result.get('message', 'Content processed successfully'),
+                "company_name": company_name,
+                "qudemo_id": qudemo_id,
+                "videos_processed": result.get('videos_processed', 0),
+                "website_processed": result.get('website_processed', False),
+                "total_chunks": result.get('total_chunks', 0),
+                "processing_order": result.get('processing_order', []),
+                "errors": result.get('errors', [])
+            }
+        else:
+            raise HTTPException(status_code=500, detail=result.get('error', 'Content processing failed'))
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Qudemo content processing error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Data Management Endpoints
 @app.delete("/delete-qudemo-data/{company_name}/{qudemo_id}")
 async def delete_qudemo_data_endpoint(company_name: str, qudemo_id: str):
@@ -987,6 +1042,47 @@ async def force_cleanup():
         }
     except Exception as e:
         return {"error": str(e)}
+
+# Test endpoint to get qudemo data without authentication (for debugging)
+@app.get("/test/qudemo/{company_name}/{qudemo_id}")
+async def test_get_qudemo_data(company_name: str, qudemo_id: str):
+    """Test endpoint to get qudemo data without authentication"""
+    try:
+        # Get knowledge sources
+        knowledge_result = await enhanced_qa_system.get_knowledge_summary(company_name, qudemo_id)
+        
+        # Get video chunks if any
+        video_chunks = []
+        try:
+            # This would normally come from Node.js backend, but for testing we'll create a mock
+            video_chunks = [
+                {
+                    "id": f"video_{qudemo_id}_1",
+                    "title": "Sample Video",
+                    "chunks_count": 0,
+                    "status": "processed"
+                }
+            ]
+        except Exception as e:
+            print(f"Warning: Could not get video data: {e}")
+        
+        return {
+            "success": True,
+            "data": {
+                "qudemo_id": qudemo_id,
+                "company_name": company_name,
+                "knowledge_sources": knowledge_result.get("data", {}).get("sources", []),
+                "videos": video_chunks,
+                "total_knowledge": len(knowledge_result.get("data", {}).get("sources", [])),
+                "total_videos": len(video_chunks)
+            }
+        }
+    except Exception as e:
+        print(f"Error in test endpoint: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 # Main entry point
 if __name__ == "__main__":

@@ -355,8 +355,8 @@ async def ask_question_company_endpoint(company_name: str, qudemo_id: str, reque
         
         logger.info(f"❓ Question for {company_name} qudemo {qudemo_id}: {question}")
         
-        # Call the async ask_question method
-        result = await enhanced_qa_system.ask_question(question, company_name, qudemo_id)
+        # Call the ask_question method (not async)
+        result = enhanced_qa_system.ask_question(question, company_name, qudemo_id)
         
         if not result.get('success'):
             raise HTTPException(status_code=500, detail=result.get('message', 'Failed to process question'))

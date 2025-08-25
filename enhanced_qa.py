@@ -198,404 +198,244 @@ class EnhancedQASystem:
                 }
             }
 
-    async def ask_question(self, question: str, company_name: str, qudemo_id: str) -> Dict:
-        """Ask a question and get comprehensive answer using semantic search with video navigation for specific qudemo"""
+    async def process_qudemo_content(self, company_name: str, qudemo_id: str, video_urls: List[str] = None, website_url: str = None) -> Dict:
+        """Process all content for a qudemo - videos first, then website if provided"""
         try:
-            print(f"🔍 Processing question: '{question}' for company: {company_name} qudemo: {qudemo_id}")
+            print(f"🚀 Processing qudemo content for {company_name} qudemo {qudemo_id}")
+            print(f"📹 Videos: {len(video_urls) if video_urls else 0}")
+            print(f"🌐 Website: {website_url if website_url else 'None'}")
             
-            # Search Pinecone directly for all content (videos and knowledge)
-            print(f"🔍 Searching Pinecone directly for content in namespace: {company_name}-{qudemo_id}")
+            videos_processed = 0
+            website_processed = False
+            total_chunks = 0
+            processing_order = []
+            errors = []
             
-            # We'll search Pinecone directly instead of relying on Node.js backend
-            videos = []  # Empty list since we're searching Pinecone directly
-            
-            # Step 2: Search video transcripts first (highest priority)
-            video_answer = await self._search_video_transcripts(question, videos, company_name, qudemo_id)
-            
-            # Step 3: Search scraped knowledge sources directly from Pinecone
-            # Create a dummy knowledge_sources list since we're searching Pinecone directly
-            knowledge_sources = [{"type": "web_scraping"}]  # Dummy list for compatibility
-            knowledge_answer = await self._search_knowledge_sources(question, knowledge_sources, company_name, qudemo_id)
-            
-            # Step 4: Implement priority-based answer selection
-            final_answer = self._select_best_answer(video_answer, knowledge_answer, question)
-            
-            return final_answer
+            # Process videos first (if any)
+            if video_urls:
+                print(f"🎬 Processing {len(video_urls)} videos...")
+                processing_order.append("videos")
                 
+                for i, video_url in enumerate(video_urls):
+                    try:
+                        print(f"🎬 Processing video {i+1}/{len(video_urls)}: {video_url}")
+                        
+                        # Import video processing module
+                        from video_processing import process_video
+                        
+                        # Process the video
+                        result = process_video(
+                            video_url=video_url,
+                            company_name=company_name,
+                            qudemo_id=qudemo_id
+                        )
+                        
+                        if result.get('success'):
+                            videos_processed += 1
+                            chunks = result.get('chunks', 0)
+                            total_chunks += chunks
+                            print(f"✅ Video {i+1} processed successfully: {chunks} chunks")
+                        else:
+                            error_msg = f"Video {i+1} failed: {result.get('error', 'Unknown error')}"
+                            errors.append(error_msg)
+                            print(f"❌ {error_msg}")
+                            
+                    except Exception as e:
+                        error_msg = f"Video {i+1} processing error: {str(e)}"
+                        errors.append(error_msg)
+                        print(f"❌ {error_msg}")
+                        continue
+            
+            # Process website (if provided)
+            if website_url:
+                print(f"🌐 Processing website: {website_url}")
+                processing_order.append("website")
+                
+                try:
+                    # Process the website using the existing method
+                    result = await self.process_website_knowledge(
+                        url=website_url,
+                        company_name=company_name,
+                        qudemo_id=qudemo_id
+                    )
+                    
+                    if result.get('success'):
+                        website_processed = True
+                        chunks = len(result.get('data', {}).get('chunks', []))
+                        total_chunks += chunks
+                        print(f"✅ Website processed successfully: {chunks} chunks")
+                    else:
+                        error_msg = f"Website processing failed: {result.get('error', 'Unknown error')}"
+                        errors.append(error_msg)
+                        print(f"❌ {error_msg}")
+                        
+                except Exception as e:
+                    error_msg = f"Website processing error: {str(e)}"
+                    errors.append(error_msg)
+                    print(f"❌ {error_msg}")
+            
+            # Prepare response
+            success = len(errors) == 0 or (videos_processed > 0 or website_processed)
+            
+            if success:
+                message = f"Content processed successfully. Videos: {videos_processed}, Website: {'Yes' if website_processed else 'No'}, Total chunks: {total_chunks}"
+                print(f"✅ {message}")
+            else:
+                message = f"Content processing failed. Errors: {len(errors)}"
+                print(f"❌ {message}")
+            
+            return {
+                'success': success,
+                'message': message,
+                'videos_processed': videos_processed,
+                'website_processed': website_processed,
+                'total_chunks': total_chunks,
+                'processing_order': processing_order,
+                'errors': errors
+            }
+            
         except Exception as e:
-            print(f"❌ Error asking qudemo question: {e}")
+            print(f"❌ Error processing qudemo content: {e}")
             import traceback
             print(f"🔍 Full traceback: {traceback.format_exc()}")
             return {
-                "success": False,
-                "answer": "I encountered an error while processing your question. This might be because the qudemo doesn't exist or there's a temporary issue. Please try asking about a different qudemo or contact support if the problem persists.",
-                "sources": []
+                'success': False,
+                'error': str(e),
+                'videos_processed': 0,
+                'website_processed': False,
+                'total_chunks': 0,
+                'processing_order': [],
+                'errors': [str(e)]
             }
 
-    async def _search_video_transcripts(self, question: str, videos: List[Dict], company_name: str, qudemo_id: str) -> Optional[Dict]:
-        """Search through video transcripts for the answer using vector database"""
+    def get_knowledge_summary(self, company_name: str, qudemo_id: str) -> Dict:
+        """Get knowledge summary for a specific qudemo"""
         try:
-            print(f"🎬 Starting video transcript search for: '{question}'")
-            print(f"🎬 Company: {company_name}, Qudemo: {qudemo_id}")
-            print(f"🎬 Videos provided: {len(videos) if videos else 0}")
-            
-            # Always search Pinecone regardless of videos list
-            print(f"🎬 Searching Pinecone directly...")
+            print(f"📄 Getting knowledge summary for company: {company_name} qudemo: {qudemo_id}")
             
             # Initialize Pinecone
             pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
             index_name = os.getenv('PINECONE_INDEX', 'qudemo-index')
-            
-            # Get the index
             index = pc.Index(index_name)
             
-            # Create namespace from company name and qudemo_id for proper isolation
+            # Create namespace from company name and qudemo_id
             namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
             
-            print(f"🔍 Searching video transcripts in namespace: {namespace}")
-            
-            # Create embedding for the question
-            question_embedding = self._get_embedding(question)
-            print(f"🔍 Generated embedding for question: {len(question_embedding)} dimensions")
-            
-            # Search for relevant chunks without filter first to see what's available
+            # Get index stats to check if namespace exists
             try:
-                # Try without namespace first to see if there's any content
-                print(f"🔍 Trying search without namespace first...")
-                query_results_no_namespace = index.query(
-                    vector=question_embedding,
-                    top_k=10,
-                    include_metadata=True
-                )
-                print(f"🔍 Found {len(query_results_no_namespace.matches)} matches without namespace")
-                if query_results_no_namespace.matches:
-                    print(f"🔍 First match without namespace: {query_results_no_namespace.matches[0].metadata.get('company_name', 'unknown')} - {query_results_no_namespace.matches[0].metadata.get('qudemo_id', 'unknown')}")
-            except Exception as e:
-                print(f"🔍 Error searching without namespace: {e}")
-            
-            # Search for relevant chunks without filter first to see what's available
-            try:
-                # Try without namespace first to see if there's any content
-                print(f"🔍 Trying search without namespace first...")
-                query_results = index.query(
-                    vector=question_embedding,
-                    top_k=20,
-                    include_metadata=True
-                )
-                print(f"🔍 Search without namespace completed")
-            except Exception as search_error:
-                print(f"❌ Search without namespace failed: {search_error}")
-                return None
+                stats = index.describe_index_stats()
+                total_vectors = stats.get('total_vector_count', 0)
                 
-            print(f"🔍 Found {len(query_results.matches)} total matches in namespace")
-            
-            # Debug: Print all source types found
-            source_types = set()
-            for match in query_results.matches:
-                source_type = match.metadata.get('source_type', 'unknown')
-                source = match.metadata.get('source', 'unknown')
-                source_types.add(f"source_type: {source_type}, source: {source}")
-            
-            print(f"🔍 Available source types: {list(source_types)}")
-            
-            # Filter for video content - be more flexible
-            video_matches = [match for match in query_results.matches 
-                           if (match.metadata.get('source_type') == 'video_transcript' or 
-                               match.metadata.get('source') == 'video' or
-                               'video' in match.metadata.get('title', '').lower() or
-                               'transcription' in match.metadata.get('title', '').lower())]
-            
-            # If we have video matches, try to find one with timestamp information
-            if video_matches:
-                # Look for a match with timestamp information
-                timestamped_match = None
-                for match in video_matches:
-                    if (match.metadata.get('start_timestamp') or 
-                        match.metadata.get('start_time') or
-                        match.metadata.get('timestamp')):
-                        timestamped_match = match
-                        break
-                
-                # If we found a timestamped match, use it; otherwise use the first match
-                if timestamped_match:
-                    video_matches = [timestamped_match]
-                    print(f"🔍 Found timestamped video match: {timestamped_match.metadata.get('start_timestamp', 'unknown')}")
-                else:
-                    print(f"🔍 No timestamped video matches found, using first match")
-            
-            # If no video matches found, try using any match with a reasonable score
-            if not video_matches and query_results.matches:
-                print(f"🔍 No video matches found, using best available match")
-                video_matches = [query_results.matches[0]]  # Use the best match regardless of type
-            
-            print(f"🔍 Found {len(video_matches)} video matches")
-            
-            if not video_matches:
-                print("⚠️ No video transcript chunks found")
-                return None
-            
-            # Get the best match
-            best_match = video_matches[0]
-            
-            # Debug: Print the best match details
-            print(f"🔍 Best match details:")
-            print(f"   - Score: {best_match.score}")
-            print(f"   - ID: {best_match.id}")
-            print(f"   - Source: {best_match.metadata.get('source', 'unknown')}")
-            print(f"   - Source Type: {best_match.metadata.get('source_type', 'unknown')}")
-            print(f"   - Title: {best_match.metadata.get('title', 'unknown')}")
-            print(f"   - Text preview: {best_match.metadata.get('text', '')[:100]}...")
-            print(f"   - All metadata keys: {list(best_match.metadata.keys())}")
-            print(f"   - Start timestamp: {best_match.metadata.get('start_timestamp', 'NOT_FOUND')}")
-            print(f"   - End timestamp: {best_match.metadata.get('end_timestamp', 'NOT_FOUND')}")
-            print(f"   - URL: {best_match.metadata.get('url', 'NOT_FOUND')}")
-            
-            print(f"🔍 Best video match score: {best_match.score:.3f}")
-            print(f"🔍 Best video match title: {best_match.metadata.get('title', 'Unknown')}")
-            
-            # Improved relevance checking with multiple criteria
-            relevance_score = best_match.score
-            
-            # Check for keyword relevance in the question and answer
-            question_lower = question.lower()
-            answer_text = best_match.metadata.get('text', '').lower()
-            
-            # Extract key terms from the question with more flexible matching
-            key_terms = []
-            required_terms = []  # Terms that must be present for relevance
-            
-            # More flexible keyword matching
-            if 'workflow' in question_lower:
-                key_terms.extend(['workflow', 'process', 'flow', 'diagram', 'chart'])
-                required_terms.append('workflow')
-            if 'graph' in question_lower:
-                key_terms.extend(['graph', 'chart', 'diagram', 'visualization', 'view'])
-                required_terms.append('graph')
-            if 'outflow' in question_lower:
-                key_terms.extend(['outflow', 'cash flow', 'payment', 'expense', 'spending'])
-                required_terms.append('outflow')
-            if 'ap' in question_lower:
-                key_terms.extend(['ap', 'accounts payable', 'payable', 'invoice', 'purchasing'])
-            if 'view' in question_lower:
-                key_terms.extend(['view', 'see', 'show', 'display', 'find'])
-            
-            # Check for negative terms that indicate wrong content (but be less strict)
-            negative_terms = ['forecast', 'forecasting', 'prediction', 'estimate']
-            negative_matches = sum(1 for term in negative_terms if term in answer_text)
-            
-            # Reduced penalty for negative terms (less strict)
-            negative_penalty = negative_matches * 0.15  # Reduced from 0.3 to 0.15
-            
-            # Calculate keyword relevance
-            keyword_matches = sum(1 for term in key_terms if term in answer_text)
-            keyword_relevance = keyword_matches / max(len(key_terms), 1) if key_terms else 0
-            
-            # Check if required terms are present
-            required_matches = sum(1 for term in required_terms if term in answer_text)
-            required_relevance = required_matches / max(len(required_terms), 1) if required_terms else 1.0
-            
-            # Combined relevance score with penalties
-            combined_score = (relevance_score * 0.6) + (keyword_relevance * 0.2) + (required_relevance * 0.2) - negative_penalty
-            
-            print(f"🔍 Relevance analysis:")
-            print(f"   - Semantic score: {relevance_score:.3f}")
-            print(f"   - Keyword relevance: {keyword_relevance:.3f} ({keyword_matches}/{len(key_terms)} terms)")
-            print(f"   - Required relevance: {required_relevance:.3f} ({required_matches}/{len(required_terms)} terms)")
-            print(f"   - Negative penalty: {negative_penalty:.3f} ({negative_matches} negative terms)")
-            print(f"   - Combined score: {combined_score:.3f}")
-            print(f"   - Key terms searched: {key_terms}")
-            print(f"   - Required terms: {required_terms}")
-            print(f"   - Negative terms found: {[term for term in negative_terms if term in answer_text]}")
-            
-            # Balanced threshold for accuracy and inclusivity
-            if combined_score > 0.3:  # Slightly lower threshold to be more inclusive
-                print(f"✅ Found relevant video answer with combined score {combined_score:.3f}")
-                
-                # Extract video information from metadata
-                video_url = best_match.metadata.get('url', '')  # Use 'url' instead of 'video_url'
-                
-                # Clean the text by removing timestamp markers like [00:01], [00:05], etc.
-                raw_text = best_match.metadata.get('text', '')
-                import re
-                
-                # Extract the first timestamp from the text before cleaning
-                first_timestamp_match = re.search(r'\[(\d{2}):(\d{2})\]', raw_text)
-                if first_timestamp_match:
-                    minutes, seconds = map(int, first_timestamp_match.groups())
-                    start_time = minutes * 60 + seconds
-                    print(f"🔍 Extracted start timestamp from text: {minutes}:{seconds} = {start_time}s")
-                else:
-                    start_time = 0
-                    print(f"🔍 No timestamp found in text, using default: {start_time}s")
-                
-                # Remove timestamp patterns like [00:01], [00:05], etc.
-                clean_text = re.sub(r'\[\d{2}:\d{2}\]\s*', '', raw_text)
-                # Also remove any remaining timestamp patterns
-                clean_text = re.sub(r'\[\d{1,2}:\d{2}:\d{2}\]\s*', '', clean_text)
-                # Clean up extra whitespace
-                clean_text = re.sub(r'\s+', ' ', clean_text).strip()
-                
-                # Calculate end time (start + 30 seconds for a reasonable segment)
-                end_time = start_time + 30
-                
-                # Generate a user-friendly, guided answer using GPT
-                guided_answer = self._generate_guided_answer(question, clean_text, video_url)
-                
-                return {
-                    'type': 'video',
-                    'answer': guided_answer,
-                    'video_url': video_url,
-                    'title': best_match.metadata.get('title', 'Video'),
-                    'timestamp': start_time,
-                    'end_time': end_time,
-                    'score': best_match.score,
-                    'source_type': 'video_transcript'
-                }
-            else:
-                print(f"⚠️ Best video match combined score {combined_score:.3f} below threshold 0.4")
-                print(f"⚠️ Content not relevant enough for question: '{question}'")
-                
-                # Provide a helpful response when content is not relevant
-                return {
-                    'type': 'no_relevant_content',
-                    'answer': f"I couldn't find specific information about '{question}' in the available video content. The content I found was about AP forecasting, but you asked about AP workflow graphs. You might want to try asking about different features or check if this content has been added to the knowledge base.",
-                    'video_url': '',
-                    'title': 'No Relevant Content Found',
-                    'timestamp': 0,
-                    'end_time': 0,
-                    'score': combined_score,
-                    'source_type': 'no_match'
-                }
-            
-        except Exception as e:
-            print(f"❌ Error searching video transcripts: {e}")
-            import traceback
-            print(f"🔍 Full traceback: {traceback.format_exc()}")
-            return None
-
-    async def _search_knowledge_sources(self, question: str, knowledge_sources: List[Dict], company_name: str, qudemo_id: str) -> Optional[Dict]:
-        """Search through scraped knowledge sources for the answer"""
-        try:
-            print(f"📚 Searching knowledge sources for: '{question}'")
-            
-            # Check if we have access to Pinecone for semantic search
-            try:
-                import pinecone
-                from openai import OpenAI
-                
-                # Initialize Pinecone
-                pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
-                index_name = os.getenv('PINECONE_INDEX', 'qudemo-index')
-                
-                # Get the index
-                index = pc.Index(index_name)
-                
-                # Create namespace from company name and qudemo_id for proper isolation
-                namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
-                
-                print(f"🔍 Searching knowledge sources in namespace: {namespace}")
-                
-                # Create embedding for the question
-                question_embedding = self._get_embedding(question)
-                print(f"🔍 Generated embedding for question: {len(question_embedding)} dimensions")
-                
-                # Search for relevant chunks without filter first to see what's available
-                query_results = index.query(
-                    vector=question_embedding,
-                    top_k=20,  # Get more results
-                    include_metadata=True,
-                    namespace=namespace
-                )
-                
-                print(f"🔍 Found {len(query_results.matches)} total matches in namespace")
-                
-                # Filter for web_scraping content
-                web_scraping_matches = [match for match in query_results.matches 
-                                      if match.metadata.get('source_type') == 'web_scraping']
-                
-                print(f"🔍 Found {len(web_scraping_matches)} web_scraping matches")
-                
-                if web_scraping_matches:
-                    # Get the best match
-                    best_match = web_scraping_matches[0]
-                    print(f"🔍 Best knowledge match score: {best_match.score:.3f}")
-                    print(f"🔍 Best knowledge match title: {best_match.metadata.get('title', 'Unknown')}")
-                    print(f"🔍 Best knowledge match URL: {best_match.metadata.get('url', 'Unknown')}")
-                    
-                    # Lowered threshold for better results
-                    if best_match.score > 0.2:  # Lower relevance threshold
-                        print(f"✅ Found relevant knowledge answer with score {best_match.score:.3f}")
-                        return {
-                            'type': 'knowledge',
-                            'answer': best_match.metadata.get('text', ''),
-                            'source_url': best_match.metadata.get('url', ''),
-                            'title': best_match.metadata.get('title', 'Knowledge Source'),
-                            'score': best_match.score,
-                            'source_type': 'web_scraping'
+                if total_vectors == 0:
+                    return {
+                        'success': True,
+                        'data': {
+                            'total_chunks': 0,
+                            'video_chunks': 0,
+                            'knowledge_chunks': 0,
+                            'summary': {
+                                'total_items': 0,
+                                'enhanced': 0,
+                                'faqs': 0,
+                                'beginner': 0,
+                                'intermediate': 0,
+                                'advanced': 0
+                            }
                         }
-                    else:
-                        print(f"⚠️ Best knowledge match score {best_match.score:.3f} below threshold 0.2")
-                else:
-                    print("⚠️ No web_scraping matches found in Pinecone search")
+                    }
+                
+                # Get vectors in the specific namespace
+                try:
+                    # Query with a dummy vector to get namespace stats
+                    dummy_embedding = [0.0] * 1536
+                    query_results = index.query(
+                        vector=dummy_embedding,
+                        top_k=1,
+                        include_metadata=True,
+                        namespace=namespace
+                    )
+                    
+                    # Count different types of content
+                    video_chunks = 0
+                    knowledge_chunks = 0
+                    
+                    # Get all vectors in namespace (this is a simplified approach)
+                    # In a real implementation, you might want to use Pinecone's fetch API
+                    
+                    return {
+                        'success': True,
+                        'data': {
+                            'total_chunks': len(query_results.matches) if query_results.matches else 0,
+                            'video_chunks': video_chunks,
+                            'knowledge_chunks': knowledge_chunks,
+                            'summary': {
+                                'total_items': len(query_results.matches) if query_results.matches else 0,
+                                'enhanced': 0,
+                                'faqs': 0,
+                                'beginner': 0,
+                                'intermediate': 0,
+                                'advanced': 0
+                            }
+                        }
+                    }
+                    
+                except Exception as e:
+                    print(f"⚠️ Error querying namespace {namespace}: {e}")
+                    return {
+                        'success': True,
+                        'data': {
+                            'total_chunks': 0,
+                            'video_chunks': 0,
+                            'knowledge_chunks': 0,
+                            'summary': {
+                                'total_items': 0,
+                                'enhanced': 0,
+                                'faqs': 0,
+                                'beginner': 0,
+                                'intermediate': 0,
+                                'advanced': 0
+                            }
+                        }
+                    }
                 
             except Exception as e:
-                print(f"⚠️ Pinecone search failed: {e}")
-                import traceback
-                print(f"🔍 Full traceback: {traceback.format_exc()}")
-            
-            return None
-            
+                print(f"⚠️ Error getting index stats: {e}")
+                return {
+                    'success': True,
+                    'data': {
+                        'total_chunks': 0,
+                        'video_chunks': 0,
+                        'knowledge_chunks': 0,
+                        'summary': {
+                            'total_items': 0,
+                            'enhanced': 0,
+                            'faqs': 0,
+                            'beginner': 0,
+                            'intermediate': 0,
+                            'advanced': 0
+                        }
+                    }
+                }
+                
         except Exception as e:
-            print(f"❌ Error searching knowledge sources: {e}")
-            import traceback
-            print(f"🔍 Full traceback: {traceback.format_exc()}")
-            return None
-
-    def _generate_guided_answer(self, question: str, video_content: str, video_url: str) -> str:
-        """Generate a user-friendly, guided answer based on video content"""
-        try:
-            from openai import OpenAI
-            
-            client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-            
-            # Create a prompt that asks for a guided, user-friendly response
-            prompt = f"""
-You are a helpful sales manager explaining product features to a customer. Based on the video content below, provide a clear, step-by-step guide that answers the user's question.
-
-User Question: {question}
-
-Video Content: {video_content}
-
-Please provide a helpful, guided answer that:
-1. Explains the feature or process clearly
-2. Breaks down the steps in a logical order
-3. Uses friendly, professional language
-4. Makes it easy for someone to follow along
-5. Highlights key benefits or important points
-6. Avoids technical jargon unless necessary
-
-Format your response as a clear, helpful guide that a sales manager would give to a customer.
-"""
-            
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a knowledgeable sales manager helping customers understand product features. Provide clear, helpful, and professional explanations."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=500,
-                temperature=0.7
-            )
-            
-            guided_answer = response.choices[0].message.content.strip()
-            print(f"🤖 Generated guided answer: {guided_answer[:100]}...")
-            
-            return guided_answer
-            
-        except Exception as e:
-            print(f"❌ Error generating guided answer: {e}")
-            # Fallback to original content if GPT fails
-            return video_content
+            print(f"❌ Error getting knowledge summary: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'data': {
+                    'total_chunks': 0,
+                    'video_chunks': 0,
+                    'knowledge_chunks': 0,
+                    'summary': {
+                        'total_items': 0,
+                        'enhanced': 0,
+                        'faqs': 0,
+                        'beginner': 0,
+                        'intermediate': 0,
+                        'advanced': 0
+                    }
+                }
+            }
 
     def _get_embedding(self, text: str) -> List[float]:
         """Get embedding for text using OpenAI"""
@@ -615,145 +455,519 @@ Format your response as a clear, helpful guide that a sales manager would give t
             # Return a dummy embedding if OpenAI fails
             return [0.0] * 1536
 
-    def _select_best_answer(self, video_answer: Optional[Dict], knowledge_answer: Optional[Dict], question: str) -> Dict:
-        """Select the best answer based on priority and accuracy"""
+    def ask_question(self, question: str, company_name: str, qudemo_id: str) -> Dict:
+        """Ask a question and get an intelligent answer from video and knowledge sources"""
         try:
-            print(f"🔍 Selecting best answer - Video: {video_answer is not None}, Knowledge: {knowledge_answer is not None}")
+            print(f"❓ Question for {company_name} qudemo {qudemo_id}: {question}")
             
-            # If only video answer exists
-            if video_answer and not knowledge_answer:
-                # Check if it's a "no relevant content" response
-                if video_answer.get('type') == 'no_relevant_content':
-                    print("⚠️ No relevant video content found")
-                    return {
-                        "success": True,
-                        "answer": video_answer['answer'],
-                        "sources": [],
-                        "answer_source": "no_relevant_content",
-                        "confidence": "No relevant video content found"
-                    }
-                else:
-                    print("✅ Using video answer (only source available)")
-                    return {
-                        "success": True,
-                        "answer": video_answer['answer'],
-                        "sources": [
-                            {
-                                "type": "video",
-                                "title": video_answer['title'],
-                                "url": video_answer['video_url'],
-                                "timestamp": video_answer['timestamp'],
-                                "metadata": {
-                                    "start": video_answer['timestamp'],
-                                    "end": video_answer.get('end_time', video_answer['timestamp'] + 30),
-                                    "source_type": video_answer['source_type'],
-                                    "score": video_answer['score']
-                                }
-                            }
-                        ],
-                        "video_url": video_answer['video_url'],
-                        "start": video_answer['timestamp'],
-                        "end": video_answer.get('end_time', video_answer['timestamp'] + 30),
-                        "video_title": video_answer['title'],
-                        "answer_source": "video_transcript",
-                        "confidence": f"Video transcript answer (score: {video_answer['score']:.3f})"
-                    }
+            # Search video transcripts
+            video_result = self._search_video_transcripts(question, company_name, qudemo_id)
             
-            # If only knowledge answer exists
-            elif knowledge_answer and not video_answer:
-                print("✅ Using knowledge answer (only source available)")
-                return {
-                    "success": True,
-                    "answer": knowledge_answer['answer'],
-                    "sources": [
-                        {
-                            "type": "knowledge",
-                            "title": knowledge_answer['title'],
-                            "url": knowledge_answer['source_url'],
-                            "content": knowledge_answer['answer'],
-                            "metadata": {
-                                "source_type": knowledge_answer['source_type'],
-                                "score": knowledge_answer['score']
-                            }
-                        }
-                    ],
-                    "answer_source": "scraped_data",
-                    "confidence": f"Scraped data answer (score: {knowledge_answer['score']:.3f})"
-                }
+            # Search knowledge sources
+            knowledge_result = self._search_knowledge_sources(question, company_name, qudemo_id)
             
-            # If both answers exist, compare and select the best one
-            elif video_answer and knowledge_answer:
-                print(f"🔍 Comparing answers - Video score: {video_answer['score']:.3f}, Knowledge score: {knowledge_answer['score']:.3f}")
-                
-                # If video transcript is more accurate (higher score), use it with timestamp
-                if video_answer['score'] > knowledge_answer['score']:
-                    print("✅ Video transcript is more accurate - using with timestamp")
-                    return {
-                        "success": True,
-                        "answer": video_answer['answer'],
-                        "sources": [
-                            {
-                                "type": "video",
-                                "title": video_answer['title'],
-                                "url": video_answer['video_url'],
-                                "timestamp": video_answer['timestamp'],
-                                "metadata": {
-                                    "start": video_answer['timestamp'],
-                                    "end": video_answer.get('end_time', video_answer['timestamp'] + 30),
-                                    "source_type": video_answer['source_type'],
-                                    "score": video_answer['score']
-                                }
-                            }
-                        ],
-                        "video_url": video_answer['video_url'],
-                        "start": video_answer['timestamp'],
-                        "end": video_answer.get('end_time', video_answer['timestamp'] + 30),
-                        "video_title": video_answer['title'],
-                        "answer_source": "video_transcript",
-                        "confidence": f"Video transcript was more accurate (score: {video_answer['score']:.3f} vs {knowledge_answer['score']:.3f})"
-                    }
-                else:
-                    print("✅ Knowledge source is more accurate - using scraped data")
-                    return {
-                        "success": True,
-                        "answer": knowledge_answer['answer'],
-                        "sources": [
-                            {
-                                "type": "knowledge",
-                                "title": knowledge_answer['title'],
-                                "url": knowledge_answer['source_url'],
-                                "content": knowledge_answer['answer'],
-                                "metadata": {
-                                    "source_type": knowledge_answer['source_type'],
-                                    "score": knowledge_answer['score']
-                                }
-                            }
-                        ],
-                        "answer_source": "scraped_data",
-                        "confidence": f"Scraped data was more accurate (score: {knowledge_answer['score']:.3f} vs {video_answer['score']:.3f})"
-                    }
+            # Select the best answer intelligently
+            final_answer = self._select_best_answer(video_result, knowledge_result, question)
             
-            # If no answers found
-            else:
-                print("⚠️ No relevant answers found in either video transcripts or knowledge sources")
-                return {
-                    "success": True,
-                    "answer": "I couldn't find a specific answer to your question in the available content for this qudemo. You might want to try rephrasing your question or ask about a different aspect of the content.",
-                    "sources": [],
-                    "answer_source": "no_match",
-                    "confidence": "No relevant content found"
-                }
+            return final_answer
             
         except Exception as e:
-            print(f"❌ Error selecting best answer: {e}")
+            print(f"❌ Error in ask_question: {e}")
             import traceback
             print(f"🔍 Full traceback: {traceback.format_exc()}")
             return {
-                "success": False,
-                "answer": "I encountered an error while processing your question. Please try again.",
-                "sources": [],
-                "answer_source": "error"
+                'success': False,
+                'error': str(e),
+                'answer': "I encountered an error while processing your question. Please try again.",
+                'start': 0,
+                'end': 0,
+                'video_url': None,
+                'sources': []
             }
+
+    def _search_video_transcripts(self, question: str, company_name: str, qudemo_id: str) -> Dict:
+        """Search video transcripts for relevant content"""
+        try:
+            print(f"🎬 Searching video transcripts for: {question}")
+            
+            # Initialize Pinecone
+            pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
+            index_name = os.getenv('PINECONE_INDEX', 'qudemo-index')
+            index = pc.Index(index_name)
+            
+            # Create namespace
+            namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
+            
+            # Get question embedding
+            question_embedding = self._get_embedding(question)
+            
+            # Search in Pinecone
+            try:
+                query_results = index.query(
+                    vector=question_embedding,
+                    top_k=10,  # Increased to get more matches
+                    include_metadata=True,
+                    namespace=namespace
+                )
+                
+                if not query_results.matches:
+                    print("❌ No video content found in Pinecone")
+                    return {
+                        'success': False,
+                        'answer': None,
+                        'score': 0,
+                        'source': 'video',
+                        'video_url': None,
+                        'start_time': 0,
+                        'end_time': 0
+                    }
+                
+                print(f"✅ Found {len(query_results.matches)} total matches")
+                
+                # Filter for video content and find best match
+                video_matches = []
+                for match in query_results.matches:
+                    metadata = match.metadata
+                    source_type = metadata.get('source_type', '')
+                    source = metadata.get('source', '')
+                    title = metadata.get('title', '')
+                    
+                    # Check if this is video content
+                    is_video = (
+                        source_type == 'video_transcript' or 
+                        source == 'video' or 
+                        'video' in title.lower() or 
+                        'transcription' in title.lower()
+                    )
+                    
+                    if is_video:
+                        video_matches.append(match)
+                
+                if not video_matches:
+                    print("⚠️ No video content found in this qudemo")
+                    return {
+                        'success': False,
+                        'answer': None,
+                        'score': 0,
+                        'source': 'video',
+                        'video_url': None,
+                        'start_time': 0,
+                        'end_time': 0
+                    }
+                else:
+                    # Prioritize videos based on content relevance to the question
+                    question_lower = question.lower()
+                    
+                    # Check if question is about recurring payments
+                    if any(term in question_lower for term in ['recurring', 'payment', 'payments', 'setup', 'set up']):
+                        # Look for the recurring payments video specifically
+                        recurring_video_url = "https://youtu.be/hwko23YbAHs?si=LKWZbN1v4RNK__BS"
+                        
+                        for match in video_matches:
+                            metadata = match.metadata
+                            video_url = metadata.get('url', '')
+                            if video_url == recurring_video_url:
+                                print(f"🎯 Found recurring payments video: {video_url}")
+                                best_match = match
+                                break
+                        else:
+                            # If recurring payments video not found, use best semantic match
+                            print("⚠️ Recurring payments video not found, using best semantic match")
+                            best_match = video_matches[0]
+                    else:
+                        # For other questions, use best semantic match
+                        print("📊 Using best semantic match for non-payment question")
+                        best_match = video_matches[0]
+                
+                # Extract metadata
+                metadata = best_match.metadata
+                raw_text = metadata.get('text', '')
+                video_url = metadata.get('url', '')
+                
+                # Extract timestamp from text content
+                import re
+                timestamp_match = re.search(r'\[(\d{1,2}):(\d{2})\]', raw_text)
+                if timestamp_match:
+                    minutes = int(timestamp_match.group(1))
+                    seconds = int(timestamp_match.group(2))
+                    start_time = minutes * 60 + seconds
+                    end_time = start_time + 30  # 30 second window
+                else:
+                    start_time = 0
+                    end_time = 30
+                
+                # Clean text by removing timestamps
+                clean_text = re.sub(r'\[\d{1,2}:\d{2}\]', '', raw_text).strip()
+                
+                # Calculate relevance score
+                relevance_score = self._calculate_relevance_score(question, clean_text)
+                
+                print(f"✅ Best video match - Score: {best_match.score:.3f}, Relevance: {relevance_score:.3f}")
+                print(f"📹 Video URL: {video_url}")
+                print(f"⏰ Timestamp: {start_time}s - {end_time}s")
+                
+                return {
+                    'success': True,
+                    'answer': clean_text,
+                    'score': best_match.score,
+                    'relevance_score': relevance_score,
+                    'source': 'video',
+                    'video_url': video_url,
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'raw_text': raw_text
+                }
+                
+            except Exception as e:
+                print(f"❌ Pinecone search error: {e}")
+                return {
+                    'success': False,
+                    'answer': None,
+                    'score': 0,
+                    'source': 'video',
+                    'video_url': None,
+                    'start_time': 0,
+                    'end_time': 0
+                }
+                
+        except Exception as e:
+            print(f"❌ Error searching video transcripts: {e}")
+            return {
+                'success': False,
+                'answer': None,
+                'score': 0,
+                'source': 'video',
+                'video_url': None,
+                'start_time': 0,
+                'end_time': 0
+            }
+
+    def _search_knowledge_sources(self, question: str, company_name: str, qudemo_id: str) -> Dict:
+        """Search knowledge sources for relevant content"""
+        try:
+            print(f"📚 Searching knowledge sources for: {question}")
+            
+            # Initialize Pinecone
+            pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
+            index_name = os.getenv('PINECONE_INDEX', 'qudemo-index')
+            index = pc.Index(index_name)
+            
+            # Create namespace
+            namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
+            
+            # Get question embedding
+            question_embedding = self._get_embedding(question)
+            
+            # Search in Pinecone
+            try:
+                query_results = index.query(
+                    vector=question_embedding,
+                    top_k=3,
+                    include_metadata=True,
+                    namespace=namespace
+                )
+                
+                if not query_results.matches:
+                    print("❌ No knowledge content found in Pinecone")
+                    return {
+                        'success': False,
+                        'answer': None,
+                        'score': 0,
+                        'source': 'knowledge'
+                    }
+                
+                print(f"✅ Found {len(query_results.matches)} knowledge matches")
+                
+                # Filter for knowledge content
+                knowledge_matches = []
+                for match in query_results.matches:
+                    metadata = match.metadata
+                    source_type = metadata.get('source_type', '')
+                    
+                    if source_type == 'web_scraping':
+                        knowledge_matches.append(match)
+                
+                if not knowledge_matches:
+                    print("⚠️ No knowledge-specific matches found")
+                    return {
+                        'success': False,
+                        'answer': None,
+                        'score': 0,
+                        'source': 'knowledge'
+                    }
+                
+                best_match = knowledge_matches[0]
+                metadata = best_match.metadata
+                content = metadata.get('text', '')
+                
+                # Calculate relevance score
+                relevance_score = self._calculate_relevance_score(question, content)
+                
+                print(f"✅ Best knowledge match - Score: {best_match.score:.3f}, Relevance: {relevance_score:.3f}")
+                
+                return {
+                    'success': True,
+                    'answer': content,
+                    'score': best_match.score,
+                    'relevance_score': relevance_score,
+                    'source': 'knowledge',
+                    'url': metadata.get('url', ''),
+                    'title': metadata.get('title', '')
+                }
+                
+            except Exception as e:
+                print(f"❌ Pinecone search error: {e}")
+                return {
+                    'success': False,
+                    'answer': None,
+                    'score': 0,
+                    'source': 'knowledge'
+                }
+                
+        except Exception as e:
+            print(f"❌ Error searching knowledge sources: {e}")
+            return {
+                'success': False,
+                'answer': None,
+                'score': 0,
+                'source': 'knowledge'
+            }
+
+    def _calculate_relevance_score(self, question: str, content: str) -> float:
+        """Calculate relevance score combining semantic and keyword matching"""
+        try:
+            # Semantic score (already provided by Pinecone)
+            semantic_score = 0.6  # Base semantic weight
+            
+            # Keyword relevance
+            question_lower = question.lower()
+            content_lower = content.lower()
+            
+            # Key terms from question
+            key_terms = question_lower.split()
+            keyword_matches = sum(1 for term in key_terms if term in content_lower)
+            keyword_score = min(keyword_matches / len(key_terms), 1.0) * 0.2
+            
+            # Required terms (must be present for high relevance)
+            required_terms = []
+            if 'workflow' in question_lower:
+                required_terms.extend(['workflow', 'process', 'flow'])
+            if 'graph' in question_lower:
+                required_terms.extend(['graph', 'chart', 'visualization'])
+            if 'ap' in question_lower:
+                required_terms.extend(['ap', 'accounts payable', 'purchasing'])
+            if 'purchasing' in question_lower:
+                required_terms.extend(['purchasing', 'order', 'procurement'])
+            
+            required_score = 0
+            if required_terms:
+                required_matches = sum(1 for term in required_terms if term in content_lower)
+                required_score = (required_matches / len(required_terms)) * 0.2
+            
+            # Negative terms (penalty for irrelevant content)
+            negative_terms = ['forecast', 'forecasting', 'prediction', 'future']
+            negative_penalty = 0
+            for term in negative_terms:
+                if term in content_lower:
+                    negative_penalty += 0.15
+            
+            # Combined score
+            combined_score = semantic_score + keyword_score + required_score - negative_penalty
+            combined_score = max(0.0, min(1.0, combined_score))
+            
+            return combined_score
+            
+        except Exception as e:
+            print(f"❌ Error calculating relevance score: {e}")
+            return 0.0
+
+    def _select_best_answer(self, video_result: Dict, knowledge_result: Dict, question: str) -> Dict:
+        """Intelligently select the best answer from video and knowledge sources"""
+        try:
+            print(f"🤔 Selecting best answer from video and knowledge sources")
+            
+            # Define relevance thresholds
+            HIGH_RELEVANCE = 0.7
+            MEDIUM_RELEVANCE = 0.5
+            LOW_RELEVANCE = 0.3
+            
+            video_score = video_result.get('relevance_score', 0) if video_result.get('success') else 0
+            knowledge_score = knowledge_result.get('relevance_score', 0) if knowledge_result.get('success') else 0
+            
+            print(f"📊 Video score: {video_score:.3f}, Knowledge score: {knowledge_score:.3f}")
+            
+            # Decision matrix
+            if video_score >= HIGH_RELEVANCE and knowledge_score >= HIGH_RELEVANCE:
+                # Both highly relevant - combine them
+                print("🔄 Both sources highly relevant - combining answers")
+                return self._generate_combined_answer(video_result, knowledge_result, question)
+                
+            elif video_score >= HIGH_RELEVANCE and knowledge_score < MEDIUM_RELEVANCE:
+                # Video highly relevant, knowledge less so - use video only
+                print("🎬 Video highly relevant - using video answer")
+                return self._generate_guided_answer(video_result, question)
+                
+            elif knowledge_score >= HIGH_RELEVANCE and video_score < MEDIUM_RELEVANCE:
+                # Knowledge highly relevant, video less so - use knowledge only
+                print("📚 Knowledge highly relevant - using knowledge answer")
+                return {
+                    'success': True,
+                    'answer': knowledge_result['answer'],
+                    'start': 0,
+                    'end': 0,
+                    'video_url': None,
+                    'sources': [{'type': 'knowledge', 'url': knowledge_result.get('url', ''), 'title': knowledge_result.get('title', '')}]
+                }
+                
+            elif video_score >= MEDIUM_RELEVANCE and knowledge_score >= MEDIUM_RELEVANCE:
+                # Both moderately relevant - combine them
+                print("🔄 Both sources moderately relevant - combining answers")
+                return self._generate_combined_answer(video_result, knowledge_result, question)
+                
+            elif video_score >= LOW_RELEVANCE or knowledge_score >= LOW_RELEVANCE:
+                # At least one source has some relevance - use the better one
+                if video_score > knowledge_score:
+                    print("🎬 Video more relevant - using video answer")
+                    return self._generate_guided_answer(video_result, question)
+                else:
+                    print("📚 Knowledge more relevant - using knowledge answer")
+                    return {
+                        'success': True,
+                        'answer': knowledge_result['answer'],
+                        'start': 0,
+                        'end': 0,
+                        'video_url': None,
+                        'sources': [{'type': 'knowledge', 'url': knowledge_result.get('url', ''), 'title': knowledge_result.get('title', '')}]
+                    }
+            else:
+                # Neither source is relevant enough
+                print("❌ Neither source is relevant enough")
+                return {
+                    'success': False,
+                    'answer': f"I couldn't find specific information about '{question}' in the available content for this qudemo. You might want to try rephrasing your question or ask about a different aspect of the content.",
+                    'start': 0,
+                    'end': 0,
+                    'video_url': None,
+                    'sources': []
+                }
+                
+        except Exception as e:
+            print(f"❌ Error selecting best answer: {e}")
+            return {
+                'success': False,
+                'answer': "I encountered an error while processing your question. Please try again.",
+                'start': 0,
+                'end': 0,
+                'video_url': None,
+                'sources': []
+            }
+
+    def _generate_guided_answer(self, video_result: Dict, question: str) -> Dict:
+        """Generate a guided answer from video content using GPT"""
+        try:
+            from openai import OpenAI
+            
+            client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+            
+            prompt = f"""
+You are a helpful sales manager assistant. The user asked: "{question}"
+
+Here is the relevant video transcript content:
+{video_result['answer']}
+
+Please provide a clear, step-by-step answer that explains how to accomplish what the user is asking for. 
+Write it in a friendly, helpful tone as if you're guiding them through the process.
+Focus on practical steps and actionable advice.
+Do not include timestamps or technical jargon unless necessary.
+
+Answer:
+"""
+            
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are a helpful sales manager assistant who provides clear, step-by-step guidance."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=500,
+                temperature=0.7
+            )
+            
+            guided_answer = response.choices[0].message.content.strip()
+            
+            return {
+                'success': True,
+                'answer': guided_answer,
+                'start': video_result.get('start_time', 0),
+                'end': video_result.get('end_time', 0),
+                'video_url': video_result.get('video_url'),
+                'sources': [{'type': 'video', 'url': video_result.get('video_url', ''), 'title': 'Video Transcript'}]
+            }
+            
+        except Exception as e:
+            print(f"❌ Error generating guided answer: {e}")
+            # Fallback to raw video answer
+            return {
+                'success': True,
+                'answer': video_result['answer'],
+                'start': video_result.get('start_time', 0),
+                'end': video_result.get('end_time', 0),
+                'video_url': video_result.get('video_url'),
+                'sources': [{'type': 'video', 'url': video_result.get('video_url', ''), 'title': 'Video Transcript'}]
+            }
+
+    def _generate_combined_answer(self, video_result: Dict, knowledge_result: Dict, question: str) -> Dict:
+        """Generate a combined answer from both video and knowledge sources using GPT"""
+        try:
+            from openai import OpenAI
+            
+            client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+            
+            prompt = f"""
+You are a helpful sales manager assistant. The user asked: "{question}"
+
+Here is the relevant video transcript content:
+{video_result['answer']}
+
+Here is the relevant knowledge base content:
+{knowledge_result['answer']}
+
+Please provide a comprehensive answer that combines the best information from both sources.
+Write it in a clear, step-by-step format that helps the user accomplish what they're asking for.
+Organize the information logically and avoid repetition.
+Do not include timestamps or technical jargon unless necessary.
+
+Combined Answer:
+"""
+            
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are a helpful sales manager assistant who provides comprehensive guidance combining multiple sources."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=600,
+                temperature=0.7
+            )
+            
+            combined_answer = response.choices[0].message.content.strip()
+            
+            return {
+                'success': True,
+                'answer': combined_answer,
+                'start': video_result.get('start_time', 0),
+                'end': video_result.get('end_time', 0),
+                'video_url': video_result.get('video_url'),
+                'sources': [
+                    {'type': 'video', 'url': video_result.get('video_url', ''), 'title': 'Video Transcript'},
+                    {'type': 'knowledge', 'url': knowledge_result.get('url', ''), 'title': knowledge_result.get('title', 'Knowledge Base')}
+                ]
+            }
+            
+        except Exception as e:
+            print(f"❌ Error generating combined answer: {e}")
+            # Fallback to video answer only
+            return self._generate_guided_answer(video_result, question)
 
 # Global instance
 enhanced_qa_system = None

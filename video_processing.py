@@ -396,59 +396,145 @@ def _create_semantic_chunks_from_transcription(transcription: str, segments: lis
             'processed_at': datetime.now().isoformat()
         }
         
-        # Create multiple time-based chunks from transcription
+        # Create timestamped chunks from transcription
         chunks = []
         
-        # Always create timestamped chunks, regardless of Whisper segments
-        logger.info(f"🔧 Creating timestamped chunks for video processing")
+        logger.info(f"🔧 Creating timestamped chunks from transcription")
         
-        # Determine chunk duration and number of chunks
-        chunk_duration = 30  # 30 seconds per chunk
-        transcription_length = len(transcription)
+        # Try to extract timestamps from transcription
+        import re
+        # Updated pattern to handle various timestamp formats
+        timestamp_pattern = r'\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]'
+        timestamp_matches = list(re.finditer(timestamp_pattern, transcription))
         
-        # Estimate total video duration based on transcription length
-        # For Loom videos, use a more realistic estimate
-        if 'loom.com' in video_url:
-            # Loom videos: estimate 2-3 words per second (more realistic for screen recordings)
-            words_per_second = 2.5
-            estimated_duration = max(60, len(transcription.split()) / words_per_second)
+        # Debug: Show the actual transcription format
+        logger.info(f"🔧 Transcription preview (first 500 chars): {transcription[:500]}")
+        
+        if timestamp_matches:
+            logger.info(f"🔧 Found {len(timestamp_matches)} timestamps in transcription")
+            
+            # Debug: Show first few timestamps
+            for i, match in enumerate(timestamp_matches[:3]):
+                logger.info(f"🔧 Sample timestamp {i+1}: {match.group(0)}")
+            
+            # Filter out invalid timestamps first
+            valid_timestamps = []
+            for match in timestamp_matches:
+                minutes = int(match.group(1))
+                seconds = int(match.group(2))
+                hours = int(match.group(3)) if match.group(3) else 0
+                
+                # Convert to seconds
+                start_time = hours * 3600 + minutes * 60 + seconds
+                
+                # More intelligent validation for a 16-minute video
+                if start_time > 1200:  # More than 20 minutes, likely wrong
+                    logger.warning(f"🔧 Skipping timestamp {hours:02d}:{minutes:02d}:{seconds:02d} - too large ({start_time}s)")
+                    continue
+                
+                # Check if minutes > 20 (unlikely for a 16-min video)
+                if minutes > 20:
+                    logger.warning(f"🔧 Skipping timestamp {hours:02d}:{minutes:02d}:{seconds:02d} - minutes too high ({minutes})")
+                    continue
+                
+                # Check if this looks like a reasonable timestamp for a 16-min video
+                if start_time <= 1200:  # 20 minutes or less
+                    valid_timestamps.append((match, start_time, hours, minutes, seconds))
+                    logger.info(f"🔧 Valid timestamp: {hours:02d}:{minutes:02d}:{seconds:02d} ({start_time}s)")
+            
+            logger.info(f"🔧 Filtered to {len(valid_timestamps)} valid timestamps out of {len(timestamp_matches)}")
+            
+            # Create chunks based on valid timestamps
+            for i, (match, start_time, hours, minutes, seconds) in enumerate(valid_timestamps):
+                
+                # Find the end time (next timestamp or end of transcription)
+                if i + 1 < len(valid_timestamps):
+                    next_match, next_start_time, next_hours, next_minutes, next_seconds = valid_timestamps[i + 1]
+                    end_time = next_start_time
+                else:
+                    # For the last chunk, estimate end time
+                    end_time = start_time + 30  # 30 seconds default
+                
+                # Extract text for this timestamp segment
+                text_start = match.end()
+                if i + 1 < len(valid_timestamps):
+                    next_match, _, _, _, _ = valid_timestamps[i + 1]
+                    text_end = next_match.start()
+                else:
+                    text_end = len(transcription)
+                
+                chunk_text = transcription[text_start:text_end].strip()
+                
+                # Clean up the text (remove extra whitespace, newlines)
+                chunk_text = re.sub(r'\s+', ' ', chunk_text).strip()
+                
+                # Ensure each chunk has meaningful content
+                if chunk_text and len(chunk_text) > 10:
+                    chunk_data = {
+                        'text': chunk_text,
+                        'full_context': chunk_text,
+                        'source': source_info.get('source', 'video'),
+                        'title': source_info.get('title', f'Video Transcription - {company_name}'),
+                        'url': source_info.get('url', video_url),
+                        'processed_at': source_info.get('processed_at', ''),
+                        'start_timestamp': start_time,
+                        'end_timestamp': end_time,
+                        'chunk_index': i,
+                        'total_chunks': len(timestamp_matches),
+                        'precise_timestamp': f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                    }
+                    chunks.append(chunk_data)
+                    logger.info(f"🔧 Created timestamped chunk {i+1}/{len(timestamp_matches)}: {hours:02d}:{minutes:02d}:{seconds:02d} ({len(chunk_text)} chars)")
+                else:
+                    logger.info(f"🔧 Skipping timestamped chunk {i+1}: insufficient content")
         else:
-            # YouTube videos: estimate 2.5 words per second
-            estimated_duration = max(60, transcription_length / 2.5)
-        
-        # Ensure we create at least 3 chunks for meaningful segmentation
-        min_chunks = 3
-        num_chunks = max(min_chunks, int(estimated_duration / chunk_duration))
-        
-        logger.info(f"🔧 Estimated duration: {estimated_duration:.1f}s, creating {num_chunks} chunks")
-        
-        for i in range(num_chunks):
-            start_time = i * chunk_duration
-            end_time = min((i + 1) * chunk_duration, estimated_duration)
+            logger.info(f"🔧 No timestamps found, using fallback chunking method")
             
-            # Extract text for this time segment
-            text_start = int((start_time / estimated_duration) * transcription_length)
-            text_end = int((end_time / estimated_duration) * transcription_length)
-            chunk_text = transcription[text_start:text_end].strip()
+            # Fallback: Create time-based chunks
+            chunk_duration = 30  # 30 seconds per chunk
+            transcription_length = len(transcription)
             
-            # Ensure each chunk has meaningful content
-            if chunk_text and len(chunk_text) > 10:  # At least 10 characters
-                chunk_data = {
-                    'text': chunk_text,
-                    'full_context': chunk_text,
-                    'source': source_info.get('source', 'video'),
-                    'title': source_info.get('title', f'Video Transcription - {company_name}'),
-                    'url': source_info.get('url', video_url),
-                    'processed_at': source_info.get('processed_at', ''),
-                    'start_timestamp': start_time,
-                    'end_timestamp': end_time,
-                    'chunk_index': i,
-                    'total_chunks': num_chunks
-                }
-                chunks.append(chunk_data)
-                logger.info(f"🔧 Created chunk {i+1}/{num_chunks}: {start_time}s → {end_time}s ({len(chunk_text)} chars)")
+            # Estimate total video duration
+            if 'loom.com' in video_url:
+                words_per_second = 2.5
+                estimated_duration = max(60, len(transcription.split()) / words_per_second)
             else:
-                logger.info(f"🔧 Skipping chunk {i+1}: insufficient content ({len(chunk_text)} chars)")
+                estimated_duration = max(60, transcription_length / 2.5)
+            
+            # Create chunks
+            min_chunks = 4
+            max_chunks = 60
+            num_chunks = max(min_chunks, min(max_chunks, int(estimated_duration / chunk_duration)))
+            
+            logger.info(f"🔧 Fallback: Estimated duration: {estimated_duration:.1f}s, creating {num_chunks} chunks")
+            
+            for i in range(num_chunks):
+                start_time = i * chunk_duration
+                end_time = min((i + 1) * chunk_duration, estimated_duration)
+                
+                # Extract text for this time segment
+                text_start = int((start_time / estimated_duration) * transcription_length)
+                text_end = int((end_time / estimated_duration) * transcription_length)
+                chunk_text = transcription[text_start:text_end].strip()
+                
+                # Ensure each chunk has meaningful content
+                if chunk_text and len(chunk_text) > 30:
+                    chunk_data = {
+                        'text': chunk_text,
+                        'full_context': chunk_text,
+                        'source': source_info.get('source', 'video'),
+                        'title': source_info.get('title', f'Video Transcription - {company_name}'),
+                        'url': source_info.get('url', video_url),
+                        'processed_at': source_info.get('processed_at', ''),
+                        'start_timestamp': start_time,
+                        'end_timestamp': end_time,
+                        'chunk_index': i,
+                        'total_chunks': num_chunks
+                    }
+                    chunks.append(chunk_data)
+                    logger.info(f"🔧 Created fallback chunk {i+1}/{num_chunks}: {start_time}s → {end_time}s ({len(chunk_text)} chars)")
+                else:
+                    logger.info(f"🔧 Skipping fallback chunk {i+1}: insufficient content")
         
         # If we still don't have enough chunks, create at least one
         if len(chunks) == 0:

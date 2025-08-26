@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import List, Dict, Optional
 from pinecone import Pinecone
 from openai import OpenAI
+import time
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -29,8 +30,12 @@ class EnhancedKnowledgeIntegrator:
         self.pinecone_api_key = pinecone_api_key
         self.pinecone_index = pinecone_index or os.getenv('PINECONE_INDEX', 'qudemo-index')
         
-        # Initialize OpenAI client
-        self.openai_client = OpenAI(api_key=openai_api_key)
+        # Initialize OpenAI client with connection pooling
+        self.openai_client = OpenAI(
+            api_key=openai_api_key,
+            max_retries=3,
+            timeout=30.0
+        )
         
         # Initialize Pinecone
         try:
@@ -53,49 +58,94 @@ class EnhancedKnowledgeIntegrator:
             
             vectors_to_upsert = []
             
-            for i, chunk in enumerate(chunks):
+            # Batch embeddings for efficiency (OpenAI allows up to 2048 inputs per request)
+            batch_size = 100  # Conservative batch size
+            total_batches = (len(chunks) + batch_size - 1) // batch_size
+            
+            logger.info(f"🔧 Processing {len(chunks)} chunks in {total_batches} batches of {batch_size}")
+            
+            for batch_idx in range(total_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min(start_idx + batch_size, len(chunks))
+                batch_chunks = chunks[start_idx:end_idx]
+                
                 try:
-                    # Generate embedding for the chunk text
-                    response = self.openai_client.embeddings.create(
-                        model="text-embedding-3-small",
-                        input=chunk['text']
-                    )
-                    embedding = response.data[0].embedding
+                    # Extract texts for batch embedding
+                    texts = [chunk['text'] for chunk in batch_chunks]
                     
-                    # Prepare metadata
-                    metadata = {
-                        'text': chunk['text'],
-                        'source': chunk.get('source', 'unknown'),
-                        'source_type': 'video_transcript' if chunk.get('source') == 'video' else 'web_scraping',
-                        'title': chunk.get('title', ''),
-                        'url': chunk.get('url', ''),
-                        'processed_at': chunk.get('processed_at', datetime.now().isoformat()),
-                        'company_name': company_name,
-                        'qudemo_id': qudemo_id,
-                        'chunk_type': 'semantic',
-                        'start_timestamp': chunk.get('start_timestamp', 0),
-                        'end_timestamp': chunk.get('end_timestamp', 0),
-                        'chunk_index': chunk.get('chunk_index', 0),
-                        'total_chunks': chunk.get('total_chunks', 1)
-                    }
+                    # Generate embeddings for the batch with retry logic
+                    max_retries = 3
+                    for retry in range(max_retries):
+                        try:
+                            response = self.openai_client.embeddings.create(
+                                model="text-embedding-3-small",
+                                input=texts
+                            )
+                            embeddings = [data.embedding for data in response.data]
+                            
+                            logger.info(f"✅ Generated embeddings for batch {batch_idx + 1}/{total_batches} ({len(embeddings)} embeddings)")
+                            break  # Success, exit retry loop
+                            
+                        except Exception as e:
+                            if retry < max_retries - 1:
+                                wait_time = (2 ** retry) * 1  # Exponential backoff: 1s, 2s, 4s
+                                logger.warning(f"⚠️ Batch {batch_idx + 1} failed (attempt {retry + 1}/{max_retries}), retrying in {wait_time}s: {e}")
+                                time.sleep(wait_time)
+                            else:
+                                logger.error(f"❌ Batch {batch_idx + 1} failed after {max_retries} attempts: {e}")
+                                raise
                     
-                    # Create vector record
-                    vector_record = {
-                        'id': f"{namespace}-chunk-{i}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                        'values': embedding,
-                        'metadata': metadata
-                    }
-                    
-                    vectors_to_upsert.append(vector_record)
-                    
+                    # Process each chunk in the batch
+                    for i, (chunk, embedding) in enumerate(zip(batch_chunks, embeddings)):
+                        chunk_idx = start_idx + i
+                        
+                        # Prepare metadata
+                        metadata = {
+                            'text': chunk['text'],
+                            'source': chunk.get('source', 'unknown'),
+                            'source_type': 'video_transcript' if chunk.get('source') == 'video' else 'web_scraping',
+                            'title': chunk.get('title', ''),
+                            'url': chunk.get('url', ''),
+                            'processed_at': chunk.get('processed_at', datetime.now().isoformat()),
+                            'company_name': company_name,
+                            'qudemo_id': qudemo_id,
+                            'chunk_type': 'semantic',
+                            'start_timestamp': chunk.get('start_timestamp', 0),
+                            'end_timestamp': chunk.get('end_timestamp', 0),
+                            'chunk_index': chunk.get('chunk_index', 0),
+                            'total_chunks': chunk.get('total_chunks', 1)
+                        }
+                        
+                        # Create vector record
+                        vector_record = {
+                            'id': f"{namespace}-chunk-{chunk_idx}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                            'values': embedding,
+                            'metadata': metadata
+                        }
+                        
+                        vectors_to_upsert.append(vector_record)
+                        
                 except Exception as e:
-                    logger.error(f"❌ Error processing chunk {i}: {e}")
+                    logger.error(f"❌ Error processing batch {batch_idx + 1}: {e}")
                     continue
             
             if vectors_to_upsert:
-                # Upsert vectors to Pinecone
-                index.upsert(vectors=vectors_to_upsert, namespace=namespace)
-                logger.info(f"✅ Successfully stored {len(vectors_to_upsert)} chunks in namespace: {namespace}")
+                # Upsert vectors to Pinecone with retry logic
+                max_retries = 3
+                for retry in range(max_retries):
+                    try:
+                        index.upsert(vectors=vectors_to_upsert, namespace=namespace)
+                        logger.info(f"✅ Successfully stored {len(vectors_to_upsert)} chunks in namespace: {namespace}")
+                        break  # Success, exit retry loop
+                        
+                    except Exception as e:
+                        if retry < max_retries - 1:
+                            wait_time = (2 ** retry) * 1  # Exponential backoff: 1s, 2s, 4s
+                            logger.warning(f"⚠️ Pinecone upsert failed (attempt {retry + 1}/{max_retries}), retrying in {wait_time}s: {e}")
+                            time.sleep(wait_time)
+                        else:
+                            logger.error(f"❌ Pinecone upsert failed after {max_retries} attempts: {e}")
+                            raise
                 
                 return {
                     'success': True,

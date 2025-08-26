@@ -552,7 +552,7 @@ async def ask_enhanced_question_endpoint(company_name: str, qudemo_id: str, requ
             "sources": result.get("sources", []),
             "source_type": result.get("source_type", "unknown"),
             "confidence": result.get("confidence", 0.0),
-            "video_timestamp": result.get("video_timestamp")
+            "video_timestamp": result.get("formatted_timestamp", result.get("video_timestamp"))
         }
         
     except HTTPException:

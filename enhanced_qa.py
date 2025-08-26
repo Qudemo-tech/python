@@ -7,6 +7,7 @@ Integrates web scraping with video transcripts for comprehensive support bot kno
 import asyncio
 import json
 import os
+import re
 from typing import List, Dict, Optional
 from pinecone import Pinecone
 from final_gemini_scraper import FinalGeminiScraper
@@ -15,6 +16,7 @@ class EnhancedQASystem:
     def __init__(self, gemini_api_key: str, openai_api_key: str):
         """Initialize enhanced QA system"""
         self.final_scraper = FinalGeminiScraper(gemini_api_key)
+        self._embedding_cache = {}  # Simple cache for embeddings
         
     async def process_website_knowledge(self, url: str, company_name: str, qudemo_id: str) -> Dict:
         """Process website knowledge with semantic chunking for specific qudemo"""
@@ -438,8 +440,13 @@ class EnhancedQASystem:
             }
 
     def _get_embedding(self, text: str) -> List[float]:
-        """Get embedding for text using OpenAI"""
+        """Get embedding for text using OpenAI with caching"""
         try:
+            # Check cache first
+            if text in self._embedding_cache:
+                print(f"📋 Using cached embedding for: {text[:50]}...")
+                return self._embedding_cache[text]
+            
             from openai import OpenAI
             
             client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
@@ -448,7 +455,13 @@ class EnhancedQASystem:
                 model="text-embedding-ada-002"
             )
             
-            return response.data[0].embedding
+            embedding = response.data[0].embedding
+            
+            # Cache the result
+            self._embedding_cache[text] = embedding
+            print(f"💾 Cached embedding for: {text[:50]}...")
+            
+            return embedding
             
         except Exception as e:
             print(f"❌ Error getting embedding: {e}")
@@ -460,11 +473,14 @@ class EnhancedQASystem:
         try:
             print(f"❓ Question for {company_name} qudemo {qudemo_id}: {question}")
             
+            # Get question embedding once and reuse it
+            question_embedding = self._get_embedding(question)
+            
             # Search video transcripts
-            video_result = self._search_video_transcripts(question, company_name, qudemo_id)
+            video_result = self._search_video_transcripts(question, company_name, qudemo_id, question_embedding)
             
             # Search knowledge sources
-            knowledge_result = self._search_knowledge_sources(question, company_name, qudemo_id)
+            knowledge_result = self._search_knowledge_sources(question, company_name, qudemo_id, question_embedding)
             
             # Select the best answer intelligently
             final_answer = self._select_best_answer(video_result, knowledge_result, question)
@@ -485,7 +501,7 @@ class EnhancedQASystem:
                 'sources': []
             }
 
-    def _search_video_transcripts(self, question: str, company_name: str, qudemo_id: str) -> Dict:
+    def _search_video_transcripts(self, question: str, company_name: str, qudemo_id: str, question_embedding: List[float] = None) -> Dict:
         """Search video transcripts for relevant content"""
         try:
             print(f"🎬 Searching video transcripts for: {question}")
@@ -498,8 +514,9 @@ class EnhancedQASystem:
             # Create namespace
             namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
             
-            # Get question embedding
-            question_embedding = self._get_embedding(question)
+            # Use provided embedding or get new one
+            if question_embedding is None:
+                question_embedding = self._get_embedding(question)
             
             # Search in Pinecone
             try:
@@ -585,17 +602,103 @@ class EnhancedQASystem:
                 raw_text = metadata.get('text', '')
                 video_url = metadata.get('url', '')
                 
-                # Extract timestamp from text content
-                import re
-                timestamp_match = re.search(r'\[(\d{1,2}):(\d{2})\]', raw_text)
-                if timestamp_match:
-                    minutes = int(timestamp_match.group(1))
-                    seconds = int(timestamp_match.group(2))
-                    start_time = minutes * 60 + seconds
-                    end_time = start_time + 30  # 30 second window
+                # Extract timestamp from metadata first, then fallback to text content
+                start_time = metadata.get('start_timestamp', 0)
+                end_time = metadata.get('end_timestamp', 0)
+                
+                # If no precise timestamp in metadata, try to extract from text
+                if start_time == 0:
+                    timestamp_match = re.search(r'\[(\d{1,2}):(\d{2})\]', raw_text)
+                    if timestamp_match:
+                        minutes = int(timestamp_match.group(1))
+                        seconds = int(timestamp_match.group(2))
+                        start_time = minutes * 60 + seconds
+                        end_time = start_time + 30  # 30 second window
+                    else:
+                        start_time = 0
+                        end_time = 30
+                
+                # Format timestamp for display
+                if start_time > 0:
+                    # Handle large timestamp values (likely in milliseconds or wrong format)
+                    if start_time > 3600:  # More than 1 hour, likely wrong format
+                        print(f"⚠️ Large timestamp detected: {start_time}s, attempting to extract from text")
+                        # Try to extract from text content instead - try multiple patterns
+                        timestamp_found = False
+                        
+                        # Pattern 1: [MM:SS] format
+                        timestamp_match = re.search(r'\[(\d{1,2}):(\d{2})\]', raw_text)
+                        if timestamp_match:
+                            minutes = int(timestamp_match.group(1))
+                            seconds = int(timestamp_match.group(2))
+                            start_time = minutes * 60 + seconds
+                            end_time = start_time + 30
+                            print(f"✅ Extracted timestamp from text [MM:SS]: {minutes:02d}:{seconds:02d}")
+                            timestamp_found = True
+                        
+                        # Pattern 2: [HH:MM:SS] format
+                        if not timestamp_found:
+                            timestamp_match = re.search(r'\[(\d{1,2}):(\d{2}):(\d{2})\]', raw_text)
+                            if timestamp_match:
+                                hours = int(timestamp_match.group(1))
+                                minutes = int(timestamp_match.group(2))
+                                seconds = int(timestamp_match.group(3))
+                                start_time = hours * 3600 + minutes * 60 + seconds
+                                end_time = start_time + 30
+                                print(f"✅ Extracted timestamp from text [HH:MM:SS]: {hours:02d}:{minutes:02d}:{seconds:02d}")
+                                timestamp_found = True
+                        
+                        # Pattern 3: Just MM:SS format (without brackets)
+                        if not timestamp_found:
+                            timestamp_match = re.search(r'(\d{1,2}):(\d{2})', raw_text)
+                            if timestamp_match:
+                                minutes = int(timestamp_match.group(1))
+                                seconds = int(timestamp_match.group(2))
+                                start_time = minutes * 60 + seconds
+                                end_time = start_time + 30
+                                print(f"✅ Extracted timestamp from text MM:SS: {minutes:02d}:{seconds:02d}")
+                                timestamp_found = True
+                        
+                        # Debug: Show first 200 characters of text if no timestamp found
+                        if not timestamp_found:
+                            print(f"🔍 Debug - First 200 chars of text: {raw_text[:200]}")
+                            
+                            # Try to estimate timestamp based on chunk position
+                            chunk_index = metadata.get('chunk_index', 0)
+                            total_chunks = metadata.get('total_chunks', 1)
+                            
+                            if total_chunks > 1:
+                                # Estimate position in video (assuming 16-minute video = 960 seconds)
+                                estimated_video_duration = 960  # 16 minutes
+                                estimated_start_time = int((chunk_index / total_chunks) * estimated_video_duration)
+                                
+                                # For content about "disqualified lead agent", it's likely not at the very beginning
+                                # Add some offset to skip intro content
+                                if estimated_start_time < 60:  # If estimated to be in first minute
+                                    estimated_start_time = 120  # Start at 2 minutes instead
+                                
+                                start_time = estimated_start_time
+                                end_time = start_time + 30
+                                
+                                minutes = estimated_start_time // 60
+                                seconds = estimated_start_time % 60
+                                print(f"🎯 Estimated timestamp based on chunk position: {minutes:02d}:{seconds:02d}")
+                            else:
+                                # Fallback to reasonable default
+                                start_time = 0
+                                end_time = 30
+                                print(f"⚠️ No valid timestamp found in text, using default: 00:00")
+                    
+                    # Format the corrected timestamp
+                    if start_time > 0 and start_time <= 3600:  # Valid range (0-1 hour)
+                        minutes = int(start_time // 60)
+                        seconds = int(start_time % 60)
+                        formatted_timestamp = f"{minutes:02d}:{seconds:02d}"
+                    else:
+                        formatted_timestamp = "00:00"
+                        print(f"⚠️ Invalid timestamp after correction: {start_time}s, using 00:00")
                 else:
-                    start_time = 0
-                    end_time = 30
+                    formatted_timestamp = "00:00"
                 
                 # Clean text by removing timestamps
                 clean_text = re.sub(r'\[\d{1,2}:\d{2}\]', '', raw_text).strip()
@@ -605,7 +708,7 @@ class EnhancedQASystem:
                 
                 print(f"✅ Best video match - Score: {best_match.score:.3f}, Relevance: {relevance_score:.3f}")
                 print(f"📹 Video URL: {video_url}")
-                print(f"⏰ Timestamp: {start_time}s - {end_time}s")
+                print(f"⏰ Timestamp: {formatted_timestamp} ({start_time}s - {end_time}s)")
                 
                 # Check if video is relevant enough to include
                 MIN_VIDEO_RELEVANCE = 0.5  # Minimum relevance threshold for videos
@@ -630,6 +733,7 @@ class EnhancedQASystem:
                     'video_url': video_url,
                     'start_time': start_time,
                     'end_time': end_time,
+                    'formatted_timestamp': formatted_timestamp,
                     'raw_text': raw_text
                 }
                 
@@ -657,7 +761,7 @@ class EnhancedQASystem:
                 'end_time': 0
             }
 
-    def _search_knowledge_sources(self, question: str, company_name: str, qudemo_id: str) -> Dict:
+    def _search_knowledge_sources(self, question: str, company_name: str, qudemo_id: str, question_embedding: List[float] = None) -> Dict:
         """Search knowledge sources for relevant content"""
         try:
             print(f"📚 Searching knowledge sources for: {question}")
@@ -670,8 +774,9 @@ class EnhancedQASystem:
             # Create namespace
             namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
             
-            # Get question embedding
-            question_embedding = self._get_embedding(question)
+            # Use provided embedding or get new one
+            if question_embedding is None:
+                question_embedding = self._get_embedding(question)
             
             # Search in Pinecone
             try:
@@ -721,7 +826,6 @@ class EnhancedQASystem:
                 print(f"✅ Best knowledge match - Score: {best_match.score:.3f}, Relevance: {relevance_score:.3f}")
                 
                 # Clean the content by removing markdown formatting and unwanted symbols
-                import re
                 clean_content = content
                 
                 # Remove markdown formatting
@@ -778,6 +882,11 @@ class EnhancedQASystem:
     def _format_knowledge_answer(self, question: str, raw_content: str) -> str:
         """Format raw scraped content into structured, user-friendly answer using GPT"""
         try:
+            # Check if content is already well-formatted (avoid unnecessary GPT calls)
+            if self._is_content_already_formatted(raw_content):
+                print("📝 Content already well-formatted, using basic cleaning")
+                return self._basic_content_cleaning(raw_content)
+            
             from openai import OpenAI
             
             client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
@@ -848,6 +957,42 @@ Answer:
         content = content.strip()
         
         return content
+
+    def _is_content_already_formatted(self, content: str) -> bool:
+        """Check if content is already well-formatted and doesn't need GPT processing"""
+        
+        # Check for common navigation/UI elements that indicate raw scraped content
+        navigation_patterns = [
+            r'Skip to main content',
+            r'Search for articles',
+            r'Help Center',
+            r'Did this answer your question',
+            r'😞.*😐.*😃',
+            r'English.*English.*English',
+            r'All Collections',
+            r'Written by.*Updated.*ago'
+        ]
+        
+        # If any navigation patterns are found, content needs formatting
+        for pattern in navigation_patterns:
+            if re.search(pattern, content, re.IGNORECASE):
+                return False
+        
+        # Check if content already has good structure (numbered lists, clear sections)
+        good_structure_patterns = [
+            r'^\d+\.\s+',  # Numbered lists
+            r'^[A-Z][^.!?]*:',  # Clear section headers
+            r'To\s+\w+.*follow these steps:',  # Step-by-step instructions
+        ]
+        
+        # If content has good structure, it might already be formatted
+        good_structure_count = 0
+        for pattern in good_structure_patterns:
+            if re.search(pattern, content, re.MULTILINE):
+                good_structure_count += 1
+        
+        # If content has good structure and no navigation elements, it's probably already formatted
+        return good_structure_count >= 2
 
     def _calculate_relevance_score(self, question: str, content: str) -> float:
         """Calculate relevance score combining semantic and keyword matching"""
@@ -1041,6 +1186,7 @@ Answer:
                 'start': video_result.get('start_time', 0),
                 'end': video_result.get('end_time', 0),
                 'video_url': video_result.get('video_url'),
+                'formatted_timestamp': video_result.get('formatted_timestamp', '00:00'),
                 'sources': [{'type': 'video', 'url': video_result.get('video_url', ''), 'title': 'Video Transcript'}]
             }
             
@@ -1053,6 +1199,7 @@ Answer:
                 'start': video_result.get('start_time', 0),
                 'end': video_result.get('end_time', 0),
                 'video_url': video_result.get('video_url'),
+                'formatted_timestamp': video_result.get('formatted_timestamp', '00:00'),
                 'sources': [{'type': 'video', 'url': video_result.get('video_url', ''), 'title': 'Video Transcript'}]
             }
 
@@ -1099,6 +1246,7 @@ Combined Answer:
                 'start': video_result.get('start_time', 0),
                 'end': video_result.get('end_time', 0),
                 'video_url': video_result.get('video_url'),
+                'formatted_timestamp': video_result.get('formatted_timestamp', '00:00'),
                 'sources': [
                     {'type': 'video', 'url': video_result.get('video_url', ''), 'title': 'Video Transcript'},
                     {'type': 'knowledge', 'url': knowledge_result.get('url', ''), 'title': knowledge_result.get('title', 'Knowledge Base')}

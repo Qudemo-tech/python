@@ -507,7 +507,8 @@ class EnhancedQASystem:
                     vector=question_embedding,
                     top_k=10,  # Increased to get more matches
                     include_metadata=True,
-                    namespace=namespace
+                    namespace=namespace,
+                    score_threshold=0.3  # Minimum similarity score threshold
                 )
                 
                 if not query_results.matches:
@@ -605,6 +606,20 @@ class EnhancedQASystem:
                 print(f"✅ Best video match - Score: {best_match.score:.3f}, Relevance: {relevance_score:.3f}")
                 print(f"📹 Video URL: {video_url}")
                 print(f"⏰ Timestamp: {start_time}s - {end_time}s")
+                
+                # Check if video is relevant enough to include
+                MIN_VIDEO_RELEVANCE = 0.5  # Minimum relevance threshold for videos
+                if relevance_score < MIN_VIDEO_RELEVANCE:
+                    print(f"❌ Video relevance too low ({relevance_score:.3f} < {MIN_VIDEO_RELEVANCE}) - excluding video")
+                    return {
+                        'success': False,
+                        'answer': None,
+                        'score': 0,
+                        'source': 'video',
+                        'video_url': None,
+                        'start_time': 0,
+                        'end_time': 0
+                    }
                 
                 return {
                     'success': True,
@@ -705,9 +720,36 @@ class EnhancedQASystem:
                 
                 print(f"✅ Best knowledge match - Score: {best_match.score:.3f}, Relevance: {relevance_score:.3f}")
                 
+                # Clean the content by removing markdown formatting and unwanted symbols
+                import re
+                clean_content = content
+                
+                # Remove markdown formatting
+                clean_content = re.sub(r'\*\*(.*?)\*\*', r'\1', clean_content)  # Remove bold
+                clean_content = re.sub(r'\*(.*?)\*', r'\1', clean_content)      # Remove italic
+                clean_content = re.sub(r'`(.*?)`', r'\1', clean_content)        # Remove code
+                clean_content = re.sub(r'#{1,6}\s*(.*)', r'\1', clean_content)  # Remove headers
+                clean_content = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', clean_content)  # Remove links
+                
+                # Remove table formatting
+                clean_content = re.sub(r'\|.*?\|', '', clean_content)  # Remove table rows
+                clean_content = re.sub(r'\|-+\|', '', clean_content)   # Remove table separators
+                
+                # Remove bullet points and list markers
+                clean_content = re.sub(r'^\s*[\*\-+]\s+', '', clean_content, flags=re.MULTILINE)
+                clean_content = re.sub(r'^\s*\d+\.\s+', '', clean_content, flags=re.MULTILINE)
+                
+                # Remove extra whitespace and clean up
+                clean_content = re.sub(r'\n\s*\n', '\n\n', clean_content)  # Remove extra blank lines
+                clean_content = re.sub(r'^\s+', '', clean_content, flags=re.MULTILINE)  # Remove leading spaces
+                clean_content = clean_content.strip()
+                
+                # Use GPT to format the raw content into structured, user-friendly answer
+                formatted_answer = self._format_knowledge_answer(question, clean_content)
+                
                 return {
                     'success': True,
-                    'answer': content,
+                    'answer': formatted_answer,
                     'score': best_match.score,
                     'relevance_score': relevance_score,
                     'source': 'knowledge',
@@ -732,6 +774,80 @@ class EnhancedQASystem:
                 'score': 0,
                 'source': 'knowledge'
             }
+
+    def _format_knowledge_answer(self, question: str, raw_content: str) -> str:
+        """Format raw scraped content into structured, user-friendly answer using GPT"""
+        try:
+            from openai import OpenAI
+            
+            client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+            
+            prompt = f"""
+You are a helpful product knowledge assistant. The user asked: "{question}"
+
+Here is the raw scraped content from a help center or documentation:
+{raw_content}
+
+Please format this content into a clear, structured, step-by-step answer that directly addresses the user's question.
+Follow these guidelines:
+1. Remove any navigation elements, headers, footers, or irrelevant UI text
+2. Organize the information into clear numbered steps or bullet points
+3. Focus on actionable instructions and practical guidance
+4. Use a friendly, helpful tone
+5. Remove any formatting symbols, HTML tags, or technical jargon
+6. Make it easy to follow and understand
+7. If there are tables or lists, convert them to readable text format
+8. Remove any "Did this answer your question?" or similar feedback elements
+
+Format the answer as:
+1. [Step/Point 1]
+2. [Step/Point 2]
+3. [Step/Point 3]
+etc.
+
+Answer:
+"""
+            
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are a helpful product knowledge assistant who formats raw content into clear, structured answers."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=800,
+                temperature=0.3
+            )
+            
+            formatted_answer = response.choices[0].message.content.strip()
+            
+            # Fallback to basic cleaning if GPT fails
+            if not formatted_answer or len(formatted_answer) < 50:
+                print("⚠️ GPT formatting failed, using basic cleaning")
+                return self._basic_content_cleaning(raw_content)
+            
+            return formatted_answer
+            
+        except Exception as e:
+            print(f"❌ Error formatting knowledge answer with GPT: {e}")
+            # Fallback to basic cleaning
+            return self._basic_content_cleaning(raw_content)
+
+    def _basic_content_cleaning(self, content: str) -> str:
+        """Basic content cleaning as fallback when GPT formatting fails"""
+        import re
+        
+        # Remove common navigation and UI elements
+        content = re.sub(r'Skip to main content.*?Search for articles', '', content, flags=re.DOTALL)
+        content = re.sub(r'Did this answer your question.*', '', content, flags=re.DOTALL)
+        content = re.sub(r'😞.*', '', content, flags=re.DOTALL)
+        content = re.sub(r'Help Center.*', '', content, flags=re.DOTALL)
+        
+        # Remove extra whitespace and clean up
+        content = re.sub(r'\n\s*\n', '\n\n', content)
+        content = re.sub(r'^\s+', '', content, flags=re.MULTILINE)
+        content = content.strip()
+        
+        return content
 
     def _calculate_relevance_score(self, question: str, content: str) -> float:
         """Calculate relevance score combining semantic and keyword matching"""
@@ -788,16 +904,28 @@ class EnhancedQASystem:
             
             # Define relevance thresholds
             HIGH_RELEVANCE = 0.7
-            MEDIUM_RELEVANCE = 0.5
-            LOW_RELEVANCE = 0.3
+            MEDIUM_RELEVANCE = 0.6  # Increased from 0.5 to be more selective
+            LOW_RELEVANCE = 0.4     # Increased from 0.3 to be more selective
             
             video_score = video_result.get('relevance_score', 0) if video_result.get('success') else 0
             knowledge_score = knowledge_result.get('relevance_score', 0) if knowledge_result.get('success') else 0
             
             print(f"📊 Video score: {video_score:.3f}, Knowledge score: {knowledge_score:.3f}")
             
-            # Decision matrix
-            if video_score >= HIGH_RELEVANCE and knowledge_score >= HIGH_RELEVANCE:
+            # Decision matrix - prioritize knowledge when it's highly relevant
+            if knowledge_score >= HIGH_RELEVANCE and video_score < MEDIUM_RELEVANCE:
+                # Knowledge highly relevant, video not relevant enough - use knowledge only
+                print("📚 Knowledge highly relevant - using knowledge answer only")
+                return {
+                    'success': True,
+                    'answer': knowledge_result['answer'],  # Already formatted by _format_knowledge_answer
+                    'start': 0,
+                    'end': 0,
+                    'video_url': None,
+                    'sources': [{'type': 'knowledge', 'url': knowledge_result.get('url', ''), 'title': knowledge_result.get('title', '')}]
+                }
+                
+            elif video_score >= HIGH_RELEVANCE and knowledge_score >= HIGH_RELEVANCE:
                 # Both highly relevant - combine them
                 print("🔄 Both sources highly relevant - combining answers")
                 return self._generate_combined_answer(video_result, knowledge_result, question)
@@ -807,22 +935,33 @@ class EnhancedQASystem:
                 print("🎬 Video highly relevant - using video answer")
                 return self._generate_guided_answer(video_result, question)
                 
-            elif knowledge_score >= HIGH_RELEVANCE and video_score < MEDIUM_RELEVANCE:
-                # Knowledge highly relevant, video less so - use knowledge only
-                print("📚 Knowledge highly relevant - using knowledge answer")
-                return {
-                    'success': True,
-                    'answer': knowledge_result['answer'],
-                    'start': 0,
-                    'end': 0,
-                    'video_url': None,
-                    'sources': [{'type': 'knowledge', 'url': knowledge_result.get('url', ''), 'title': knowledge_result.get('title', '')}]
-                }
-                
             elif video_score >= MEDIUM_RELEVANCE and knowledge_score >= MEDIUM_RELEVANCE:
-                # Both moderately relevant - combine them
-                print("🔄 Both sources moderately relevant - combining answers")
-                return self._generate_combined_answer(video_result, knowledge_result, question)
+                # Both moderately relevant - check if knowledge is significantly better
+                score_difference = knowledge_score - video_score
+                if score_difference >= 0.1:  # Knowledge is significantly better (0.1 difference)
+                    print(f"📚 Knowledge significantly better (diff: {score_difference:.3f}) - using knowledge answer only")
+                    return {
+                        'success': True,
+                        'answer': knowledge_result['answer'],  # Already formatted by _format_knowledge_answer
+                        'start': 0,
+                        'end': 0,
+                        'video_url': None,
+                        'sources': [{'type': 'knowledge', 'url': knowledge_result.get('url', ''), 'title': knowledge_result.get('title', '')}]
+                    }
+                elif video_score < 0.65:  # Video not relevant enough even if above medium threshold
+                    print(f"🎬 Video not relevant enough (score: {video_score:.3f}) - using knowledge answer only")
+                    return {
+                        'success': True,
+                        'answer': knowledge_result['answer'],  # Already formatted by _format_knowledge_answer
+                        'start': 0,
+                        'end': 0,
+                        'video_url': None,
+                        'sources': [{'type': 'knowledge', 'url': knowledge_result.get('url', ''), 'title': knowledge_result.get('title', '')}]
+                    }
+                else:
+                    # Both are similarly relevant - combine them
+                    print("🔄 Both sources moderately relevant - combining answers")
+                    return self._generate_combined_answer(video_result, knowledge_result, question)
                 
             elif video_score >= LOW_RELEVANCE or knowledge_score >= LOW_RELEVANCE:
                 # At least one source has some relevance - use the better one
@@ -833,7 +972,7 @@ class EnhancedQASystem:
                     print("📚 Knowledge more relevant - using knowledge answer")
                     return {
                         'success': True,
-                        'answer': knowledge_result['answer'],
+                        'answer': knowledge_result['answer'],  # Already formatted by _format_knowledge_answer
                         'start': 0,
                         'end': 0,
                         'video_url': None,
@@ -878,7 +1017,8 @@ Here is the relevant video transcript content:
 Please provide a clear, step-by-step answer that explains how to accomplish what the user is asking for. 
 Write it in a friendly, helpful tone as if you're guiding them through the process.
 Focus on practical steps and actionable advice.
-Do not include timestamps or technical jargon unless necessary.
+Do not include timestamps, technical jargon, or any formatting symbols like *, |, #, -, etc.
+Write in plain text format only without any markdown or special formatting.
 
 Answer:
 """
@@ -935,7 +1075,8 @@ Here is the relevant knowledge base content:
 Please provide a comprehensive answer that combines the best information from both sources.
 Write it in a clear, step-by-step format that helps the user accomplish what they're asking for.
 Organize the information logically and avoid repetition.
-Do not include timestamps or technical jargon unless necessary.
+Do not include timestamps, technical jargon, or any formatting symbols like *, |, #, -, etc.
+Write in plain text format only without any markdown or special formatting.
 
 Combined Answer:
 """

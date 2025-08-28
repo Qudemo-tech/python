@@ -452,7 +452,7 @@ class EnhancedQASystem:
             client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
             response = client.embeddings.create(
                 input=text,
-                model="text-embedding-ada-002"
+                model="text-embedding-3-small"
             )
             
             embedding = response.data[0].embedding
@@ -466,12 +466,70 @@ class EnhancedQASystem:
         except Exception as e:
             print(f"❌ Error getting embedding: {e}")
             # Return a dummy embedding if OpenAI fails
-            return [0.0] * 1536
+            return [0.0] * 1536  # text-embedding-3-small uses 1536 dimensions (same as ada-002)
+
+    def _debug_namespace_content(self, company_name: str, qudemo_id: str):
+        """Debug method to check what content exists in a namespace"""
+        try:
+            print(f"🔍 Debug: Checking namespace content for {company_name} qudemo {qudemo_id}")
+            
+            # Initialize Pinecone
+            pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
+            index_name = os.getenv('PINECONE_INDEX', 'qudemo-index')
+            index = pc.Index(index_name)
+            
+            # Create namespace
+            namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
+            
+            # Try to get index stats to see if namespace exists
+            try:
+                stats = index.describe_index_stats()
+                print(f"📊 Index stats: {stats}")
+                
+                # Check if our namespace is in the stats
+                if 'namespaces' in stats:
+                    namespace_stats = stats['namespaces']
+                    if namespace in namespace_stats:
+                        print(f"✅ Namespace '{namespace}' found in index with {namespace_stats[namespace]['vector_count']} vectors")
+                    else:
+                        print(f"❌ Namespace '{namespace}' not found in index")
+                        print(f"🔍 Available namespaces: {list(namespace_stats.keys())}")
+                else:
+                    print("⚠️ No namespace information available in index stats")
+                    
+            except Exception as stats_error:
+                print(f"❌ Could not get index stats: {stats_error}")
+            
+            # Try a simple search without namespace to see if any content exists
+            try:
+                print("🔍 Trying a simple search without namespace restriction...")
+                # Create a simple test embedding
+                test_embedding = [0.0] * 1536
+                test_results = index.query(
+                    vector=test_embedding,
+                    top_k=5,
+                    include_metadata=True
+                )
+                if test_results.matches:
+                    print(f"✅ Found {len(test_results.matches)} total vectors in index")
+                    for i, match in enumerate(test_results.matches):
+                        metadata = match.metadata
+                        print(f"  Vector {i+1}: ID={match.id}, SourceType={metadata.get('source_type', 'NO_SOURCE_TYPE')}, Company={metadata.get('company_name', 'NO_COMPANY')}, Qudemo={metadata.get('qudemo_id', 'NO_QUDEMO')}")
+                else:
+                    print("❌ No vectors found in index at all")
+            except Exception as search_error:
+                print(f"❌ Simple search failed: {search_error}")
+                
+        except Exception as e:
+            print(f"❌ Error in debug_namespace_content: {e}")
 
     def ask_question(self, question: str, company_name: str, qudemo_id: str) -> Dict:
         """Ask a question and get an intelligent answer from video and knowledge sources"""
         try:
             print(f"❓ Question for {company_name} qudemo {qudemo_id}: {question}")
+            
+            # First, let's check if there's any content in the namespace at all
+            self._debug_namespace_content(company_name, qudemo_id)
             
             # Get question embedding once and reuse it
             question_embedding = self._get_embedding(question)
@@ -513,23 +571,46 @@ class EnhancedQASystem:
             
             # Create namespace
             namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
+            print(f"🔍 Searching in namespace: {namespace}")
             
             # Use provided embedding or get new one
             if question_embedding is None:
                 question_embedding = self._get_embedding(question)
             
-            # Search in Pinecone
+            # Search in Pinecone with more inclusive parameters
             try:
                 query_results = index.query(
                     vector=question_embedding,
-                    top_k=10,  # Increased to get more matches
+                    top_k=20,  # Increased to get more matches
                     include_metadata=True,
                     namespace=namespace,
-                    score_threshold=0.3  # Minimum similarity score threshold
+                    score_threshold=0.1  # Lower threshold to see more matches
                 )
                 
                 if not query_results.matches:
-                    print("❌ No video content found in Pinecone")
+                    print("❌ No content found in Pinecone at all")
+                    print(f"🔍 Debug: Namespace '{namespace}' appears to be empty")
+                    
+                    # Try searching without namespace restriction to see if content exists
+                    print("🔍 Trying search without namespace restriction...")
+                    try:
+                        fallback_results = index.query(
+                            vector=question_embedding,
+                            top_k=5,
+                            include_metadata=True,
+                            score_threshold=0.1
+                        )
+                        if fallback_results.matches:
+                            print(f"⚠️ Found {len(fallback_results.matches)} matches without namespace restriction")
+                            print("🔍 This suggests the namespace might be incorrect or content was stored differently")
+                            for i, match in enumerate(fallback_results.matches):
+                                metadata = match.metadata
+                                print(f"  Fallback Match {i+1}: Namespace={metadata.get('namespace', 'NO_NAMESPACE')}, SourceType={metadata.get('source_type', 'NO_SOURCE_TYPE')}")
+                        else:
+                            print("❌ No content found even without namespace restriction")
+                    except Exception as fallback_error:
+                        print(f"❌ Fallback search failed: {fallback_error}")
+                    
                     return {
                         'success': False,
                         'answer': None,
@@ -541,6 +622,15 @@ class EnhancedQASystem:
                     }
                 
                 print(f"✅ Found {len(query_results.matches)} total matches")
+                
+                # Debug: Show all matches and their metadata
+                print("🔍 Debug: All matches found:")
+                for i, match in enumerate(query_results.matches):
+                    metadata = match.metadata
+                    source_type = metadata.get('source_type', 'NO_SOURCE_TYPE')
+                    source = metadata.get('source', 'NO_SOURCE')
+                    title = metadata.get('title', 'NO_TITLE')
+                    print(f"  Match {i+1}: Score={match.score:.3f}, SourceType='{source_type}', Source='{source}', Title='{title[:50]}...'")
                 
                 # Filter for video content and find best match
                 video_matches = []
@@ -560,9 +650,14 @@ class EnhancedQASystem:
                     
                     if is_video:
                         video_matches.append(match)
+                        print(f"✅ Accepted video match: {metadata.get('title', 'NO_TITLE')[:50]}...")
                 
                 if not video_matches:
                     print("⚠️ No video content found in this qudemo")
+                    print("🔍 Debug: All matches were filtered out. Available source_types:")
+                    for match in query_results.matches:
+                        metadata = match.metadata
+                        print(f"  - {metadata.get('source_type', 'NO_SOURCE_TYPE')} (source: {metadata.get('source', 'NO_SOURCE')})")
                     return {
                         'success': False,
                         'answer': None,
@@ -773,22 +868,46 @@ class EnhancedQASystem:
             
             # Create namespace
             namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
+            print(f"🔍 Searching in namespace: {namespace}")
             
             # Use provided embedding or get new one
             if question_embedding is None:
                 question_embedding = self._get_embedding(question)
             
-            # Search in Pinecone
+            # Search in Pinecone with more inclusive parameters
             try:
                 query_results = index.query(
                     vector=question_embedding,
-                    top_k=3,
+                    top_k=20,  # Increased to get more potential matches
                     include_metadata=True,
-                    namespace=namespace
+                    namespace=namespace,
+                    score_threshold=0.1  # Lower threshold to see more matches
                 )
                 
                 if not query_results.matches:
-                    print("❌ No knowledge content found in Pinecone")
+                    print("❌ No content found in Pinecone at all")
+                    print(f"🔍 Debug: Namespace '{namespace}' appears to be empty")
+                    
+                    # Try searching without namespace restriction to see if content exists
+                    print("🔍 Trying search without namespace restriction...")
+                    try:
+                        fallback_results = index.query(
+                            vector=question_embedding,
+                            top_k=5,
+                            include_metadata=True,
+                            score_threshold=0.1
+                        )
+                        if fallback_results.matches:
+                            print(f"⚠️ Found {len(fallback_results.matches)} matches without namespace restriction")
+                            print("🔍 This suggests the namespace might be incorrect or content was stored differently")
+                            for i, match in enumerate(fallback_results.matches):
+                                metadata = match.metadata
+                                print(f"  Fallback Match {i+1}: Namespace={metadata.get('namespace', 'NO_NAMESPACE')}, SourceType={metadata.get('source_type', 'NO_SOURCE_TYPE')}")
+                        else:
+                            print("❌ No content found even without namespace restriction")
+                    except Exception as fallback_error:
+                        print(f"❌ Fallback search failed: {fallback_error}")
+                    
                     return {
                         'success': False,
                         'answer': None,
@@ -796,19 +915,43 @@ class EnhancedQASystem:
                         'source': 'knowledge'
                     }
                 
-                print(f"✅ Found {len(query_results.matches)} knowledge matches")
+                print(f"✅ Found {len(query_results.matches)} total matches")
                 
-                # Filter for knowledge content
+                # Debug: Show all matches and their metadata
+                print("🔍 Debug: All matches found:")
+                for i, match in enumerate(query_results.matches):
+                    metadata = match.metadata
+                    source_type = metadata.get('source_type', 'NO_SOURCE_TYPE')
+                    source = metadata.get('source', 'NO_SOURCE')
+                    title = metadata.get('title', 'NO_TITLE')
+                    print(f"  Match {i+1}: Score={match.score:.3f}, SourceType='{source_type}', Source='{source}', Title='{title[:50]}...'")
+                
+                # More inclusive filtering - accept any content that's not explicitly video
                 knowledge_matches = []
                 for match in query_results.matches:
                     metadata = match.metadata
                     source_type = metadata.get('source_type', '')
+                    source = metadata.get('source', '')
                     
-                    if source_type == 'web_scraping':
+                    # Accept web_scraping, knowledge, or any non-video content
+                    is_knowledge = (
+                        source_type == 'web_scraping' or 
+                        source_type == 'knowledge' or 
+                        source == 'web_scraping' or
+                        source == 'knowledge' or
+                        (source_type != 'video_transcript' and 'video' not in source_type.lower())
+                    )
+                    
+                    if is_knowledge:
                         knowledge_matches.append(match)
+                        print(f"✅ Accepted knowledge match: {metadata.get('title', 'NO_TITLE')[:50]}...")
                 
                 if not knowledge_matches:
-                    print("⚠️ No knowledge-specific matches found")
+                    print("⚠️ No knowledge-specific matches found after filtering")
+                    print("🔍 Debug: All matches were filtered out. Available source_types:")
+                    for match in query_results.matches:
+                        metadata = match.metadata
+                        print(f"  - {metadata.get('source_type', 'NO_SOURCE_TYPE')} (source: {metadata.get('source', 'NO_SOURCE')})")
                     return {
                         'success': False,
                         'answer': None,

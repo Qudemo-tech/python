@@ -278,9 +278,9 @@ class FinalGeminiScraper:
             return ""
     
     async def scrape_with_fallback(self, url: str) -> List[Dict]:
-        """Fallback scraping method using requests and BeautifulSoup when Playwright fails"""
+        """Enhanced fallback scraping method using requests and BeautifulSoup when Playwright fails"""
         try:
-            print("🔄 Using fallback scraping method (requests + BeautifulSoup)")
+            print("🔄 Using enhanced fallback scraping method (requests + BeautifulSoup)")
             import requests
             from bs4 import BeautifulSoup
             
@@ -293,58 +293,98 @@ class FinalGeminiScraper:
             
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Extract title
-            title = soup.find('title')
-            title_text = title.get_text().strip() if title else "Help Center Article"
+            articles = []
             
-            # Extract main content
-            main_content = ""
-            
-            # Try to find main content areas
-            content_selectors = [
-                'main', 'article', '.content', '.main-content', '.post-content',
-                '.article-content', '.help-content', '.support-content'
+            # Try to find multiple articles on the page
+            article_selectors = [
+                'article', '.article', '.post', '.help-item', '.faq-item',
+                '.collection-item', '.topic-item', '.support-item'
             ]
             
-            for selector in content_selectors:
-                content_elem = soup.select_one(selector)
-                if content_elem:
-                    main_content = content_elem.get_text(separator='\n', strip=True)
-                    break
+            # Look for article containers
+            for selector in article_selectors:
+                article_elements = soup.select(selector)
+                if article_elements:
+                    print(f"🔍 Found {len(article_elements)} articles using selector: {selector}")
+                    for i, article_elem in enumerate(article_elements[:10]):  # Limit to 10 articles
+                        try:
+                            # Extract title
+                            title_elem = article_elem.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+                            title = title_elem.get_text().strip() if title_elem else f"Article {i+1}"
+                            
+                            # Extract content
+                            content = article_elem.get_text(separator='\n', strip=True)
+                            
+                            if len(content) > 100:  # Only include substantial content
+                                article = {
+                                    'title': title,
+                                    'content': content,
+                                    'url': url,
+                                    'collection': 'Help Center',
+                                    'content_type': 'article',
+                                    'has_steps': 'step' in content.lower() or '1.' in content[:500],
+                                    'is_complete': True,
+                                    'word_count': len(content.split()),
+                                    'quality_score': 75,  # Good score for fallback method
+                                    'key_topics': [],
+                                    'difficulty_level': 'intermediate'
+                                }
+                                articles.append(article)
+                                print(f"✅ Extracted article {i+1}: {title} ({len(content.split())} words)")
+                        except Exception as e:
+                            print(f"⚠️ Error extracting article {i+1}: {e}")
+                            continue
             
-            # If no main content found, get body text
-            if not main_content:
-                body = soup.find('body')
-                if body:
-                    # Remove script and style elements
-                    for script in body(["script", "style"]):
-                        script.decompose()
-                    main_content = body.get_text(separator='\n', strip=True)
+            # If no articles found, extract main page content
+            if not articles:
+                print("🔍 No individual articles found, extracting main page content...")
+                title = soup.find('title')
+                title_text = title.get_text().strip() if title else "Help Center Article"
+                
+                # Extract main content
+                main_content = ""
+                content_selectors = [
+                    'main', '.content', '.main-content', '.post-content',
+                    '.article-content', '.help-content', '.support-content'
+                ]
+                
+                for selector in content_selectors:
+                    content_elem = soup.select_one(selector)
+                    if content_elem:
+                        main_content = content_elem.get_text(separator='\n', strip=True)
+                        break
+                
+                # If no main content found, get body text
+                if not main_content:
+                    body = soup.find('body')
+                    if body:
+                        for script in body(["script", "style"]):
+                            script.decompose()
+                        main_content = body.get_text(separator='\n', strip=True)
+                
+                # Clean up content
+                lines = [line.strip() for line in main_content.split('\n') if line.strip()]
+                main_content = '\n'.join(lines)
+                
+                if len(main_content) >= 100:
+                    article = {
+                        'title': title_text,
+                        'content': main_content,
+                        'url': url,
+                        'collection': 'Help Center',
+                        'content_type': 'article',
+                        'has_steps': 'step' in main_content.lower() or '1.' in main_content[:500],
+                        'is_complete': True,
+                        'word_count': len(main_content.split()),
+                        'quality_score': 70,
+                        'key_topics': [],
+                        'difficulty_level': 'intermediate'
+                    }
+                    articles.append(article)
+                    print(f"✅ Extracted main page content: {title_text} ({len(main_content.split())} words)")
             
-            # Clean up content
-            lines = [line.strip() for line in main_content.split('\n') if line.strip()]
-            main_content = '\n'.join(lines)
-            
-            if len(main_content) < 100:
-                return []
-            
-            # Create article object
-            article = {
-                'title': title_text,
-                'content': main_content,
-                'url': url,
-                'collection': 'Help Center',
-                'content_type': 'article',
-                'has_steps': 'step' in main_content.lower() or '1.' in main_content[:500],
-                'is_complete': True,
-                'word_count': len(main_content.split()),
-                'quality_score': 70,  # Lower score for fallback method
-                'key_topics': [],
-                'difficulty_level': 'intermediate'
-            }
-            
-            print(f"✅ Fallback extraction successful: {article['title']} ({article['word_count']} words)")
-            return [article]
+            print(f"✅ Enhanced fallback extraction successful: {len(articles)} articles extracted")
+            return articles
             
         except Exception as e:
             print(f"❌ Fallback scraping failed: {e}")
@@ -1013,7 +1053,10 @@ Respond only with the JSON object, no additional text. Ensure the content is COM
                 if not collections:
                     print("⚠️ No collections found, trying direct article extraction...")
                     # Fallback to direct article extraction
-                    return await self._final_summary_log(start_time, total_pages_scraped, total_pages_skipped, total_collections_found, total_articles_found, await self._fallback_direct_extraction(url))
+                    fallback_results = await self._fallback_direct_extraction(url)
+                    fallback_pages_scraped = len(fallback_results)
+                    fallback_articles_found = len(fallback_results)
+                    return await self._final_summary_log(start_time, fallback_pages_scraped, total_pages_skipped, total_collections_found, fallback_articles_found, fallback_results)
                 
                 # Step 2: Extract articles from each collection
                 print(f"📖 Step 2: Extracting articles from {len(collections)} collections...")
@@ -1105,14 +1148,17 @@ Respond only with the JSON object, no additional text. Ensure the content is COM
                 try:
                     fallback_results = await self.scrape_with_fallback(url)
                     if fallback_results:
-                        print(f"✅ Fallback scraping successful: {len(fallback_results)} articles extracted")
-                        return await self._final_summary_log(start_time, total_pages_scraped, total_pages_skipped, total_collections_found, total_articles_found, fallback_results)
+                        # Update counters for fallback method
+                        fallback_pages_scraped = len(fallback_results)
+                        fallback_articles_found = len(fallback_results)
+                        print(f"✅ Fallback scraping successful: {fallback_pages_scraped} articles extracted")
+                        return await self._final_summary_log(start_time, fallback_pages_scraped, total_pages_skipped, total_collections_found, fallback_articles_found, fallback_results)
                     else:
                         print("❌ Fallback scraping also failed")
                         return await self._final_summary_log(start_time, total_pages_scraped, total_pages_skipped, total_collections_found, total_articles_found, [])
                 except Exception as fallback_error:
                     print(f"❌ Fallback scraping error: {fallback_error}")
-                    return await self._final_summary_log(start_time, total_pages_scraped, total_pages_skipped, total_collections_found, total_articles_found, [])
+                    return await self._final_summary_log(start_time, 0, total_pages_skipped, total_collections_found, 0, [])
                 
             finally:
                 if browser_initialized:

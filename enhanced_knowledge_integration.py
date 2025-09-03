@@ -1,386 +1,375 @@
 #!/usr/bin/env python3
 """
-Enhanced Knowledge Integration System
-Handles Pinecone vector database operations for knowledge storage and retrieval
+Enhanced Knowledge Integration with Standard Plan Multi-Index Architecture
+Optimized for better Q&A performance and content routing
 """
 
-import requests
-import json
 import os
 import logging
+import asyncio
+from typing import Dict, List, Optional, Any
 from datetime import datetime
-from typing import List, Dict, Optional
-from pinecone import Pinecone
-from openai import OpenAI
-import time
+import json
+
+# Import the enhanced Pinecone manager
+from enhanced_pinecone_manager import get_enhanced_pinecone_manager
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Configuration
-NODE_API_URL = os.getenv('NODE_API_URL', 'http://localhost:5000')
-PYTHON_API_URL = os.getenv('PYTHON_API_URL', 'http://localhost:5001')
-
 class EnhancedKnowledgeIntegrator:
-    """Enhanced Knowledge Integrator for Pinecone operations with qudemo isolation"""
+    """Enhanced Knowledge Integrator with Standard Plan optimizations"""
     
-    def __init__(self, openai_api_key: str, pinecone_api_key: str, pinecone_index: str = None):
-        """Initialize the knowledge integrator"""
-        self.openai_api_key = openai_api_key
-        self.pinecone_api_key = pinecone_api_key
-        self.pinecone_index = pinecone_index or os.getenv('PINECONE_INDEX', 'qudemo-index')
-        
-        # Initialize OpenAI client with connection pooling
-        self.openai_client = OpenAI(
-            api_key=openai_api_key,
-            max_retries=3,
-            timeout=30.0
-        )
-        
-        # Initialize Pinecone
+    def __init__(self):
+        """Initialize enhanced knowledge integrator"""
         try:
-            self.pc = Pinecone(api_key=pinecone_api_key)
-            logger.info(f"✅ Pinecone initialized with index: {self.pinecone_index}")
+            self.pinecone_manager = get_enhanced_pinecone_manager()
+            logger.info("✅ Enhanced Knowledge Integrator initialized")
         except Exception as e:
-            logger.error(f"❌ Failed to initialize Pinecone: {e}")
+            logger.error(f"❌ Failed to initialize Enhanced Knowledge Integrator: {e}")
             raise
     
-    def store_semantic_chunks(self, chunks: List[Dict], company_name: str, qudemo_id: str = None) -> Dict:
-        """Store semantic chunks in Pinecone with qudemo isolation"""
+    async def store_semantic_chunks(self, chunks: List[Dict], company_name: str, qudemo_id: str) -> Dict:
+        """Store semantic chunks with intelligent content routing"""
         try:
-            logger.info(f"🔧 Storing {len(chunks)} semantic chunks for {company_name} qudemo {qudemo_id}")
+            logger.info(f"🔧 Storing {len(chunks)} chunks for {company_name} qudemo {qudemo_id}")
             
-            # Create namespace for qudemo isolation
-            namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}" if qudemo_id else company_name.lower().replace(' ', '-')
+            # Process chunks with enhanced metadata
+            enhanced_chunks = []
             
-            # Get Pinecone index
-            index = self.pc.Index(self.pinecone_index)
-            
-            vectors_to_upsert = []
-            
-            # Batch embeddings for efficiency (OpenAI allows up to 2048 inputs per request)
-            batch_size = 100  # Conservative batch size
-            total_batches = (len(chunks) + batch_size - 1) // batch_size
-            
-            logger.info(f"🔧 Processing {len(chunks)} chunks in {total_batches} batches of {batch_size}")
-            
-            for batch_idx in range(total_batches):
-                start_idx = batch_idx * batch_size
-                end_idx = min(start_idx + batch_size, len(chunks))
-                batch_chunks = chunks[start_idx:end_idx]
-                
+            for i, chunk in enumerate(chunks):
                 try:
-                    # Extract texts for batch embedding
-                    texts = [chunk['text'] for chunk in batch_chunks]
+                    # Enhance chunk metadata
+                    enhanced_chunk = self._enhance_chunk_metadata(chunk, i, len(chunks))
+                    enhanced_chunks.append(enhanced_chunk)
                     
-                    # Generate embeddings for the batch with retry logic
-                    max_retries = 3
-                    for retry in range(max_retries):
-                        try:
-                            response = self.openai_client.embeddings.create(
-                                model="text-embedding-3-small",
-                                input=texts
-                            )
-                            embeddings = [data.embedding for data in response.data]
-                            
-                            logger.info(f"✅ Generated embeddings for batch {batch_idx + 1}/{total_batches} ({len(embeddings)} embeddings)")
-                            break  # Success, exit retry loop
-                            
-                        except Exception as e:
-                            if retry < max_retries - 1:
-                                wait_time = (2 ** retry) * 1  # Exponential backoff: 1s, 2s, 4s
-                                logger.warning(f"⚠️ Batch {batch_idx + 1} failed (attempt {retry + 1}/{max_retries}), retrying in {wait_time}s: {e}")
-                                time.sleep(wait_time)
-                            else:
-                                logger.error(f"❌ Batch {batch_idx + 1} failed after {max_retries} attempts: {e}")
-                                raise
-                    
-                    # Process each chunk in the batch
-                    for i, (chunk, embedding) in enumerate(zip(batch_chunks, embeddings)):
-                        chunk_idx = start_idx + i
-                        
-                        # Prepare metadata
-                        metadata = {
-                            'text': chunk['text'],
-                            'source': chunk.get('source', 'unknown'),
-                            'source_type': 'video_transcript' if chunk.get('source') == 'video' else 'web_scraping',
-                            'title': chunk.get('title', ''),
-                            'url': chunk.get('url', ''),
-                            'processed_at': chunk.get('processed_at', datetime.now().isoformat()),
-                            'company_name': company_name,
-                            'qudemo_id': qudemo_id,
-                            'chunk_type': 'semantic',
-                            'start_timestamp': chunk.get('start_timestamp', 0),
-                            'end_timestamp': chunk.get('end_timestamp', 0),
-                            'chunk_index': chunk.get('chunk_index', 0),
-                            'total_chunks': chunk.get('total_chunks', 1)
-                        }
-                        
-                        # Create vector record
-                        vector_record = {
-                            'id': f"{namespace}-chunk-{chunk_idx}-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                            'values': embedding,
-                            'metadata': metadata
-                        }
-                        
-                        vectors_to_upsert.append(vector_record)
-                        
                 except Exception as e:
-                    logger.error(f"❌ Error processing batch {batch_idx + 1}: {e}")
+                    logger.error(f"❌ Error enhancing chunk {i}: {e}")
                     continue
             
-            if vectors_to_upsert:
-                # Upsert vectors to Pinecone with retry logic
-                max_retries = 3
-                for retry in range(max_retries):
-                    try:
-                        index.upsert(vectors=vectors_to_upsert, namespace=namespace)
-                        logger.info(f"✅ Successfully stored {len(vectors_to_upsert)} chunks in namespace: {namespace}")
-                        break  # Success, exit retry loop
-                        
-                    except Exception as e:
-                        if retry < max_retries - 1:
-                            wait_time = (2 ** retry) * 1  # Exponential backoff: 1s, 2s, 4s
-                            logger.warning(f"⚠️ Pinecone upsert failed (attempt {retry + 1}/{max_retries}), retrying in {wait_time}s: {e}")
-                            time.sleep(wait_time)
-                        else:
-                            logger.error(f"❌ Pinecone upsert failed after {max_retries} attempts: {e}")
-                            raise
-                
-                return {
-                    'success': True,
-                    'chunks_stored': len(vectors_to_upsert),
-                    'namespace': namespace,
-                    'company_name': company_name,
-                    'qudemo_id': qudemo_id
-                }
-            else:
-                logger.warning("⚠️ No chunks to store")
+            if not enhanced_chunks:
                 return {
                     'success': False,
-                    'error': 'No chunks to store',
+                    'error': 'No chunks to process',
                     'chunks_stored': 0
                 }
+            
+            # Store chunks using enhanced Pinecone manager
+            store_result = await self.pinecone_manager.store_semantic_chunks(
+                chunks=enhanced_chunks,
+                company_name=company_name,
+                qudemo_id=qudemo_id,
+                content_type='web_scraping'
+            )
+            
+            if store_result['success']:
+                logger.info(f"✅ Successfully stored {store_result['chunks_stored']} chunks")
+                return store_result
+            else:
+                logger.error(f"❌ Failed to store chunks: {store_result.get('error', 'Unknown error')}")
+                return store_result
                 
         except Exception as e:
-            logger.error(f"❌ Error storing semantic chunks: {e}")
+            logger.error(f"❌ Error in store_semantic_chunks: {e}")
             return {
                 'success': False,
                 'error': str(e),
                 'chunks_stored': 0
             }
     
-    def search_with_context(self, query: str, company_name: str, qudemo_id: str = None, top_k: int = 5) -> Dict:
-        """Search for relevant chunks with context"""
+    def _enhance_chunk_metadata(self, chunk: Dict, chunk_index: int, total_chunks: int) -> Dict:
+        """Enhance chunk metadata for better search and Q&A"""
         try:
-            # Create namespace for qudemo isolation
-            namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}" if qudemo_id else company_name.lower().replace(' ', '-')
+            text = chunk.get('text', '')
             
-            # Generate query embedding
-            response = self.openai_client.embeddings.create(
-                model="text-embedding-3-small",
-                input=query
-            )
-            query_embedding = response.data[0].embedding
+            # Analyze content for better categorization
+            content_analysis = self._analyze_content(text)
             
-            # Search in Pinecone
-            index = self.pc.Index(self.pinecone_index)
-            results = index.query(
-                vector=query_embedding,
-                namespace=namespace,
-                top_k=top_k,
-                include_metadata=True
-            )
+            # Enhanced metadata
+            enhanced_chunk = {
+                'text': text,
+                'source': chunk.get('source_url', chunk.get('source', 'unknown')),
+                'source_type': chunk.get('source_type', 'web_scraping'),
+                'title': chunk.get('title', ''),
+                'url': chunk.get('url', ''),
+                'processed_at': datetime.now().isoformat(),
+                'chunk_index': chunk_index,
+                'total_chunks': total_chunks,
+                'quality_score': chunk.get('quality_score', 85),
+                'difficulty_level': content_analysis['difficulty_level'],
+                'content_category': content_analysis['content_category'],
+                'has_steps': content_analysis['has_steps'],
+                'is_complete': content_analysis['is_complete'],
+                'word_count': len(text.split()),
+                'keywords': content_analysis['keywords'],
+                'summary': content_analysis['summary'],
+                'content_type': content_analysis['content_type'],
+                'target_audience': content_analysis['target_audience'],
+                'prerequisites': content_analysis['prerequisites'],
+                'estimated_time': content_analysis['estimated_time']
+            }
+            
+            return enhanced_chunk
+            
+        except Exception as e:
+            logger.error(f"❌ Error enhancing chunk metadata: {e}")
+            # Return basic chunk if enhancement fails
+            return chunk
+    
+    def _analyze_content(self, text: str) -> Dict:
+        """Analyze content for intelligent categorization"""
+        try:
+            text_lower = text.lower()
+            
+            # Difficulty level detection
+            difficulty_level = 'intermediate'
+            if any(word in text_lower for word in ['beginner', 'basic', 'start', 'first time']):
+                difficulty_level = 'beginner'
+            elif any(word in text_lower for word in ['advanced', 'expert', 'professional', 'enterprise']):
+                difficulty_level = 'advanced'
+            
+            # Content category detection
+            content_category = 'general'
+            if any(word in text_lower for word in ['setup', 'install', 'configuration', 'setup guide']):
+                content_category = 'setup'
+            elif any(word in text_lower for word in ['tutorial', 'how to', 'step by step', 'guide']):
+                content_category = 'tutorial'
+            elif any(word in text_lower for word in ['troubleshoot', 'error', 'fix', 'problem', 'issue']):
+                content_category = 'troubleshooting'
+            elif any(word in text_lower for word in ['api', 'integration', 'webhook', 'endpoint']):
+                content_category = 'integration'
+            elif any(word in text_lower for word in ['faq', 'question', 'answer', 'common']):
+                content_category = 'faq'
+            
+            # Step detection
+            has_steps = any(word in text_lower for word in ['step', '1.', '2.', '3.', 'first', 'second', 'third'])
+            
+            # Completeness detection
+            is_complete = len(text.split()) > 50  # Basic threshold
+            
+            # Keyword extraction
+            keywords = self._extract_keywords(text)
+            
+            # Summary generation
+            summary = text[:200] + "..." if len(text) > 200 else text
+            
+            # Content type detection
+            content_type = 'help_center'
+            if any(word in text_lower for word in ['video', 'tutorial', 'screencast']):
+                content_type = 'video_transcript'
+            elif any(word in text_lower for word in ['api', 'documentation', 'reference']):
+                content_type = 'documentation'
+            
+            # Target audience detection
+            target_audience = 'user'
+            if any(word in text_lower for word in ['developer', 'engineer', 'technical']):
+                target_audience = 'developer'
+            elif any(word in text_lower for word in ['admin', 'administrator', 'manager']):
+                target_audience = 'admin'
+            
+            # Prerequisites detection
+            prerequisites = []
+            if any(word in text_lower for word in ['prerequisite', 'requirement', 'before you begin']):
+                prerequisites = ['Basic knowledge required']
+            
+            # Estimated time detection
+            estimated_time = '5-10 minutes'
+            if any(word in text_lower for word in ['quick', 'fast', 'simple']):
+                estimated_time = '2-5 minutes'
+            elif any(word in text_lower for word in ['comprehensive', 'detailed', 'complete']):
+                estimated_time = '15-30 minutes'
             
             return {
-                'success': True,
-                'results': results.matches,
-                'namespace': namespace,
-                'query': query
+                'difficulty_level': difficulty_level,
+                'content_category': content_category,
+                'has_steps': has_steps,
+                'is_complete': is_complete,
+                'keywords': keywords,
+                'summary': summary,
+                'content_type': content_type,
+                'target_audience': target_audience,
+                'prerequisites': prerequisites,
+                'estimated_time': estimated_time
             }
             
         except Exception as e:
-            logger.error(f"❌ Error searching with context: {e}")
+            logger.error(f"❌ Error analyzing content: {e}")
+            return {
+                'difficulty_level': 'intermediate',
+                'content_category': 'general',
+                'has_steps': False,
+                'is_complete': True,
+                'keywords': [],
+                'summary': text[:100] if text else '',
+                'content_type': 'help_center',
+                'target_audience': 'user',
+                'prerequisites': [],
+                'estimated_time': '5-10 minutes'
+            }
+    
+    def _extract_keywords(self, text: str) -> List[str]:
+        """Extract relevant keywords from text"""
+        try:
+            # Simple keyword extraction (can be enhanced with NLP)
+            common_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them'}
+            
+            words = text.lower().split()
+            keywords = [word for word in words if word not in common_words and len(word) > 3]
+            
+            # Return top 10 keywords
+            return list(set(keywords))[:10]
+            
+        except Exception as e:
+            logger.error(f"❌ Error extracting keywords: {e}")
+            return []
+    
+    async def search_knowledge(self, query: str, company_name: str, qudemo_id: str, 
+                              content_types: List[str] = None, top_k: int = 5) -> Dict:
+        """Search knowledge with context-aware routing"""
+        try:
+            logger.info(f"🔍 Searching knowledge for: {query}")
+            
+            # Use enhanced Pinecone manager for search
+            search_result = await self.pinecone_manager.search_with_context(
+                query=query,
+                company_name=company_name,
+                qudemo_id=qudemo_id,
+                content_types=content_types,
+                top_k=top_k
+            )
+            
+            if search_result['success']:
+                # Enhance results with additional context
+                enhanced_results = self._enhance_search_results(search_result['results'])
+                search_result['enhanced_results'] = enhanced_results
+                
+                logger.info(f"✅ Found {len(enhanced_results)} relevant results")
+                return search_result
+            else:
+                logger.error(f"❌ Search failed: {search_result.get('error', 'Unknown error')}")
+                return search_result
+                
+        except Exception as e:
+            logger.error(f"❌ Error in search_knowledge: {e}")
             return {
                 'success': False,
                 'error': str(e),
                 'results': []
             }
     
-    def generate_answer(self, query: str, context_results: List, company_name: str, qudemo_id: str = None) -> Dict:
-        """Generate answer using context from search results"""
+    def _enhance_search_results(self, results: List) -> List[Dict]:
+        """Enhance search results with additional context"""
         try:
-            # Prepare context from search results
-            context_texts = []
-            for match in context_results:
-                if hasattr(match, 'metadata') and match.metadata:
-                    text = match.metadata.get('text', '')
-                    source = match.metadata.get('source', '')
-                    title = match.metadata.get('title', '')
-                    url = match.metadata.get('url', '')
+            enhanced_results = []
+            
+            for result in results:
+                try:
+                    metadata = result.metadata
                     
-                    context_texts.append(f"Source: {source}\nTitle: {title}\nURL: {url}\nContent: {text}\n")
+                    # Create enhanced result
+                    enhanced_result = {
+                        'id': result.id,
+                        'score': result.score,
+                        'text': metadata.get('text', ''),
+                        'source': metadata.get('source', ''),
+                        'source_type': metadata.get('source_type', ''),
+                        'title': metadata.get('title', ''),
+                        'url': metadata.get('url', ''),
+                        'content_category': metadata.get('content_category', 'general'),
+                        'difficulty_level': metadata.get('difficulty_level', 'intermediate'),
+                        'has_steps': metadata.get('has_steps', False),
+                        'keywords': metadata.get('keywords', []),
+                        'summary': metadata.get('summary', ''),
+                        'target_audience': metadata.get('target_audience', 'user'),
+                        'prerequisites': metadata.get('prerequisites', []),
+                        'estimated_time': metadata.get('estimated_time', '5-10 minutes'),
+                        'index_type': metadata.get('index_type', 'knowledge'),
+                        'quality_score': metadata.get('quality_score', 85),
+                        'word_count': metadata.get('word_count', 0)
+                    }
+                    
+                    # Add video-specific enhancements
+                    if metadata.get('source_type') in ['video_transcript', 'youtube_transcript', 'loom_transcript']:
+                        enhanced_result.update({
+                            'start_timestamp': metadata.get('start_timestamp', 0),
+                            'end_timestamp': metadata.get('end_timestamp', 0),
+                            'video_url': metadata.get('video_url', ''),
+                            'video_type': metadata.get('video_type', 'unknown')
+                        })
+                    
+                    enhanced_results.append(enhanced_result)
+                    
+                except Exception as e:
+                    logger.error(f"❌ Error enhancing result: {e}")
+                    continue
             
-            context = "\n".join(context_texts)
-            
-            # Generate answer using OpenAI
-            prompt = f"""Based on the following context, answer the question. If the context doesn't contain relevant information, say so.
-
-Context:
-{context}
-
-Question: {query}
-
-Answer:"""
-            
-            response = self.openai_client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that answers questions based on the provided context. Always cite sources when possible."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=500,
-                temperature=0.7
-            )
-            
-            answer = response.choices[0].message.content
-            
-            return {
-                'success': True,
-                'answer': answer,
-                'context_sources': len(context_results),
-                'company_name': company_name,
-                'qudemo_id': qudemo_id
-            }
+            return enhanced_results
             
         except Exception as e:
-            logger.error(f"❌ Error generating answer: {e}")
+            logger.error(f"❌ Error enhancing search results: {e}")
+            return []
+    
+    async def get_knowledge_summary(self, company_name: str, qudemo_id: str) -> Dict:
+        """Get comprehensive knowledge summary across all indexes"""
+        try:
+            logger.info(f"📊 Getting knowledge summary for {company_name} qudemo {qudemo_id}")
+            
+            # Use enhanced Pinecone manager for summary
+            summary_result = self.pinecone_manager.get_knowledge_summary(
+                company_name=company_name,
+                qudemo_id=qudemo_id
+            )
+            
+            if summary_result['success']:
+                logger.info(f"✅ Knowledge summary retrieved successfully")
+                return summary_result
+            else:
+                logger.error(f"❌ Failed to get knowledge summary: {summary_result.get('error', 'Unknown error')}")
+                return summary_result
+                
+        except Exception as e:
+            logger.error(f"❌ Error in get_knowledge_summary: {e}")
             return {
                 'success': False,
                 'error': str(e),
-                'answer': 'Sorry, I encountered an error while generating the answer.'
+                'data': {}
+            }
+    
+    def get_performance_metrics(self) -> Dict:
+        """Get performance metrics for optimization"""
+        try:
+            # Use enhanced Pinecone manager for performance metrics
+            metrics_result = self.pinecone_manager.get_performance_metrics()
+            
+            if metrics_result['success']:
+                logger.info("✅ Performance metrics retrieved successfully")
+                return metrics_result
+            else:
+                logger.error(f"❌ Failed to get performance metrics: {metrics_result.get('error', 'Unknown error')}")
+                return metrics_result
+                
+        except Exception as e:
+            logger.error(f"❌ Error in get_performance_metrics: {e}")
+            return {
+                'success': False,
+                'error': str(e)
             }
 
-def process_qudemo_knowledge_source(qudemo_id, source_id, source_url, source_type, title):
-    """
-    Process a knowledge source for a specific qudemo
-    """
+# Global instance
+_enhanced_knowledge_integration = None
+
+def initialize_enhanced_knowledge_integration() -> bool:
+    """Initialize the enhanced knowledge integration"""
+    global _enhanced_knowledge_integration
     try:
-        print(f"🔍 Processing knowledge source {source_id} for qudemo {qudemo_id}")
-        
-        # Call Python backend for processing
-        python_payload = {
-            "source_url": source_url,
-            "source_type": source_type,
-            "title": title,
-            "qudemo_id": str(qudemo_id),
-            "source_id": str(source_id)
-        }
-        
-        response = requests.post(
-            f"{PYTHON_API_URL}/process_knowledge_source",
-            json=python_payload,
-            headers={'Content-Type': 'application/json'},
-            timeout=300
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
-            
-            # Update source status in Node.js database
-            update_payload = {
-                "status": "processed",
-                "processed_at": datetime.now().isoformat(),
-                "metadata": result.get("metadata", {})
-            }
-            
-            update_response = requests.put(
-                f"{NODE_API_URL}/api/qudemos/{qudemo_id}/knowledge/{source_id}/status",
-                json=update_payload,
-                headers={'Content-Type': 'application/json'}
-            )
-            
-            if update_response.status_code == 200:
-                print(f"✅ Successfully processed knowledge source {source_id}")
-                return True
-            else:
-                print(f"❌ Failed to update source status: {update_response.text}")
-                return False
-        else:
-            print(f"❌ Python processing failed: {response.text}")
-            
-            # Update source status to failed
-            update_payload = {
-                "status": "failed",
-                "processed_at": datetime.now().isoformat(),
-                "metadata": {"error": response.text}
-            }
-            
-            requests.put(
-                f"{NODE_API_URL}/api/qudemos/{qudemo_id}/knowledge/{source_id}/status",
-                json=update_payload,
-                headers={'Content-Type': 'application/json'}
-            )
-            
-            return False
-            
+        _enhanced_knowledge_integration = EnhancedKnowledgeIntegrator()
+        return True
     except Exception as e:
-        print(f"❌ Error processing knowledge source: {str(e)}")
-        
-        # Update source status to failed
-        try:
-            update_payload = {
-                "status": "failed",
-                "processed_at": datetime.now().isoformat(),
-                "metadata": {"error": str(e)}
-            }
-            
-            requests.put(
-                f"{NODE_API_URL}/api/qudemos/{qudemo_id}/knowledge/{source_id}/status",
-                json=update_payload,
-                headers={'Content-Type': 'application/json'}
-            )
-        except:
-            pass
-            
+        logger.error(f"❌ Failed to initialize Enhanced Knowledge Integration: {e}")
         return False
 
-def get_pending_knowledge_sources():
-    """
-    Get all pending knowledge sources from Node.js backend
-    """
-    try:
-        response = requests.get(
-            f"{NODE_API_URL}/api/knowledge/pending",
-            headers={'Content-Type': 'application/json'}
-        )
-        
-        if response.status_code == 200:
-            return response.json().get("data", [])
-        else:
-            print(f"❌ Failed to get pending sources: {response.text}")
-            return []
-            
-    except Exception as e:
-        print(f"❌ Error getting pending sources: {str(e)}")
-        return []
-
-def process_all_pending_sources():
-    """
-    Process all pending knowledge sources
-    """
-    pending_sources = get_pending_knowledge_sources()
-    
-    print(f"🔍 Found {len(pending_sources)} pending knowledge sources")
-    
-    for source in pending_sources:
-        process_qudemo_knowledge_source(
-            source["qudemo_id"],
-            source["id"],
-            source["source_url"],
-            source["source_type"],
-            source["title"]
-        )
-
-if __name__ == "__main__":
-    process_all_pending_sources()
+def get_enhanced_knowledge_integration() -> EnhancedKnowledgeIntegrator:
+    """Get the global enhanced knowledge integration instance"""
+    if _enhanced_knowledge_integration is None:
+        raise RuntimeError("Enhanced Knowledge Integration not initialized. Call initialize_enhanced_knowledge_integration() first.")
+    return _enhanced_knowledge_integration

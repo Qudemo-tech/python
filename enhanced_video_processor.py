@@ -65,13 +65,13 @@ class EnhancedVideoProcessor:
                 logger.info(f"✅ Successfully processed YouTube video using Gemini")
                 return {
                     'success': True,
-                    'chunks_stored': result.get('chunks_created', 0),
+                    'chunks_stored': result.get('chunks_stored', result.get('chunks_created', 0)),
                     'video_type': 'youtube',
                     'company_name': company_name,
                     'qudemo_id': qudemo_id,
                     'video_title': result.get('title', ''),
                     'video_duration': result.get('duration', ''),
-                    'total_segments': result.get('chunks_created', 0),
+                    'total_segments': result.get('chunks_stored', result.get('chunks_created', 0)),
                     'storage_details': result
                 }
             else:

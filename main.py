@@ -82,11 +82,11 @@ async def lifespan(app: FastAPI):
             logger.warning(f"⚠️ Enhanced Video Processor initialization failed: {e}, will use direct processor")
             enhanced_video_processor = None
         
-        # Initialize existing video processing system
+        # Initialize existing video processing system as fallback
         try:
             from video_processing import initialize_processors
             if initialize_processors():
-                logger.info("✅ Existing video processing system initialized")
+                logger.info("✅ Existing video processing system initialized as fallback")
             else:
                 logger.warning("⚠️ Failed to initialize existing video processing system")
         except Exception as e:
@@ -271,68 +271,123 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
             logger.info("⏱️ Video processing typically takes 1-3 minutes per video")
             processing_order.append("videos")
             
+            # Process videos sequentially to avoid conflicts
+            youtube_videos = []
+            loom_videos = []
+            
+            # Separate videos by type
             for video_url in request.video_urls:
+                if 'youtube.com' in video_url or 'youtu.be' in video_url:
+                    youtube_videos.append(video_url)
+                elif 'loom.com' in video_url:
+                    loom_videos.append(video_url)
+            
+            logger.info(f"📊 Video processing plan: {len(youtube_videos)} YouTube videos, {len(loom_videos)} Loom videos")
+            
+            # Process YouTube videos first (to avoid yt-dlp conflicts)
+            for i, video_url in enumerate(youtube_videos):
                 try:
-                    logger.info(f"🔍 Processing video URL: {video_url}")
+                    logger.info(f"🔍 Processing YouTube video {i+1}/{len(youtube_videos)}: {video_url}")
+                    logger.info(f"🎬 Detected video type: youtube")
                     
-                    # Determine video type
-                    if 'youtube.com' in video_url or 'youtu.be' in video_url:
-                        video_type = 'youtube'
-                    elif 'loom.com' in video_url:
-                        video_type = 'loom'
+                    # Process video using enhanced video processor or fallback
+                    if enhanced_video_processor:
+                        logger.info(f"🎥 Processing YouTube video: {video_url}")
+                        result = await enhanced_video_processor.process_youtube_video(
+                            video_url, company_name, qudemo_id
+                        )
                     else:
-                        video_type = 'unknown'
-                    
-                    logger.info(f"🎬 Detected video type: {video_type}")
-                    
-                    if video_type != 'unknown':
-                        # Process video using enhanced video processor or fallback
-                        if enhanced_video_processor:
-                            # Use enhanced video processor
-                            if video_type == 'youtube':
-                                logger.info(f"🎥 Processing YouTube video: {video_url}")
-                                result = await enhanced_video_processor.process_youtube_video(
-                                    video_url, company_name, qudemo_id
-                                )
-                            else:  # loom
-                                logger.info(f"🎥 Processing Loom video: {video_url}")
-                                result = await enhanced_video_processor.process_loom_video(
-                                    video_url, company_name, qudemo_id
-                                )
-                        else:
-                            # Fallback to direct processor
-                            logger.info(f"🎥 Using direct processor for {video_type} video: {video_url}")
-                            from video_processing import process_video
-                            result = process_video(video_url, company_name, qudemo_id)
-                            
-                            # Convert result format to match enhanced processor
-                            if result and result.get('success'):
-                                result = {
-                                    'success': True,
-                                    'chunks_stored': result.get('result', {}).get('chunks_created', 0),
-                                    'video_type': video_type,
-                                    'company_name': company_name,
-                                    'qudemo_id': qudemo_id
-                                }
-                            else:
-                                result = {
-                                    'success': False,
-                                    'error': result.get('error', 'Unknown error') if result else 'No result returned',
-                                    'chunks_stored': 0
-                                }
+                        # Fallback to direct processor
+                        logger.info(f"🎥 Using direct processor for YouTube video: {video_url}")
+                        from video_processing import process_video
+                        result = process_video(video_url, company_name, qudemo_id)
                         
-                        logger.info(f"📊 Video processing result: {result}")
-                        
-                        if result['success']:
-                            total_chunks += result['chunks_stored']
-                            logger.info(f"✅ {video_type.capitalize()} video processed: {result['chunks_stored']} chunks stored")
+                        # Convert result format to match enhanced processor
+                        if result and result.get('success'):
+                            result = {
+                                'success': True,
+                                'chunks_stored': result.get('result', {}).get('chunks_created', 0),
+                                'video_type': 'youtube',
+                                'company_name': company_name,
+                                'qudemo_id': qudemo_id
+                            }
                         else:
-                            logger.error(f"❌ {video_type.capitalize()} video processing failed: {result.get('error', 'Unknown error')}")
+                            result = {
+                                'success': False,
+                                'error': result.get('error', 'Unknown error') if result else 'No result returned',
+                                'chunks_stored': 0
+                            }
+                    
+                    logger.info(f"📊 YouTube video processing result: {result}")
+                    
+                    if result and result.get('success'):
+                        chunks_stored = result.get('chunks_stored', 0)
+                        total_chunks += chunks_stored
+                        logger.info(f"✅ YouTube video processed: {chunks_stored} chunks stored")
                     else:
-                        logger.warning(f"⚠️ Unsupported video type: {video_url}")
+                        logger.error(f"❌ YouTube video processing failed: {result.get('error', 'Unknown error') if result else 'No result'}")
+                        
+                    # Add delay between YouTube videos to prevent conflicts
+                    if i < len(youtube_videos) - 1:
+                        logger.info("⏳ Waiting 5s before processing next YouTube video...")
+                        import time
+                        time.sleep(5)
                         
                 except Exception as e:
-                    logger.error(f"❌ Error processing video {video_url}: {e}")
+                    logger.error(f"❌ Error processing YouTube video {video_url}: {e}")
+                    continue
+            
+            # Process Loom videos after YouTube videos
+            for i, video_url in enumerate(loom_videos):
+                try:
+                    logger.info(f"🔍 Processing Loom video {i+1}/{len(loom_videos)}: {video_url}")
+                    logger.info(f"🎬 Detected video type: loom")
+                    
+                    # Process video using enhanced video processor or fallback
+                    if enhanced_video_processor:
+                        logger.info(f"🎥 Processing Loom video: {video_url}")
+                        result = await enhanced_video_processor.process_loom_video(
+                            video_url, company_name, qudemo_id
+                        )
+                    else:
+                        # Fallback to direct processor
+                        logger.info(f"🎥 Using direct processor for Loom video: {video_url}")
+                        from video_processing import process_video
+                        result = process_video(video_url, company_name, qudemo_id)
+                        
+                        # Convert result format to match enhanced processor
+                        if result and result.get('success'):
+                            result = {
+                                'success': True,
+                                'chunks_stored': result.get('result', {}).get('chunks_created', 0),
+                                'video_type': 'loom',
+                                'company_name': company_name,
+                                'qudemo_id': qudemo_id
+                            }
+                        else:
+                            result = {
+                                'success': False,
+                                'error': result.get('error', 'Unknown error') if result else 'No result returned',
+                                'chunks_stored': 0
+                            }
+                    
+                    logger.info(f"📊 Loom video processing result: {result}")
+                    
+                    if result and result.get('success'):
+                        chunks_stored = result.get('chunks_stored', 0)
+                        total_chunks += chunks_stored
+                        logger.info(f"✅ Loom video processed: {chunks_stored} chunks stored")
+                    else:
+                        logger.error(f"❌ Loom video processing failed: {result.get('error', 'Unknown error') if result else 'No result'}")
+                        
+                    # Add delay between Loom videos to prevent conflicts
+                    if i < len(loom_videos) - 1:
+                        logger.info("⏳ Waiting 5s before processing next Loom video...")
+                        import time
+                        time.sleep(5)
+                        
+                except Exception as e:
+                    logger.error(f"❌ Error processing Loom video {video_url}: {e}")
                     continue
         
         # Step 2: Process website (may take longer)

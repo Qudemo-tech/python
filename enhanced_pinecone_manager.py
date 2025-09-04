@@ -40,6 +40,9 @@ class EnhancedPineconeManager:
             'legacy': 'qudemo-index'  # Add legacy index for backward compatibility
         }
         
+        # Index status tracking
+        self.index_status = {}
+        
         # Index configurations for Standard Plan
         self.index_configs = {
             'knowledge': {
@@ -101,7 +104,7 @@ class EnhancedPineconeManager:
         logger.info("✅ Enhanced Pinecone Manager initialized with Standard Plan features")
     
     def _initialize_indexes(self):
-        """Initialize all indexes for Standard Plan"""
+        """Initialize all indexes for Standard Plan with enhanced error handling"""
         try:
             for index_name, config in self.index_configs.items():
                 index_full_name = self.indexes[index_name]
@@ -109,17 +112,33 @@ class EnhancedPineconeManager:
                 # Check if index exists
                 try:
                     index = self.pc.Index(index_full_name)
+                    self.index_status[index_name] = 'exists'
                     logger.info(f"✅ Index {index_full_name} already exists")
-                except Exception:
+                except Exception as e:
                     # Create new index
                     logger.info(f"🔧 Creating new index: {index_full_name}")
-                    self.pc.create_index(
-                        name=index_full_name,
-                        dimension=config['dimension'],
-                        metric=config['metric'],
-                        spec=config['spec']
-                    )
-                    logger.info(f"✅ Created index: {index_full_name}")
+                    try:
+                        self.pc.create_index(
+                            name=index_full_name,
+                            dimension=config['dimension'],
+                            metric=config['metric'],
+                            spec=config['spec']
+                        )
+                        self.index_status[index_name] = 'created'
+                        logger.info(f"✅ Created index: {index_full_name}")
+                        
+                        # Wait for index to be ready
+                        import time
+                        time.sleep(5)
+                        
+                    except Exception as create_error:
+                        logger.error(f"❌ Failed to create index {index_full_name}: {create_error}")
+                        self.index_status[index_name] = 'failed'
+                        
+                        # For video index, try fallback to legacy index
+                        if index_name == 'video':
+                            logger.warning(f"⚠️ Video index creation failed, will use legacy index as fallback")
+                            self.index_status[index_name] = 'fallback'
                     
         except Exception as e:
             logger.error(f"❌ Error initializing indexes: {e}")

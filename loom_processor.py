@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Production-Ready Loom Video Processor
-Handles Loom video processing without external FFmpeg dependency
-Optimized for cloud deployment (Render, Heroku, etc.)
+Loom Video Processor
+Handles Loom video processing with transcription and vector storage
+Optimized for 8GB RAM with Pinecone Standard Plan
 """
 
 import os
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 class LoomVideoProcessor:
     def __init__(self, openai_api_key: str, pinecone_api_key: str):
-        """Initialize Production Loom Video Processor"""
+        """Initialize Loom Video Processor"""
         self.openai_api_key = openai_api_key
         self.pinecone_api_key = pinecone_api_key
         
@@ -39,22 +39,88 @@ class LoomVideoProcessor:
         # Initialize Whisper model (lazy loading)
         self._whisper_model = None
         
-        # Memory management for cloud deployment
-        self.memory_threshold = 3000  # MB (more conservative for cloud)
-        self.warning_memory_threshold = 2000   # MB
+        # Memory management (optimized for API-only processing - no local Whisper model)
+        self.memory_threshold = 6000  # MB (increased since no local Whisper model)
+        self.warning_memory_threshold = 4000   # MB (increased since no local Whisper model)
         
-        logger.info("Initializing Production Loom Video Processor (Cloud Optimized)...")
+        # Windows-specific FFmpeg configuration
+        self._configure_ffmpeg_for_windows()
+        
+        logger.info("Initializing Loom Video Processor (8GB RAM Optimized)...")
+    
+    def _configure_ffmpeg_for_windows(self):
+        """Configure FFmpeg for Windows compatibility"""
+        try:
+            import platform
+            if platform.system() == "Windows":
+                # Set FFmpeg path for Windows
+                import whisper
+                
+                # Try imageio-ffmpeg first (most reliable for Windows)
+                try:
+                    import imageio_ffmpeg
+                    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+                    if ffmpeg_path and os.path.exists(ffmpeg_path):
+                        # Set multiple ways to ensure Whisper finds it
+                        whisper.ffmpeg_path = ffmpeg_path
+                        os.environ['FFMPEG_BINARY'] = ffmpeg_path
+                        os.environ['PATH'] = os.path.dirname(ffmpeg_path) + os.pathsep + os.environ.get('PATH', '')
+                        logger.info(f"✅ FFmpeg configured via imageio-ffmpeg: {ffmpeg_path}")
+                        logger.info(f"✅ Set FFMPEG_BINARY env var: {ffmpeg_path}")
+                        logger.info(f"✅ Added FFmpeg to PATH: {os.path.dirname(ffmpeg_path)}")
+                        return
+                except Exception as e:
+                    logger.warning(f"imageio-ffmpeg not available: {e}")
+                
+                # Try to find FFmpeg in common locations
+                possible_paths = [
+                    r"C:\ffmpeg\bin\ffmpeg.exe",
+                    r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+                    r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
+                    r"C:\Users\{}\AppData\Local\ffmpeg\bin\ffmpeg.exe".format(os.getenv('USERNAME', '')),
+                    "ffmpeg"  # Fallback to PATH
+                ]
+                
+                ffmpeg_found = False
+                for path in possible_paths:
+                    try:
+                        if os.path.exists(path) or path == "ffmpeg":
+                            # Test if FFmpeg works
+                            import subprocess
+                            result = subprocess.run([path, "-version"], 
+                                                  capture_output=True, 
+                                                  timeout=5)
+                            if result.returncode == 0:
+                                whisper.ffmpeg_path = path
+                                os.environ['FFMPEG_BINARY'] = path
+                                os.environ['PATH'] = os.path.dirname(path) + os.pathsep + os.environ.get('PATH', '')
+                                logger.info(f"✅ FFmpeg configured: {path}")
+                                ffmpeg_found = True
+                                break
+                    except Exception:
+                        continue
+                
+                if not ffmpeg_found:
+                    logger.warning("⚠️ FFmpeg not found, will use fallback transcription method")
+                    # Don't set a path, let the fallback method handle it
+                    
+        except Exception as e:
+            logger.warning(f"FFmpeg configuration failed: {e}")
     
     def check_memory_usage(self) -> float:
         """Check current memory usage"""
         try:
             process = psutil.Process()
             memory_mb = process.memory_info().rss / 1024 / 1024
-            status = "Safe" if memory_mb < self.warning_memory_threshold else "Warning" if memory_mb < self.memory_threshold else "Critical"
-            logger.info(f"✅ Memory usage: {memory_mb:.1f} MB ({status})")
+            
+            if memory_mb > self.memory_threshold:
+                logger.warning(f"⚠️ High memory usage: {memory_mb:.1f} MB")
+            else:
+                logger.info(f"✅ Memory usage: {memory_mb:.1f} MB (Safe)")
+            
             return memory_mb
         except Exception as e:
-            logger.warning(f"Could not check memory usage: {e}")
+            logger.error(f"Failed to check memory: {e}")
             return 0.0
     
     def cleanup_memory(self):
@@ -62,229 +128,1096 @@ class LoomVideoProcessor:
         try:
             logger.info("🧹 Performing memory cleanup...")
             gc.collect()
+            
+            # Unload Whisper model to free memory
+            if self._whisper_model:
+                logger.info("🗑️ Unloading Whisper model to free memory")
+                del self._whisper_model
+                self._whisper_model = None
+                gc.collect()
+            
             memory_after = self.check_memory_usage()
             logger.info(f"🧹 Memory cleanup completed: {memory_after:.1f}MB")
+                
         except Exception as e:
-            logger.warning(f"Memory cleanup failed: {e}")
+            logger.error(f"Memory cleanup failed: {e}")
+            if self._whisper_model:
+                del self._whisper_model
+                self._whisper_model = None
     
     def get_whisper_model(self):
-        """Get or load Whisper model with memory management"""
+        """Get or load Whisper model"""
         if self._whisper_model is None:
-            memory_before = self.check_memory_usage()
-            if memory_before > self.memory_threshold:
-                logger.warning(f"High memory usage before loading Whisper: {memory_before:.1f} MB")
+            # Check memory before loading
+            memory_mb = self.check_memory_usage()
+            if memory_mb > self.warning_memory_threshold:
+                logger.warning(f"⚠️ Memory usage high ({memory_mb:.1f}MB) before loading Whisper")
                 self.cleanup_memory()
             
-            logger.info("📥 Loading Whisper model (small)...")
-            self._whisper_model = whisper.load_model("small")
-            logger.info("✅ Whisper model (small) loaded successfully")
+            # Check memory again after cleanup
+            memory_mb = self.check_memory_usage()
+            if memory_mb > 5000:  # Hard limit (increased since no local Whisper model)
+                logger.error(f"🚨 Memory too high ({memory_mb:.1f}MB), cannot load Whisper safely")
+                raise Exception(f"Memory limit exceeded: {memory_mb:.1f}MB (max: 5000MB)")
             
-            memory_after = self.check_memory_usage()
-            logger.info(f"📊 Memory after Whisper load: {memory_after:.1f} MB")
+            logger.info("📥 Loading Whisper model (tiny for Windows compatibility)...")
+            try:
+                self._whisper_model = whisper.load_model("tiny")
+                logger.info("✅ Whisper model (tiny) loaded successfully")
+                
+                # Check memory after loading
+                memory_mb = self.check_memory_usage()
+                logger.info(f"📊 Memory after Whisper load: {memory_mb:.1f} MB")
+                
+            except Exception as e:
+                logger.error(f"❌ Failed to load Whisper model: {e}")
+                raise
+        else:
+            logger.info(f"♻️ Using existing Whisper model")
         
         return self._whisper_model
     
-    def extract_loom_video_info(self, video_url: str) -> Dict[str, str]:
+    def extract_loom_video_info(self, loom_url: str) -> Optional[Dict]:
         """Extract video information from Loom URL"""
         try:
-            logger.info(f"Extracting Loom video info from: {video_url}")
+            logger.info(f"Extracting Loom video info from: {loom_url}")
             
-            # Parse the URL to extract video ID
-            parsed_url = urlparse(video_url)
-            if 'loom.com' not in parsed_url.netloc:
-                raise Exception("Invalid Loom URL")
+            # Parse Loom URL to get video ID
+            parsed_url = urlparse(loom_url)
+            path_parts = parsed_url.path.strip('/').split('/')
             
-            # Extract video ID from URL
-            video_id = None
-            if '/share/' in video_url:
-                video_id = video_url.split('/share/')[1].split('?')[0]
+            if len(path_parts) >= 2:
+                video_id = path_parts[-1]
+                
+                # Create minimal video data structure
+                video_data = {
+                    'url': loom_url,
+                    'title': f'Loom Video - {video_id}',
+                    'duration': 0
+                }
             
-            if not video_id:
-                raise Exception("Could not extract video ID from URL")
-            
-            # Create a simple title
-            title = f"Loom Video - {video_id}"
-            
-            logger.info(f"Loom video info extracted: {title}")
-            
-            return {
-                'title': title,
+            # Extract relevant info
+            video_info = {
                 'video_id': video_id,
-                'url': video_url
+                'title': video_data.get('title', 'Unknown'),
+                'duration': video_data.get('duration', 0),
+                'video_url': video_data.get('url'),
+                    'thumbnail_url': None
             }
             
+            logger.info(f"Loom video info extracted: {video_info['title']}")
+            return video_info
+                
         except Exception as e:
             logger.error(f"Failed to extract Loom video info: {e}")
-            raise
-    
-    def download_loom_video(self, video_url: str, output_path: str) -> bool:
-        """Download Loom video using yt-dlp with production-compatible settings"""
+            return None
+
+    def download_loom_video_with_quality_fallback(self, video_url: str, output_path: str) -> bool:
+        """Download Loom video with quality fallback"""
         try:
-            logger.info(f"Downloading Loom video: {video_url}")
+            logger.info(f"Downloading Loom video with quality fallback: {video_url}")
             
             # Check memory before download
-            memory_before = self.check_memory_usage()
-            logger.info(f"Memory before download: {memory_before:.1f} MB")
+            memory_mb = self.check_memory_usage()
+            logger.info(f"Memory before download: {memory_mb:.1f} MB")
             
-            # Use yt-dlp with production-compatible settings
-            import subprocess
-            import sys
-            
-            # yt-dlp command with fallback formats
-            cmd = [
-                sys.executable, '-m', 'yt_dlp',
-                '--no-warnings',
-                '--retries', '2',
-                '--fragment-retries', '2',
-                '--output', output_path,
-                '--format', 'best[height<=720]/best',  # Prefer 720p or lower
-                video_url
+            # Quality levels to try (Loom has separate video and audio streams)
+            quality_formats = [
+                "hls-raw-1500",                      # 720p video only
+                "hls-raw-3200",                      # 1080p video only
+                "best"                               # Any available format
             ]
             
-            logger.info(f"yt-dlp command: {' '.join(cmd)}")
+            quality_names = ["720p", "1080p", "best"]
             
-            # Run yt-dlp
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300  # 5 minute timeout
-            )
-            
-            if result.returncode == 0:
-                if os.path.exists(output_path):
-                    file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
-                    logger.info(f"Successfully downloaded: {file_size_mb:.1f} MB")
+            for i, (format_spec, quality_name) in enumerate(zip(quality_formats, quality_names)):
+                try:
+                    logger.info(f"Attempting download with {quality_name} quality (attempt {i+1}/{len(quality_formats)})")
                     
-                    memory_after = self.check_memory_usage()
-                    logger.info(f"Memory after download: {memory_after:.1f} MB")
-                    return True
-                else:
-                    logger.error("Download completed but file not found")
-                    return False
-            else:
-                logger.error(f"Download failed (code {result.returncode}): {result.stderr}")
-                return False
+                    # Check memory before each attempt
+                    memory_mb = self.check_memory_usage()
+                    if memory_mb > self.memory_threshold:
+                        logger.warning(f"High memory before {quality_name} download ({memory_mb:.1f}MB), skipping")
+                        continue
+                    
+                    # Use yt-dlp with specific quality
+                    import subprocess
+                    import sys
+                    import os
+                    
+                    # Ensure parent dir exists
+                    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                    
+                    # Remove existing file if it exists
+                    if os.path.exists(output_path):
+                        try:
+                            os.remove(output_path)
+                            logger.info("Removed existing file before download")
+                        except Exception:
+                            pass
+                    
+                    # Download video and audio separately, then merge
+                    import tempfile
+                    import time
+                    
+                    temp_dir = tempfile.gettempdir()
+                    video_path = os.path.join(temp_dir, f"video_{int(time.time())}.mp4")
+                    audio_path = os.path.join(temp_dir, f"audio_{int(time.time())}.mp4")
+                    
+                    # Download video
+                    video_cmd = [
+                        sys.executable, '-m', 'yt_dlp',
+                        '--no-warnings',
+                        '--retries', '2', '--fragment-retries', '2',
+                        '--restrict-filenames',
+                        '--force-overwrites',
+                        '--format', format_spec,
+                        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        '--referer', 'https://www.loom.com/',
+                        '--add-header', 'Origin: https://www.loom.com',
+                        '--add-header', 'Sec-Fetch-Mode: navigate',
+                        '--output', video_path,
+                        video_url
+                    ]
+                    
+                    # Download audio
+                    audio_cmd = [
+                        sys.executable, '-m', 'yt_dlp',
+                        '--no-warnings',
+                        '--retries', '2', '--fragment-retries', '2',
+                        '--restrict-filenames',
+                        '--force-overwrites',
+                        '--format', 'hls-raw-audio-audio',
+                        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        '--referer', 'https://www.loom.com/',
+                        '--add-header', 'Origin: https://www.loom.com',
+                        '--add-header', 'Sec-Fetch-Mode: navigate',
+                        '--output', audio_path,
+                        video_url
+                    ]
+                    
+                    logger.info(f"Downloading video: {' '.join(video_cmd[:8])}... --format {format_spec} ...")
+                    
+                    # Download video
+                    timeout = 180 if i == 0 else 120
+                    video_result = subprocess.run(video_cmd, capture_output=True, text=True, timeout=timeout)
+                    
+                    if video_result.returncode != 0:
+                        logger.warning(f"Video download failed: {video_result.stderr[:200]}...")
+                        continue
+                    
+                    logger.info(f"Downloading audio: {' '.join(audio_cmd[:8])}... --format hls-raw-audio-audio ...")
+                    
+                    # Download audio
+                    audio_result = subprocess.run(audio_cmd, capture_output=True, text=True, timeout=timeout)
+                    
+                    if audio_result.returncode != 0:
+                        logger.warning(f"Audio download failed: {audio_result.stderr[:200]}...")
+                        # Clean up video file
+                        if os.path.exists(video_path):
+                            os.remove(video_path)
+                        continue
+                    
+                    # Merge video and audio using FFmpeg
+                    merge_cmd = [
+                        'ffmpeg', '-i', video_path, '-i', audio_path,
+                        '-c:v', 'copy',  # Copy video without re-encoding
+                        '-c:a', 'aac',   # Re-encode audio to AAC
+                        '-shortest',      # Use shortest stream length
+                        '-y',            # Overwrite output
+                        output_path
+                    ]
+                    
+                    # Use FFmpeg from imageio-ffmpeg
+                    try:
+                        import imageio_ffmpeg
+                        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+                        if ffmpeg_path and os.path.exists(ffmpeg_path):
+                            merge_cmd[0] = ffmpeg_path
+                    except:
+                        pass
+                    
+                    logger.info(f"Merging video and audio...")
+                    merge_result = subprocess.run(merge_cmd, capture_output=True, text=True, timeout=300)
+                    
+                    # Clean up temporary files
+                    for temp_file in [video_path, audio_path]:
+                        if os.path.exists(temp_file):
+                            try:
+                                os.remove(temp_file)
+                            except:
+                                pass
+                    
+                    if merge_result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
+                        file_size_mb = os.path.getsize(output_path) / 1024 / 1024
+                        logger.info(f"Successfully downloaded and merged with {quality_name} quality: {file_size_mb:.1f} MB")
+                        
+                        # Check memory after successful download
+                        memory_mb = self.check_memory_usage()
+                        logger.info(f"Memory after {quality_name} download: {memory_mb:.1f} MB")
+                        
+                        return True
+                    else:
+                        logger.warning(f"Merge failed: {merge_result.stderr[:200]}...")
+                        
+                        # Clean up failed download
+                        if os.path.exists(output_path):
+                            try:
+                                os.remove(output_path)
+                            except Exception:
+                                pass
+                        
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"Download timed out after {timeout}s")
+                except Exception as e:
+                    logger.warning(f"Download failed with exception: {e}")
                 
-        except subprocess.TimeoutExpired:
-            logger.error("Download timed out after 5 minutes")
+                # Small delay between attempts
+                if i < len(quality_formats) - 1:
+                    time.sleep(2)
+            
+            logger.error("All quality levels failed for video download")
             return False
+            
         except Exception as e:
-            logger.error(f"Download failed: {e}")
+            logger.error(f"Failed to download Loom video with quality fallback: {e}")
             return False
-    
-    def transcribe_video(self, video_path: str) -> Dict[str, any]:
-        """Production-compatible video transcription"""
+
+    def transcribe_video(self, video_path: str) -> Optional[Dict]:
+        """Transcribe video using Whisper (DEPRECATED - use OpenAI Whisper API instead)"""
         try:
             logger.info(f"Transcribing video: {video_path}")
             
             # Check memory before transcription
-            memory_before = self.check_memory_usage()
-            logger.info(f"Memory before transcription: {memory_before:.1f} MB")
+            memory_mb = self.check_memory_usage()
+            logger.info(f"Memory before transcription: {memory_mb:.1f} MB")
             
-            if memory_before > self.memory_threshold:
-                logger.warning(f"High memory usage before transcription: {memory_before:.1f} MB")
+            if memory_mb > self.memory_threshold:
+                logger.warning(f"High memory before transcription ({memory_mb:.1f}MB), performing cleanup")
                 self.cleanup_memory()
             
             # Load Whisper model
             model = self.get_whisper_model()
             
-            # Validate video file
+            # Check file size and accessibility
+            import os
             if not os.path.exists(video_path):
                 raise Exception(f"Video file does not exist: {video_path}")
             
             if not os.access(video_path, os.R_OK):
                 raise Exception(f"Video file is not readable: {video_path}")
             
-            file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+            file_size_mb = os.path.getsize(video_path) / 1024 / 1024
             logger.info(f"Video file size: {file_size_mb:.1f} MB")
+            logger.info(f"Video file path: {video_path}")
+            logger.info(f"Video file exists: {os.path.exists(video_path)}")
+            logger.info(f"Video file readable: {os.access(video_path, os.R_OK)}")
             
-            if file_size_mb < 0.1:
+            # Additional file validation
+            if file_size_mb < 0.1:  # Less than 100KB
                 raise Exception(f"Video file too small: {file_size_mb:.1f} MB")
             
-            # Production-compatible transcription
-            logger.info("Starting production-compatible Whisper transcription...")
+            if file_size_mb > 50:
+                logger.warning(f"Large video file ({file_size_mb:.1f}MB), transcription may be slow")
             
-            # Use minimal settings for maximum compatibility
-            result = model.transcribe(
-                video_path,
-                word_timestamps=True,
-                fp16=False,  # Disable fp16 for cloud compatibility
-                temperature=0.0,  # Deterministic output
-                verbose=False,  # Reduce logging
-                condition_on_previous_text=False  # Disable for stability
-            )
+            # Transcribe video
+            logger.info("Starting Whisper transcription...")
             
-            logger.info("Transcription completed successfully")
+            # Small delay to ensure file is fully written and accessible
+            time.sleep(1.0)
+            
+            # Final file check before transcription
+            if not os.path.exists(video_path):
+                raise Exception(f"Video file disappeared before transcription: {video_path}")
+            
+            if not os.access(video_path, os.R_OK):
+                raise Exception(f"Video file became unreadable before transcription: {video_path}")
+            
+            # Create a copy of the file in a more accessible location for Whisper
+            import shutil
+            safe_video_path = os.path.join(tempfile.gettempdir(), f"whisper_safe_{int(time.time())}.mp4")
+            try:
+                shutil.copy2(video_path, safe_video_path)
+                logger.info(f"Created safe copy for Whisper: {safe_video_path}")
+                # Use the safe copy for transcription
+                transcription_path = safe_video_path
+            except Exception as copy_error:
+                logger.warning(f"Failed to create safe copy: {copy_error}, using original path")
+                transcription_path = video_path
+            
+            try:
+                # Ensure model is available
+                if model is None:
+                    logger.warning("Model is None, reloading...")
+                    model = self.get_whisper_model()
+                
+                logger.info(f"Model status before transcription: {type(model).__name__ if model else 'None'}")
+                logger.info("Starting Whisper transcription...")
+                
+                # Ensure FFmpeg path is set for Whisper - DIRECT INJECTION METHOD
+                import whisper
+                try:
+                    import imageio_ffmpeg
+                    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+                    if ffmpeg_path and os.path.exists(ffmpeg_path):
+                        # Set multiple ways to ensure Whisper finds it
+                        whisper.ffmpeg_path = ffmpeg_path
+                        os.environ['FFMPEG_BINARY'] = ffmpeg_path
+                        os.environ['PATH'] = os.path.dirname(ffmpeg_path) + os.pathsep + os.environ.get('PATH', '')
+                        
+                        # DIRECT INJECTION: Override Whisper's internal FFmpeg detection
+                        try:
+                            import whisper.audio
+                            whisper.audio.ffmpeg_path = ffmpeg_path
+                            logger.info(f"✅ Direct injected FFmpeg into whisper.audio: {ffmpeg_path}")
+                        except:
+                            pass
+                        
+                        try:
+                            import whisper.utils
+                            whisper.utils.ffmpeg_path = ffmpeg_path
+                            logger.info(f"✅ Direct injected FFmpeg into whisper.utils: {ffmpeg_path}")
+                        except:
+                            pass
+                        
+                        # Force reload of whisper modules
+                        import importlib
+                        try:
+                            importlib.reload(whisper.audio)
+                            importlib.reload(whisper.utils)
+                            logger.info("✅ Reloaded Whisper modules with FFmpeg path")
+                        except:
+                            pass
+                        
+                        logger.info(f"✅ Set Whisper FFmpeg path: {ffmpeg_path}")
+                        logger.info(f"✅ Set FFMPEG_BINARY env var: {ffmpeg_path}")
+                        logger.info(f"✅ Added FFmpeg to PATH: {os.path.dirname(ffmpeg_path)}")
+                except Exception as e:
+                    logger.warning(f"Could not set FFmpeg path: {e}")
+                
+                result = model.transcribe(
+                    transcription_path,
+                    word_timestamps=True,
+                    verbose=False,
+                    fp16=False,
+                    condition_on_previous_text=False,
+                    temperature=0.0
+                )
+                logger.info("Transcription completed successfully")
+            except Exception as e:
+                logger.error(f"Standard transcription failed: {e}")
+                # Try lightweight transcription as fallback
+                logger.info("Attempting lightweight transcription...")
+                try:
+                    if model is None:
+                        logger.warning("Model was cleared, reloading...")
+                        model = self.get_whisper_model()
+                    
+                    result = model.transcribe(
+                        transcription_path,
+                        word_timestamps=True,
+                        verbose=False,
+                        fp16=False
+                    )
+                    logger.info("Lightweight transcription completed")
+                except Exception as e2:
+                    logger.error(f"Lightweight transcription also failed: {e2}")
+                    raise Exception(f"Both transcription methods failed. Standard error: {e}, lightweight error: {e2}")
             
             # Check memory after transcription
-            memory_after = self.check_memory_usage()
-            logger.info(f"Memory after transcription: {memory_after:.1f} MB")
+            memory_mb = self.check_memory_usage()
+            logger.info(f"Memory after transcription: {memory_mb:.1f} MB")
             
-            # Extract results
-            segments = result.get('segments', [])
-            text = result.get('text', '').strip()
-            language = result.get('language', 'en')
+            # Process segments
+            enhanced_segments = []
             
-            logger.info(f"Transcription completed: {len(text.split())} words")
-            logger.info(f"Language: {language}")
+            # If we have multiple segments, use them
+            if len(result.get('segments', [])) > 1:
+                for segment in result.get('segments', []):
+                    start = float(segment.get('start', 0.0))
+                    end = float(segment.get('end', start))
+                    
+                    # If end time is missing or same as start, estimate it
+                    if end <= start:
+                        text = segment.get('text', '').strip()
+                        estimated_duration = max(len(text.split()) * 0.5, 1.0)
+                        end = start + estimated_duration
+                    
+                    enhanced_segments.append({
+                        'text': segment.get('text', '').strip(),
+                        'start': start,
+                        'end': end
+                    })
+            else:
+                # For single segment, create time-based sub-segments
+                logger.info("Single segment detected, creating time-based sub-segments")
+                text = result.get('text', '').strip()
+                word_count = len(text.split())
+                
+                # Estimate duration for Loom videos
+                words_per_second = 2.5
+                estimated_duration = max(60, word_count / words_per_second)
+                
+                # Create sub-segments every 20 seconds
+                segment_duration = 20
+                num_sub_segments = max(3, int(estimated_duration / segment_duration))
+                
+                logger.info(f"Creating {num_sub_segments} sub-segments for {estimated_duration:.1f}s video")
+                
+                for i in range(num_sub_segments):
+                    start_time = i * segment_duration
+                    end_time = min((i + 1) * segment_duration, estimated_duration)
+                    
+                    # Extract text for this sub-segment
+                    text_start = int((start_time / estimated_duration) * len(text))
+                    text_end = int((end_time / estimated_duration) * len(text))
+                    sub_text = text[text_start:text_end].strip()
+                    
+                    if sub_text and len(sub_text) > 5:
+                        enhanced_segments.append({
+                            'text': sub_text,
+                            'start': start_time,
+                            'end': end_time
+                        })
+                        logger.info(f"Created sub-segment {i+1}: {start_time}s → {end_time}s ({len(sub_text)} chars)")
+                
+                # If no sub-segments created, use the original segment
+                if len(enhanced_segments) == 0:
+                    enhanced_segments.append({
+                        'text': text,
+                        'start': 0,
+                        'end': estimated_duration
+                    })
+                    logger.info(f"Using original segment: 0s → {estimated_duration:.1f}s")
             
-            # Enhance segments with better timing
-            enhanced_segments = self.validate_and_enhance_timestamps(segments)
+            transcription_data = {
+                'transcription': result['text'],
+                'segments': enhanced_segments,
+                'language': result.get('language', 'en'),
+                'word_count': len(result['text'].split())
+            }
+            
+            logger.info(f"Transcription completed: {transcription_data['word_count']} words")
+            logger.info(f"Language: {transcription_data.get('language', 'Unknown')}")
             logger.info(f"Enhanced segments created: {len(enhanced_segments)}")
             
+            # Cleanup memory after transcription
+            self.cleanup_memory()
+            
+            # Clean up the safe copy file
+            try:
+                if 'safe_video_path' in locals() and os.path.exists(safe_video_path):
+                    os.unlink(safe_video_path)
+                    logger.info("🧹 Cleaned up safe copy file")
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to cleanup safe copy: {cleanup_error}")
+            
+            return transcription_data
+            
+        except Exception as e:
+            logger.error(f"Transcription failed: {e}")
+            self.cleanup_memory()
+            
+            # Clean up the safe copy file on error
+            try:
+                if 'safe_video_path' in locals() and os.path.exists(safe_video_path):
+                    os.unlink(safe_video_path)
+                    logger.info("🧹 Cleaned up safe copy file (error)")
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to cleanup safe copy on error: {cleanup_error}")
+            
+            return None
+    
+    def transcribe_with_gemini(self, video_path: str, video_url: str) -> Optional[Dict]:
+        """Transcribe video using Gemini as fallback"""
+        try:
+            logger.info(f"🔄 Transcribing with Gemini: {video_path}")
+            
+            # Use Gemini Transcription Processor
+            from gemini_transcription import GeminiTranscriptionProcessor
+            
+            # Initialize the processor
+            gemini_api_key = os.getenv('GEMINI_API_KEY')
+            pinecone_api_key = os.getenv('PINECONE_API_KEY')
+            openai_api_key = os.getenv('OPENAI_API_KEY')
+            
+            if not all([gemini_api_key, pinecone_api_key, openai_api_key]):
+                raise Exception("Missing required API keys for Gemini transcription")
+            
+            processor = GeminiTranscriptionProcessor(
+                gemini_api_key=gemini_api_key,
+                pinecone_api_key=pinecone_api_key,
+                openai_api_key=openai_api_key
+            )
+            
+            # Transcribe the video using Gemini
+            result = processor.extract_transcription_with_gemini(video_url)
+            
+            if result and result.get('success'):
+                # Convert Gemini result to expected format
+                transcription_data = {
+                    'transcription': result.get('transcription', ''),
+                    'segments': result.get('segments', []),
+                    'word_count': result.get('word_count', 0),
+                    'language': result.get('language', 'en'),
+                    'method': 'gemini'
+                }
+                logger.info(f"✅ Gemini transcription completed: {len(transcription_data['transcription'])} characters")
+                return transcription_data
+            else:
+                logger.error(f"❌ Gemini transcription failed: {result.get('error', 'Unknown error') if result else 'No result'}")
+                return None
+            
+        except Exception as e:
+            logger.error(f"❌ Gemini transcription error: {e}")
+            return None
+    
+    def transcribe_with_openai_api(self, video_path: str) -> Optional[Dict]:
+        """Transcribe video using OpenAI Whisper API as fallback"""
+        try:
+            logger.info(f"🔄 Transcribing with OpenAI Whisper API: {video_path}")
+            
+            # Check file size and compress if needed
+            file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+            logger.info(f"📊 Video file size: {file_size_mb:.1f} MB")
+            
+            if file_size_mb > 25:
+                logger.warning(f"⚠️ Video file ({file_size_mb:.1f}MB) exceeds OpenAI limit (25MB), attempting compression...")
+                compressed_path = self._compress_video_for_openai(video_path)
+                if compressed_path:
+                    video_path = compressed_path
+                    new_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+                    logger.info(f"✅ Video compressed to {new_size_mb:.1f}MB")
+                else:
+                    logger.error("❌ Video compression failed")
+                    return None
+            
+            # Use Simple Transcription Service
+            from simple_transcription import SimpleTranscriptionService
+            
+            # Initialize the service
+            openai_api_key = os.getenv('OPENAI_API_KEY')
+            if not openai_api_key:
+                raise Exception("Missing OPENAI_API_KEY for API transcription")
+            
+            service = SimpleTranscriptionService(openai_api_key)
+            
+            # Transcribe the video
+            result = service.transcribe_video(video_path)
+            
+            if result:
+                logger.info(f"✅ OpenAI API transcription completed: {len(result.get('transcription', ''))} characters")
+                return result
+            else:
+                logger.error("❌ OpenAI API transcription failed")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ OpenAI API transcription error: {e}")
+            return None
+    
+    def _compress_video_for_openai(self, video_path: str) -> Optional[str]:
+        """Compress video to under 25MB for OpenAI Whisper API"""
+        try:
+            import tempfile
+            import subprocess
+            
+            # Create compressed file path
+            temp_dir = tempfile.gettempdir()
+            compressed_path = os.path.join(temp_dir, f"compressed_{int(time.time())}.mp4")
+            
+            # Use FFmpeg to compress video
+            # Target: 20MB max (safety margin)
+            original_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+            target_size_mb = 20
+            
+            # If file is very large, be more aggressive
+            if original_size_mb > 100:
+                target_size_mb = 15
+            compression_ratio = target_size_mb / original_size_mb
+            
+            # Calculate bitrate based on target file size
+            # More aggressive compression for large files
+            if original_size_mb > 50:
+                target_bitrate = 500  # Very low bitrate for large files
+            elif original_size_mb > 30:
+                target_bitrate = 800  # Low bitrate
+            else:
+                target_bitrate = 1200  # Medium bitrate
+            
+            logger.info(f"🎵 Extracting audio from video: {original_size_mb:.1f}MB")
+            logger.info(f"🎵 Target: MP3 audio format for Whisper API")
+            
+            # FFmpeg command to extract audio only (Whisper API works better with audio)
+            cmd = [
+                'ffmpeg', '-i', video_path,
+                '-vn',  # No video
+                '-c:a', 'mp3',  # MP3 audio format
+                '-b:a', '128k',  # Good audio quality
+                '-ac', '2',      # Stereo audio
+                '-ar', '44100',  # Standard sample rate
+                '-y',  # Overwrite output file
+                compressed_path.replace('.mp4', '.mp3')  # Change extension to .mp3
+            ]
+            
+            # Try to use the FFmpeg from imageio-ffmpeg
+            try:
+                import imageio_ffmpeg
+                ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+                if ffmpeg_path and os.path.exists(ffmpeg_path):
+                    cmd[0] = ffmpeg_path
+                    logger.info(f"✅ Using FFmpeg from imageio-ffmpeg: {ffmpeg_path}")
+            except:
+                logger.info("🔧 Using system FFmpeg")
+            
+            # Run compression
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            
+            # Update path to use .mp3 extension
+            audio_path = compressed_path.replace('.mp4', '.mp3')
+            
+            if result.returncode == 0 and os.path.exists(audio_path):
+                compressed_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+                logger.info(f"✅ Audio extracted successfully: {compressed_size_mb:.1f}MB")
+                return audio_path
+            else:
+                logger.error(f"❌ FFmpeg compression failed: {result.stderr}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Video compression error: {e}")
+            return None
+
+    def _get_video_duration(self, video_path: str) -> float:
+        """
+        Get video duration in seconds using FFprobe
+        
+        Args:
+            video_path: Path to the video file
+            
+        Returns:
+            Duration in seconds, or None if failed
+        """
+        try:
+            import subprocess
+            
+            # FFprobe command to get duration
+            cmd = [
+                'ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+                '-of', 'csv=p=0', video_path
+            ]
+            
+            # Use FFprobe from imageio-ffmpeg if available
+            try:
+                import imageio_ffmpeg
+                ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+                if ffmpeg_path and os.path.exists(ffmpeg_path):
+                    # Get the directory containing ffmpeg
+                    ffmpeg_dir = os.path.dirname(ffmpeg_path)
+                    # Look for ffprobe in the same directory
+                    ffprobe_path = os.path.join(ffmpeg_dir, 'ffprobe.exe')
+                    if os.path.exists(ffprobe_path):
+                        cmd[0] = ffprobe_path
+                        logger.info(f"✅ Using FFprobe from imageio-ffmpeg: {ffprobe_path}")
+                    else:
+                        # Try without .exe extension for Unix systems
+                        ffprobe_path = os.path.join(ffmpeg_dir, 'ffprobe')
+                        if os.path.exists(ffprobe_path):
+                            cmd[0] = ffprobe_path
+                            logger.info(f"✅ Using FFprobe from imageio-ffmpeg: {ffprobe_path}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not find FFprobe in imageio-ffmpeg: {e}")
+                pass
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                duration = float(result.stdout.strip())
+                return duration
+            else:
+                logger.error(f"❌ FFprobe failed: {result.stderr}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to get video duration: {e}")
+            return None
+
+    def _chunk_large_video(self, video_path: str, chunk_duration: int = 600) -> list:
+        """
+        Split large video into chunks for processing
+        
+        Args:
+            video_path: Path to the video file
+            chunk_duration: Duration of each chunk in seconds (default: 10 minutes)
+            
+        Returns:
+            List of chunk file paths
+        """
+        try:
+            logger.info(f"🎬 Chunking large video: {video_path}")
+            logger.info(f"⏱️ Chunk duration: {chunk_duration} seconds ({chunk_duration//60} minutes)")
+            
+            # Get video duration
+            duration = self._get_video_duration(video_path)
+            if not duration:
+                logger.error("❌ Could not get video duration")
+                return []
+            
+            logger.info(f"📊 Total video duration: {duration:.1f} seconds ({duration/60:.1f} minutes)")
+            
+            # Calculate number of chunks needed
+            num_chunks = int(duration / chunk_duration) + 1
+            logger.info(f"📊 Will create {num_chunks} chunks")
+            
+            chunk_paths = []
+            base_name = os.path.splitext(video_path)[0]
+            
+            for i in range(num_chunks):
+                start_time = i * chunk_duration
+                end_time = min((i + 1) * chunk_duration, duration)
+                
+                chunk_path = f"{base_name}_chunk_{i+1:03d}.mp4"
+                
+                # FFmpeg command to extract chunk
+                cmd = [
+                    'ffmpeg', '-i', video_path,
+                    '-ss', str(start_time),  # Start time
+                    '-t', str(end_time - start_time),  # Duration
+                    '-c', 'copy',  # Copy without re-encoding
+                    '-avoid_negative_ts', 'make_zero',
+                    '-y',  # Overwrite output
+                    chunk_path
+                ]
+                
+                # Use FFmpeg from imageio-ffmpeg if available
+                try:
+                    import imageio_ffmpeg
+                    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+                    if ffmpeg_path and os.path.exists(ffmpeg_path):
+                        cmd[0] = ffmpeg_path
+                except:
+                    pass
+                
+                logger.info(f"🎬 Creating chunk {i+1}/{num_chunks}: {start_time:.1f}s - {end_time:.1f}s")
+                
+                # Run FFmpeg command
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                
+                if result.returncode == 0 and os.path.exists(chunk_path):
+                    chunk_size_mb = os.path.getsize(chunk_path) / (1024 * 1024)
+                    logger.info(f"✅ Chunk {i+1} created: {chunk_size_mb:.1f}MB")
+                    chunk_paths.append(chunk_path)
+                else:
+                    logger.error(f"❌ Failed to create chunk {i+1}: {result.stderr}")
+                    break
+            
+            logger.info(f"✅ Successfully created {len(chunk_paths)} chunks")
+            return chunk_paths
+            
+        except Exception as e:
+            logger.error(f"❌ Video chunking failed: {e}")
+            return []
+
+    def _process_video_chunks(self, chunk_paths: list, video_url: str, company_name: str, qudemo_id: str) -> dict:
+        """
+        Process video chunks and combine results
+        
+        Args:
+            chunk_paths: List of chunk file paths
+            video_url: Original video URL
+            company_name: Company name for storage
+            qudemo_id: QuDemo ID for storage
+            
+        Returns:
+            Combined processing results
+        """
+        try:
+            logger.info(f"🎬 Processing {len(chunk_paths)} video chunks")
+            
+            all_chunks = []
+            all_embeddings = []
+            total_transcription = ""
+            chunk_offset = 0
+            
+            for i, chunk_path in enumerate(chunk_paths):
+                logger.info(f"🎬 Processing chunk {i+1}/{len(chunk_paths)}: {chunk_path}")
+                
+                # Process each chunk
+                chunk_result = self._process_single_chunk(
+                    chunk_path, video_url, company_name, qudemo_id, 
+                    chunk_index=i, chunk_offset=chunk_offset
+                )
+                
+                if chunk_result and chunk_result.get('success'):
+                    # Add chunk results
+                    chunk_data = chunk_result.get('chunks', [])
+                    embeddings = chunk_result.get('embeddings', [])
+                    transcription = chunk_result.get('transcription', '')
+                    
+                    # Adjust timestamps for chunk offset
+                    for chunk in chunk_data:
+                        chunk['start_timestamp'] += chunk_offset
+                        chunk['end_timestamp'] += chunk_offset
+                    
+                    all_chunks.extend(chunk_data)
+                    all_embeddings.extend(embeddings)
+                    total_transcription += transcription + " "
+                    
+                    # Update offset for next chunk
+                    if chunk_data:
+                        chunk_offset = chunk_data[-1]['end_timestamp']
+                    
+                    logger.info(f"✅ Chunk {i+1} processed: {len(chunk_data)} segments")
+                else:
+                    logger.error(f"❌ Chunk {i+1} processing failed")
+                    continue
+            
+            if not all_chunks:
+                logger.error("❌ No chunks were processed successfully")
+                return {
+                    'success': False,
+                    'error': 'No chunks were processed successfully',
+                    'video_url': video_url,
+                    'company_name': company_name,
+                    'qudemo_id': qudemo_id
+                }
+            
+            # Store all chunks in Pinecone
+            logger.info(f"💾 Storing {len(all_chunks)} total chunks in Pinecone")
+            storage_result = self._store_chunks_in_pinecone(
+                all_chunks, all_embeddings, company_name, qudemo_id, video_url
+            )
+            
+            if storage_result:
+                logger.info(f"✅ Successfully stored {len(all_chunks)} chunks from {len(chunk_paths)} video segments")
+                return {
+                    'success': True,
+                    'chunks_stored': len(all_chunks),
+                    'video_type': 'loom_chunked',
+                    'storage_details': {
+                        'method': 'chunked_processing',
+                        'chunks_processed': len(chunk_paths),
+                        'total_segments': len(all_chunks),
+                        'total_transcription_length': len(total_transcription)
+                    },
+                    'video_url': video_url,
+                    'company_name': company_name,
+                    'qudemo_id': qudemo_id
+                }
+            else:
+                logger.error("❌ Failed to store chunks in Pinecone")
+                return {
+                    'success': False,
+                    'error': 'Failed to store chunks in Pinecone',
+                    'video_url': video_url,
+                    'company_name': company_name,
+                    'qudemo_id': qudemo_id
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Chunk processing failed: {e}")
             return {
-                'text': text,
-                'segments': enhanced_segments,
-                'language': language,
-                'word_count': len(text.split())
+                'success': False,
+                'error': str(e),
+                'video_url': video_url,
+                'company_name': company_name,
+                'qudemo_id': qudemo_id
+            }
+
+    def _process_single_chunk(self, chunk_path: str, video_url: str, company_name: str, 
+                            qudemo_id: str, chunk_index: int, chunk_offset: float) -> dict:
+        """
+        Process a single video chunk
+        
+        Args:
+            chunk_path: Path to the chunk file
+            video_url: Original video URL
+            company_name: Company name for storage
+            qudemo_id: QuDemo ID for storage
+            chunk_index: Index of this chunk
+            chunk_offset: Time offset for this chunk
+            
+        Returns:
+            Processing results for this chunk
+        """
+        try:
+            # Transcribe chunk
+            transcription_data = self.transcribe_with_openai_api(chunk_path)
+            
+            if not transcription_data:
+                logger.error(f"❌ Transcription failed for chunk {chunk_index + 1}")
+                return None
+            
+            # Create chunks from transcription
+            chunks = self._create_timestamped_chunks(transcription_data, chunk_index, chunk_offset)
+            
+            if not chunks:
+                logger.error(f"❌ No chunks created for chunk {chunk_index + 1}")
+                return None
+            
+            # Create embeddings
+            embeddings = self.create_embeddings([c['text'] for c in chunks])
+            
+            if not embeddings:
+                logger.error(f"❌ Embeddings failed for chunk {chunk_index + 1}")
+                return None
+            
+            return {
+                'success': True,
+                'chunks': chunks,
+                'embeddings': embeddings,
+                'transcription': transcription_data.get('transcription', ''),
+                'chunk_index': chunk_index,
+                'chunk_offset': chunk_offset
             }
             
         except Exception as e:
-            logger.error(f"Production transcription failed: {e}")
-            raise
-    
-    def validate_and_enhance_timestamps(self, segments: List[Dict]) -> List[Dict]:
-        """Validate and enhance timestamp segments"""
-        enhanced_segments = []
+            logger.error(f"❌ Single chunk processing failed: {e}")
+            return None
+
+    def _create_timestamped_chunks(self, transcription_data: dict, chunk_index: int = 0, chunk_offset: float = 0) -> list:
+        """
+        Create timestamped chunks from transcription data
         
-        for i, segment in enumerate(segments):
-            try:
-                start = float(segment.get('start', 0))
-                end = float(segment.get('end', 0))
-                text = segment.get('text', '').strip()
+        Args:
+            transcription_data: Transcription data with segments
+            chunk_index: Index of the video chunk
+            chunk_offset: Time offset for this chunk
+            
+        Returns:
+            List of timestamped chunks
+        """
+        try:
+            segments = transcription_data.get('segments', [])
+            chunks = []
+            
+            for i, segment in enumerate(segments):
+                chunk_data = {
+                    'text': segment.get('text', ''),
+                    'full_context': segment.get('text', ''),
+                    'source': 'video',
+                    'title': f'Video Transcription - Chunk {chunk_index + 1}',
+                    'url': '',  # Will be set by caller
+                    'processed_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'start_timestamp': segment.get('start', 0) + chunk_offset,
+                    'end_timestamp': segment.get('end', 0) + chunk_offset,
+                    'chunk_index': i,
+                    'total_chunks': len(segments),
+                    'video_chunk_index': chunk_index
+                }
+                chunks.append(chunk_data)
+            
+            return chunks
+
+        except Exception as e:
+            logger.error(f"❌ Failed to create timestamped chunks: {e}")
+            return []
+
+    def _store_chunks_in_pinecone(self, chunks: list, embeddings: list, company_name: str, 
+                                qudemo_id: str, video_url: str) -> bool:
+        """
+        Store chunks and embeddings in Pinecone
+        
+        Args:
+            chunks: List of chunk data
+            embeddings: List of embeddings
+            company_name: Company name for storage
+            qudemo_id: QuDemo ID for storage
+            video_url: Original video URL
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Use Standard Plan - multiple indexes for better organization
+            index_name = "qudemo-video-index"  # Dedicated video index for Standard Plan
+            
+            # Check if index exists
+            existing_indexes = [index.name for index in self.pc.list_indexes()]
+            
+            if index_name not in existing_indexes:
+                try:
+                    logger.info(f"Creating new Pinecone video index: {index_name}")
+                    self.pc.create_index(
+                        name=index_name,
+                        dimension=3072,  # OpenAI embedding dimension
+                        metric='cosine',
+                        spec=ServerlessSpec(
+                            cloud='aws',
+                            region='us-east-1'
+                        )
+                    )
+                    # Wait for index to be ready
+                    time.sleep(10)
+                except Exception as ce:
+                    msg = str(ce)
+                    if 'max serverless indexes' in msg.lower() or 'forbidden' in msg.lower():
+                        # Fallback to default index if quota reached
+                        index_name = self.default_index_name
+                        logger.warning(f"Index quota reached; falling back to default index: {index_name}")
+                    else:
+                        raise
+            
+            # Get index and namespace per company and qudemo
+            index = self.pc.Index(index_name)
+            namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}" if qudemo_id else company_name.lower().replace(' ', '-')
+            logger.info(f"Storing data in namespace: '{namespace}' in index: '{index_name}'")
+            
+            # Prepare vectors for upsert
+            vectors = []
+            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+                vector_id = f"{company_name}_{qudemo_id}_{video_url}_{i}" if qudemo_id else f"{company_name}_{video_url}_{i}"
                 
-                # Validate timestamps
-                if start < 0:
-                    start = 0
-                if end <= start:
-                    end = start + 1.0
+                # Extract and validate timestamps
+                chunk_start = float(chunk.get('start_timestamp', 0.0)) if isinstance(chunk, dict) else 0.0
+                chunk_end = float(chunk.get('end_timestamp', 0.0)) if isinstance(chunk, dict) else 0.0
                 
-                # Enhance with additional metadata
-                enhanced_segment = {
-                    'start': start,
-                    'end': end,
-                    'text': text,
-                    'segment_id': i,
-                    'duration': end - start,
-                    'word_count': len(text.split())
+                vector_data = {
+                    'id': vector_id,
+                    'values': embedding,
+                    'metadata': {
+                        'company': company_name,
+                        'qudemo_id': qudemo_id,
+                        'video_url': video_url,
+                        'chunk_index': i,
+                        'text': chunk['text'] if isinstance(chunk, dict) else str(chunk),
+                        'start': chunk_start,
+                        'end': chunk_end,
+                        'title': chunk.get('title', 'Unknown'),
+                        'language': 'en',  # Default language
+                        'word_count': len(chunk.get('text', '').split()) if isinstance(chunk, dict) else 0,
+                        'source_type': 'video',
+                        'video_chunk_index': chunk.get('video_chunk_index', 0)
+                    }
                 }
                 
-                enhanced_segments.append(enhanced_segment)
+                # Debug timestamp storage
+                if chunk_start > 0.0 or chunk_end > 0.0:
+                    logger.info(f"Storing chunk {i+1}: start={chunk_start:.2f}s, end={chunk_end:.2f}s")
                 
-            except Exception as e:
-                logger.warning(f"Failed to enhance segment {i}: {e}")
-                continue
-        
-        return enhanced_segments
+                vectors.append(vector_data)
+            
+            # Upsert vectors in batches
+            batch_size = 100
+            for i in range(0, len(vectors), batch_size):
+                batch = vectors[i:i + batch_size]
+                index.upsert(vectors=batch, namespace=namespace)
+                logger.info(f"Upserted batch {i//batch_size + 1}")
+            
+            logger.info(f"Successfully stored {len(vectors)} vectors in Pinecone for {company_name} qudemo {qudemo_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Pinecone storage failed: {e}")
+            return False
     
     def create_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Create embeddings for text chunks"""
+        """Create embeddings for text chunks using OpenAI"""
         try:
             logger.info(f"Creating embeddings for {len(texts)} chunks...")
             
             embeddings = []
-            batch_size = 100  # OpenAI batch limit
+            batch_size = 100  # OpenAI batch size limit
             
             for i in range(0, len(texts), batch_size):
                 batch = texts[i:i + batch_size]
@@ -309,19 +1242,19 @@ class LoomVideoProcessor:
             
         except Exception as e:
             logger.error(f"Embedding creation failed: {e}")
-            raise
+            return []
     
-    def store_in_pinecone(self, chunks: List[Dict], embeddings: List[List[float]], 
-                         company_name: str, qudemo_id: str) -> bool:
-        """Store chunks in Pinecone with Standard Plan configuration"""
+    def store_in_pinecone(self, company_name: str, video_url: str, video_info: Dict, 
+                         transcription_data: Dict, chunks: List[Dict], embeddings: List[List[float]], 
+                         qudemo_id: str = None) -> bool:
+        """Store transcription chunks and embeddings in Pinecone with Standard Plan optimization"""
         try:
             logger.info(f"Storing in Pinecone for company: {company_name} qudemo: {qudemo_id}")
             
-            # Use dedicated video index for Standard Plan
-            index_name = "qudemo-video-index"
-            namespace = f"{company_name}-{qudemo_id}"
+            # Use Standard Plan - multiple indexes for better organization
+            index_name = "qudemo-video-index"  # Dedicated video index for Standard Plan
             
-            # Check if index exists, create if not
+            # Check if index exists
             existing_indexes = [index.name for index in self.pc.list_indexes()]
             
             if index_name not in existing_indexes:
@@ -336,34 +1269,55 @@ class LoomVideoProcessor:
                             region='us-east-1'
                         )
                     )
-                    logger.info(f"✅ Created Pinecone index: {index_name}")
-                except Exception as e:
-                    logger.warning(f"Index creation failed (may already exist): {e}")
+                    # Wait for index to be ready
+                    time.sleep(10)
+                except Exception as ce:
+                    msg = str(ce)
+                    if 'max serverless indexes' in msg.lower() or 'forbidden' in msg.lower():
+                        # Fallback to default index if quota reached
+                        index_name = self.default_index_name
+                        logger.warning(f"Index quota reached; falling back to default index: {index_name}")
+                    else:
+                        raise
             
-            # Get the index
+            # Get index and namespace per company and qudemo
             index = self.pc.Index(index_name)
+            namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}" if qudemo_id else company_name.lower().replace(' ', '-')
+            logger.info(f"Storing data in namespace: '{namespace}' in index: '{index_name}'")
             
             # Prepare vectors for upsert
             vectors = []
             for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-                vector_id = f"{company_name}-{qudemo_id}-video-{i}"
+                vector_id = f"{company_name}_{qudemo_id}_{video_url}_{i}" if qudemo_id else f"{company_name}_{video_url}_{i}"
                 
-                vector = {
+                # Extract and validate timestamps
+                chunk_start = float(chunk.get('start_timestamp', 0.0)) if isinstance(chunk, dict) else 0.0
+                chunk_end = float(chunk.get('end_timestamp', 0.0)) if isinstance(chunk, dict) else 0.0
+                
+                vector_data = {
                     'id': vector_id,
                     'values': embedding,
                     'metadata': {
-                        'company_name': company_name,
+                        'company': company_name,
                         'qudemo_id': qudemo_id,
-                        'content_type': 'video',
-                        'source': 'loom',
+                        'video_url': video_url,
                         'chunk_index': i,
-                        'start_time': chunk.get('start', 0),
-                        'end_time': chunk.get('end', 0),
-                        'text': chunk.get('text', ''),
-                        'word_count': chunk.get('word_count', 0)
+                        'text': chunk['text'] if isinstance(chunk, dict) else str(chunk),
+                        'start': chunk_start,
+                        'end': chunk_end,
+                        'title': video_info.get('title', 'Unknown'),
+                        'duration': video_info.get('duration', 'Unknown'),
+                        'language': transcription_data.get('language', 'Unknown'),
+                        'word_count': transcription_data.get('word_count', 'Unknown'),
+                        'source_type': 'video'
                     }
                 }
-                vectors.append(vector)
+                
+                # Debug timestamp storage
+                if chunk_start > 0.0 or chunk_end > 0.0:
+                    logger.info(f"Storing chunk {i+1}: start={chunk_start:.2f}s, end={chunk_end:.2f}s")
+                
+                vectors.append(vector_data)
             
             # Upsert vectors in batches
             batch_size = 100
@@ -379,79 +1333,228 @@ class LoomVideoProcessor:
             logger.error(f"Pinecone storage failed: {e}")
             return False
     
-    def process_video(self, video_url: str, company_name: str, qudemo_id: str) -> Dict[str, any]:
-        """Process Loom video end-to-end"""
+    def process_video(self, video_url: str, company_name: str, qudemo_id: str = None) -> Optional[Dict]:
+        """Main Loom video processing pipeline"""
         try:
             logger.info(f"🎬 Processing Loom video: {video_url}")
             logger.info(f"🏢 Company: {company_name}, Qudemo ID: {qudemo_id}")
             
-            # Check memory at start
-            memory_start = self.check_memory_usage()
-            if memory_start > self.memory_threshold:
-                logger.warning(f"High memory usage at start: {memory_start:.1f} MB")
+            # Memory check before starting
+            memory_mb = self.check_memory_usage()
+            if memory_mb > self.warning_memory_threshold:
+                logger.warning(f"⚠️ High memory before processing: {memory_mb:.1f}MB")
                 self.cleanup_memory()
+                memory_mb = self.check_memory_usage()
             
-            # Extract video info
+            if memory_mb > self.memory_threshold:
+                logger.error(f"🚨 Memory too high for processing: {memory_mb:.1f}MB")
+                return {
+                    "success": False,
+                    "error": f"Memory usage too high ({memory_mb:.1f}MB) for video processing",
+                    "code": "MEMORY_LIMIT_EXCEEDED"
+                }
+            
+            logger.info(f"✅ Memory check passed: {memory_mb:.1f}MB")
+            
+            # Step 1: Extract video info
             video_info = self.extract_loom_video_info(video_url)
+            if not video_info:
+                raise Exception("Failed to extract video info")
             
-            # Download video
-            temp_video_path = os.path.join(tempfile.gettempdir(), f"loom_video_{int(time.time())}.mp4")
+            # Step 2: Download video
+            # Create a more reliable temporary file path
+            import tempfile
+            import os
+            temp_dir = tempfile.gettempdir()
+            temp_video_path = os.path.join(temp_dir, f"loom_video_{int(time.time())}.mp4")
             
-            if not self.download_loom_video(video_url, temp_video_path):
-                raise Exception("Failed to download video")
+            # Use quality fallback download
+            logger.info("Using quality fallback download")
+            download_success = self.download_loom_video_with_quality_fallback(video_url, temp_video_path)
             
-            try:
-                # Transcribe video
-                transcription_result = self.transcribe_video(temp_video_path)
-                
-                # Create chunks from segments
-                chunks = []
-                for segment in transcription_result['segments']:
-                    chunk = {
-                        'start': segment['start'],
-                        'end': segment['end'],
-                        'text': segment['text'],
-                        'word_count': segment['word_count']
-                    }
-                    chunks.append(chunk)
-                
-                logger.info(f"Created {len(chunks)} timestamped chunks from enhanced segments")
-                
-                # Create embeddings
-                texts = [chunk['text'] for chunk in chunks]
-                embeddings = self.create_embeddings(texts)
-                
-                # Store in Pinecone
-                if self.store_in_pinecone(chunks, embeddings, company_name, qudemo_id):
-                    logger.info(f"✅ Loom video processing completed successfully for {company_name} qudemo {qudemo_id}")
-                    
-                    return {
-                        'success': True,
-                        'chunks_created': len(chunks),
-                        'word_count': transcription_result['word_count'],
-                        'language': transcription_result['language'],
-                        'company_name': company_name,
-                        'qudemo_id': qudemo_id
-                    }
-                else:
-                    raise Exception("Failed to store in Pinecone")
-                    
-            finally:
-                # Clean up temporary file
-                if os.path.exists(temp_video_path):
-                    try:
-                        os.unlink(temp_video_path)
-                        logger.info("🧹 Cleaned up temporary video file")
-                    except Exception as e:
-                        logger.warning(f"Failed to cleanup temporary file: {e}")
-                
-                # Final memory cleanup
+            if not download_success:
+                raise Exception("Failed to download video with quality fallback")
+            
+            # Check memory before transcription
+            memory_mb = self.check_memory_usage()
+            if memory_mb > self.memory_threshold:
+                logger.warning(f"⚠️ High memory before transcription ({memory_mb:.1f}MB), performing cleanup")
                 self.cleanup_memory()
+            
+            # Check memory again after cleanup
+            memory_mb = self.check_memory_usage()
+            if memory_mb > 5000:  # Hard limit (increased since no local Whisper model)
+                logger.error(f"🚨 Memory still too high ({memory_mb:.1f}MB) after cleanup, skipping video")
+                return {
+                    "success": False,
+                    "message": f"Memory usage too high ({memory_mb:.1f}MB), video too large to process safely",
+                    "error": "memory_limit_exceeded"
+                }
+            
+            # Step 3: Check video duration and decide processing strategy
+            video_duration = self._get_video_duration(temp_video_path)
+            if not video_duration:
+                logger.warning("⚠️ Could not get video duration, proceeding with single file processing")
+                video_duration = 0
+            
+            logger.info(f"📊 Video duration: {video_duration:.1f} seconds ({video_duration/60:.1f} minutes)")
+            
+            # Decide processing strategy based on video duration
+            if video_duration > 600:  # 10 minutes
+                logger.info("🎬 Large video detected (>10 minutes), using chunked processing")
+                
+                # Chunk the video into 10-minute segments
+                chunk_paths = self._chunk_large_video(temp_video_path, chunk_duration=600)
+                
+                if not chunk_paths:
+                    raise Exception("Failed to chunk large video")
+                
+                # Process chunks
+                result = self._process_video_chunks(chunk_paths, video_url, company_name, qudemo_id)
+                
+                # Clean up chunk files
+                for chunk_path in chunk_paths:
+                    try:
+                        if os.path.exists(chunk_path):
+                            os.remove(chunk_path)
+                    except:
+                        pass
+                
+                if result and result.get('success'):
+                    logger.info(f"✅ Large video processing completed successfully")
+                    return result
+                else:
+                    raise Exception(f"Large video processing failed: {result.get('error', 'Unknown error') if result else 'No result'}")
+            
+            else:
+                logger.info("🎬 Standard video processing (<10 minutes)")
+                
+                # Step 3: Transcribe video (use OpenAI Whisper API directly - no local Whisper)
+                transcription_data = None
+                
+                # Use OpenAI Whisper API directly (skip local Whisper to avoid memory/FFmpeg issues)
+                try:
+                    logger.info("🎤 Using OpenAI Whisper API directly (no local Whisper model loading)...")
+                    transcription_data = self.transcribe_with_openai_api(temp_video_path)
+                    if transcription_data:
+                        logger.info("✅ OpenAI Whisper API transcription successful")
+                    else:
+                        logger.warning("⚠️ OpenAI Whisper API transcription returned no data")
+                except Exception as e:
+                    logger.warning(f"⚠️ OpenAI Whisper API transcription failed: {e}")
+                
+            # If OpenAI API fails, try Gemini transcription as fallback (for Loom videos)
+            if not transcription_data:
+                try:
+                    logger.info("🔄 Attempting Gemini transcription as fallback...")
+                    transcription_data = self.transcribe_with_gemini(temp_video_path, video_url)
+                    if transcription_data:
+                        logger.info("✅ Gemini transcription successful")
+                    else:
+                        logger.warning("⚠️ Gemini transcription returned no data")
+                except Exception as e:
+                    logger.warning(f"⚠️ Gemini transcription failed: {e}")
+            
+            if not transcription_data:
+                raise Exception("All transcription methods failed")
+            
+            # Check memory after transcription
+            memory_mb = self.check_memory_usage()
+            logger.info(f"Memory after transcription: {memory_mb:.1f} MB")
+            
+            # Step 4: Create chunks from segments
+            transcription = transcription_data.get('transcription', '')
+            if not transcription:
+                raise Exception("Empty transcription")
+            segments = transcription_data.get('segments', [])
+            
+            # Create chunks from enhanced segments
+            chunks = []
+            for i, segment in enumerate(segments):
+                chunk_data = {
+                    'text': segment.get('text', ''),
+                    'full_context': segment.get('text', ''),
+                    'source': 'video',
+                    'title': f'Video Transcription - {company_name}',
+                    'url': video_url,
+                    'processed_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'start_timestamp': segment.get('start', 0),
+                    'end_timestamp': segment.get('end', 0),
+                    'chunk_index': i,
+                    'total_chunks': len(segments)
+                }
+                chunks.append(chunk_data)
+            
+            # Log chunk information
+            logger.info(f"Created {len(chunks)} timestamped chunks from enhanced segments")
+            
+            # Check memory before embeddings
+            memory_mb = self.check_memory_usage()
+            if memory_mb > self.memory_threshold:
+                logger.warning(f"⚠️ High memory before embeddings ({memory_mb:.1f}MB), performing cleanup")
+                self.cleanup_memory()
+            
+            # Step 5: Create embeddings
+            embeddings = self.create_embeddings([c['text'] for c in chunks])
+            if not embeddings or len(embeddings) != len(chunks):
+                raise Exception("Failed to create embeddings")
+            
+            # Check memory before storage
+            memory_mb = self.check_memory_usage()
+            logger.info(f"Memory before storage: {memory_mb:.1f} MB")
+            
+            # Step 6: Store in Pinecone
+            storage_success = self.store_in_pinecone(
+                company_name, video_url, video_info, transcription_data, chunks, embeddings, qudemo_id
+            )
+            
+            if not storage_success:
+                raise Exception("Failed to store in Pinecone")
+            
+            # Final memory cleanup
+            self.cleanup_memory()
+            
+            # Return success result
+            result = {
+                'success': True,
+                'video_url': video_url,
+                'company_name': company_name,
+                'qudemo_id': qudemo_id,
+                'title': video_info.get('title', 'Unknown'),
+                'chunks_created': len(chunks),
+                'vectors_stored': len(embeddings),
+                'word_count': transcription_data.get('word_count', 'Unknown'),
+                'language': transcription_data.get('language', 'Unknown'),
+                'method': 'loom_transcription',
+                'memory_usage_mb': self.check_memory_usage(),
+                'production_mode': True
+            }
+            
+            logger.info(f"✅ Loom video processing completed successfully for {company_name} qudemo {qudemo_id}")
+            
+            # Clean up temporary file
+            try:
+                os.unlink(temp_video_path)
+                logger.info("🧹 Cleaned up temporary video file")
+            except:
+                pass
+            
+            return result
             
         except Exception as e:
             logger.error(f"❌ Loom video processing failed: {e}")
+            # Cleanup on error
+            self.cleanup_memory()
+            
+            # Clean up temporary file
+            try:
+                os.unlink(temp_video_path)
+                logger.info("🧹 Cleaned up temporary video file (error)")
+            except:
+                pass
+            
             return {
-                'success': False,
-                'error': str(e),
-                'chunks_created': 0
+                "success": False,
+                "error": str(e),
+                "code": "PROCESSING_FAILED"
             }

@@ -113,7 +113,48 @@ class GeminiTranscriptionProcessor:
         self.gemini_failures = 0
         self.last_gemini_failure_time = 0
         
+        # Rate limiting to prevent API overload
+        self.last_api_call_time = 0
+        self.min_api_interval = int(os.getenv("GEMINI_API_INTERVAL", "10"))  # Much longer interval for large videos
+        
+        # Overload protection settings
+        self.max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "8"))  # Even more retries for large videos
+        self.overload_threshold = int(os.getenv("GEMINI_OVERLOAD_THRESHOLD", "2"))  # Configurable overload threshold
+        
+        # Circuit breaker for API overload
+        self.consecutive_overloads = 0
+        self.circuit_breaker_threshold = 3  # After 3 consecutive overloads, use fallback
+        self.circuit_breaker_reset_time = 0
+        self.circuit_breaker_timeout = 1800  # 30 minutes
+        
         logger.info("Initializing Gemini Transcription Processor...")
+
+    def _is_circuit_breaker_open(self) -> bool:
+        """Check if circuit breaker is open due to consecutive API overloads"""
+        current_time = time.time()
+        
+        # Reset circuit breaker if timeout has passed
+        if current_time - self.circuit_breaker_reset_time > self.circuit_breaker_timeout:
+            self.consecutive_overloads = 0
+            self.circuit_breaker_reset_time = 0
+            return False
+        
+        return self.consecutive_overloads >= self.circuit_breaker_threshold
+
+    def _record_api_overload(self):
+        """Record an API overload event for circuit breaker"""
+        self.consecutive_overloads += 1
+        if self.consecutive_overloads >= self.circuit_breaker_threshold:
+            self.circuit_breaker_reset_time = time.time()
+            logger.warning(f"🚨 Circuit breaker OPEN: {self.consecutive_overloads} consecutive API overloads")
+            logger.warning(f"🚨 Will use fallback processing for next {self.circuit_breaker_timeout//60} minutes")
+
+    def _record_api_success(self):
+        """Record a successful API call to reset circuit breaker"""
+        if self.consecutive_overloads > 0:
+            logger.info(f"✅ API success - resetting circuit breaker (was {self.consecutive_overloads} overloads)")
+            self.consecutive_overloads = 0
+            self.circuit_breaker_reset_time = 0
 
     def _log_chunk_summary(self, chunks: List[Dict], label: str = ""):
         try:
@@ -195,10 +236,16 @@ class GeminiTranscriptionProcessor:
 
     def _try_gemini_api_with_overload_handling(self, video_url: str) -> Optional[Dict]:
         """Try Gemini API with intelligent retry handling for all video sizes"""
-        max_retries = 5   # Optimized retry count for production
-        base_delay = 3    # Faster base delay for better user experience
+        # Check circuit breaker first
+        if self._is_circuit_breaker_open():
+            logger.warning(f"🚨 Circuit breaker is OPEN - skipping Gemini API due to consecutive overloads")
+            logger.warning(f"🚨 Will use fallback processing instead")
+            return None
         
-        logger.info(f"🎬 Attempting Gemini API with {max_retries} retries")
+        max_retries = self.max_retries   # Use configurable retry count
+        base_delay = 20   # Much longer base delay for large video processing
+        
+        logger.info(f"🎬 Attempting Gemini API with {max_retries} retries (overload-optimized, interval: {self.min_api_interval}s)")
         
         # Try Gemini API with intelligent retry strategy
         for attempt in range(max_retries):
@@ -206,6 +253,7 @@ class GeminiTranscriptionProcessor:
                 result = self._try_direct_gemini_api_with_long_video_support(video_url, attempt, max_retries, base_delay)
                 if result:
                     logger.info(f"✅ Gemini API successful on attempt {attempt + 1}")
+                    self._record_api_success()  # Reset circuit breaker on success
                     return result
                 else:
                     # If result is None, the attempt failed
@@ -234,6 +282,16 @@ class GeminiTranscriptionProcessor:
         try:
             import requests
             import time
+            
+            # Rate limiting to prevent API overload
+            current_time = time.time()
+            time_since_last_call = current_time - self.last_api_call_time
+            if time_since_last_call < self.min_api_interval:
+                sleep_time = self.min_api_interval - time_since_last_call
+                logger.info(f"⏳ Rate limiting: waiting {sleep_time:.1f}s before API call...")
+                time.sleep(sleep_time)
+            
+            self.last_api_call_time = time.time()
             
             url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
             
@@ -309,16 +367,19 @@ class GeminiTranscriptionProcessor:
             else:
                 # Handle different error codes with better overload handling
                 if response.status_code == 503:
-                    # 503 is overload - use smarter delays with jitter
+                    # 503 is overload - use much longer delays with exponential backoff for large videos
                     if attempt < max_retries - 1:
-                        # Progressive delay with jitter: 15s, 25s, 40s, 60s, 90s
-                        base_delay = 15
-                        delay = base_delay + (attempt * 10) + (hash(str(attempt)) % 15)
+                        # Ultra-aggressive exponential backoff with jitter: 120s, 240s, 480s, 960s, 1920s, 3840s, 7680s, 15360s
+                        delay = 120 * (2 ** attempt) + (hash(str(attempt)) % 120)
                         logger.warning(f"⚠️ Gemini API overloaded (503), retrying in {delay} seconds... (attempt {attempt + 1}/{max_retries})")
+                        logger.info(f"💡 Tip: Large video processing requires patience. API is experiencing high load.")
+                        logger.info(f"💡 Consider processing during off-peak hours for better success rates.")
+                        self._record_api_overload()  # Record overload for circuit breaker
                         time.sleep(delay)
                         return None
                     else:
                         logger.error(f"❌ Gemini API overloaded after {max_retries} attempts")
+                        logger.error(f"💡 Recommendation: Wait 5-10 minutes before retrying, or try a different video")
                         return None
                 elif response.status_code in [429, 500, 502] and attempt < max_retries - 1:
                     # Use shorter delays for non-overload errors
@@ -354,8 +415,8 @@ class GeminiTranscriptionProcessor:
         if current_time - self.last_gemini_failure_time > 600:  # 10 minutes
             self.gemini_failures = 0
         
-        # If we've had 3 or more failures in the last 10 minutes, consider it overloaded
-        if self.gemini_failures >= 3:
+        # If we've had failures above threshold in the last 10 minutes, consider it overloaded
+        if self.gemini_failures >= self.overload_threshold:
             logger.info(f"⚠️ Gemini API overload detected: {self.gemini_failures} recent failures")
             return True
         
@@ -366,6 +427,14 @@ class GeminiTranscriptionProcessor:
         import time
         self.gemini_failures += 1
         self.last_gemini_failure_time = time.time()
+        
+        # Provide helpful feedback based on failure count
+        if self.gemini_failures == 1:
+            logger.info("💡 First API failure - this is normal, will retry")
+        elif self.gemini_failures == 2:
+            logger.warning("⚠️ Multiple API failures detected - Gemini may be experiencing high load")
+        elif self.gemini_failures >= 3:
+            logger.error("❌ Multiple consecutive failures - consider waiting before retrying")
         logger.info(f"📊 Recorded Gemini failure (total: {self.gemini_failures})")
 
     def _get_video_duration(self, video_url: str) -> Optional[int]:
@@ -1181,6 +1250,544 @@ The video provides practical examples and step-by-step guidance for implementing
                 'error': str(e),
                 'video_url': video_url,
                 'company_name': company_name
+            }
+    
+    async def _get_youtube_duration(self, video_url: str) -> float:
+        """
+        Get YouTube video duration using smart URL pattern detection (production-safe)
+        
+        Args:
+            video_url: YouTube video URL
+            
+        Returns:
+            Duration in seconds, or 0 if failed
+        """
+        logger.info(f"📊 Getting YouTube video duration (production-safe): {video_url}")
+        
+        # Smart URL pattern detection for production (no yt-dlp dependency)
+        if 'list=' in video_url or 'playlist' in video_url.lower():
+            logger.info("🔄 Detected playlist URL, assuming long video (>10 min) for chunking")
+            return 1200  # 20 minutes - trigger chunking
+        elif 'watch' in video_url:
+            # Check for common patterns that indicate long videos
+            if any(keyword in video_url.lower() for keyword in ['tutorial', 'course', 'lecture', 'presentation', 'webinar', 'training', 'guide', 'how-to']):
+                logger.info("🔄 Detected educational content, assuming long video (>10 min) for chunking")
+                return 1200  # 20 minutes - trigger chunking
+            else:
+                logger.info("🔄 Standard video detected, assuming medium length (5-10 min)")
+                return 600  # 10 minutes - trigger chunking for safety
+        else:
+            logger.info("🔄 Unknown URL pattern, assuming standard video (<10 min)")
+            return 300  # 5 minutes - use standard processing
+
+    async def _process_youtube_video(self, video_url: str, company_name: str, qudemo_id: str) -> Dict:
+        """
+        Process YouTube video using Gemini API with automatic chunking for large videos
+        
+        Args:
+            video_url: YouTube video URL
+            company_name: Company name for storage
+            qudemo_id: QuDemo ID for storage
+            
+        Returns:
+            Dict with processing results
+        """
+        try:
+            logger.info(f"🎬 Processing YouTube video: {video_url}")
+            
+            # Check if video is large (>10 minutes)
+            duration = await self._get_youtube_duration(video_url)
+            
+            if duration > 600:  # 10 minutes
+                logger.info("🎬 Large YouTube video detected (>10 minutes), using chunked processing")
+                return await self._process_youtube_chunks(video_url, company_name, qudemo_id, duration)
+            else:
+                logger.info("🎬 Standard YouTube video processing")
+                # Use existing single-video processing
+                transcription_data = self.extract_transcription_with_gemini(video_url)
+                
+                if not transcription_data:
+                    logger.error("❌ Failed to extract transcription from YouTube video")
+                    return {
+                        'success': False,
+                        'error': 'Failed to extract transcription from YouTube video',
+                        'video_url': video_url,
+                        'company_name': company_name,
+                        'qudemo_id': qudemo_id
+                    }
+                
+                logger.info(f"✅ YouTube transcription extracted: {len(transcription_data.get('transcription', ''))} characters")
+                
+                # Process with full transcription data
+                return await self._process_full_transcription(video_url, company_name, qudemo_id, transcription_data)
+            
+        except Exception as e:
+            logger.error(f"❌ YouTube video processing failed: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'video_url': video_url,
+                'company_name': company_name,
+                'qudemo_id': qudemo_id
+            }
+
+    async def _process_youtube_chunks(self, video_url: str, company_name: str, qudemo_id: str, duration: float) -> Dict:
+        """
+        Process large YouTube videos in chunks
+        
+        Args:
+            video_url: YouTube video URL
+            company_name: Company name for storage
+            qudemo_id: QuDemo ID for storage
+            duration: Video duration in seconds
+            
+        Returns:
+            Dict with processing results
+        """
+        try:
+            logger.info(f"🎬 Processing large YouTube video in chunks: {duration/60:.1f} minutes")
+            
+            # Calculate chunks
+            chunk_duration = 600  # 10 minutes
+            num_chunks = int(duration / chunk_duration) + 1
+            
+            logger.info(f"📊 Will process {num_chunks} chunks of {chunk_duration//60} minutes each")
+            
+            all_chunks = []
+            all_embeddings = []
+            chunk_offset = 0
+            
+            for i in range(num_chunks):
+                start_time = i * chunk_duration
+                end_time = min((i + 1) * chunk_duration, duration)
+                
+                logger.info(f"🎬 Processing YouTube chunk {i+1}/{num_chunks}: {start_time//60:.1f}-{end_time//60:.1f} min")
+                
+                # Process chunk with Gemini
+                chunk_result = await self._process_youtube_chunk(
+                    video_url, start_time, end_time, company_name, qudemo_id, i, chunk_offset
+                )
+                
+                if chunk_result and chunk_result.get('success'):
+                    chunk_data = chunk_result.get('chunks', [])
+                    embeddings = chunk_result.get('embeddings', [])
+                    
+                    # Adjust timestamps for global timeline
+                    for chunk in chunk_data:
+                        chunk['start_timestamp'] += chunk_offset
+                        chunk['end_timestamp'] += chunk_offset
+                    
+                    all_chunks.extend(chunk_data)
+                    all_embeddings.extend(embeddings)
+                    
+                    # Update offset for next chunk
+                    if chunk_data:
+                        chunk_offset = chunk_data[-1]['end_timestamp']
+                    
+                    logger.info(f"✅ YouTube chunk {i+1} processed: {len(chunk_data)} segments")
+                    
+                    # Ultra-aggressive delay between chunks to prevent API overload
+                    if i < num_chunks - 1:  # Don't delay after the last chunk
+                        delay_between_chunks = 30 + (i * 15)  # 30s, 45s, 60s, etc.
+                        logger.info(f"⏳ Waiting {delay_between_chunks}s before processing next chunk...")
+                        logger.info(f"💡 Extended delay to prevent API overload during large video processing")
+                        time.sleep(delay_between_chunks)
+                else:
+                    logger.error(f"❌ YouTube chunk {i+1} processing failed")
+                    continue
+            
+            if not all_chunks:
+                raise Exception("No YouTube chunks were processed successfully")
+            
+            # Store all chunks
+            storage_result = await self._store_youtube_chunks_in_pinecone(
+                all_chunks, all_embeddings, company_name, qudemo_id, video_url
+            )
+            
+            if storage_result:
+                logger.info(f"✅ Successfully stored {len(all_chunks)} chunks from {num_chunks} YouTube segments")
+                return {
+                    'success': True,
+                    'chunks_stored': len(all_chunks),
+                    'video_type': 'youtube_chunked',
+                    'storage_details': {
+                        'method': 'youtube_chunked_processing',
+                        'chunks_processed': num_chunks,
+                        'total_segments': len(all_chunks),
+                        'total_duration': duration
+                    },
+                    'video_url': video_url,
+                    'company_name': company_name,
+                    'qudemo_id': qudemo_id
+                }
+            else:
+                raise Exception("Failed to store YouTube chunks in Pinecone")
+                
+        except Exception as e:
+            logger.error(f"❌ YouTube chunking failed: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'video_url': video_url,
+                'company_name': company_name,
+                'qudemo_id': qudemo_id
+            }
+
+    async def _process_youtube_chunk(self, video_url: str, start_time: float, end_time: float, 
+                                   company_name: str, qudemo_id: str, chunk_index: int, chunk_offset: float) -> Dict:
+        """
+        Process a single YouTube video chunk
+        
+        Args:
+            video_url: YouTube video URL
+            start_time: Start time of chunk in seconds
+            end_time: End time of chunk in seconds
+            company_name: Company name for storage
+            qudemo_id: QuDemo ID for storage
+            chunk_index: Index of this chunk
+            chunk_offset: Time offset for this chunk
+            
+        Returns:
+            Processing results for this chunk
+        """
+        try:
+            # Create chunked YouTube URL with time parameters
+            chunked_url = f"{video_url}&t={int(start_time)}s"
+            
+            logger.info(f"🎬 Processing YouTube chunk {chunk_index + 1}: {start_time//60:.1f}-{end_time//60:.1f} min")
+            
+            # Extract transcription for this chunk using Gemini
+            transcription_data = self.extract_transcription_with_gemini(chunked_url)
+            
+            if not transcription_data:
+                logger.error(f"❌ Transcription failed for YouTube chunk {chunk_index + 1}")
+                return None
+            
+            # Create chunks from transcription
+            chunks = self._create_youtube_timestamped_chunks(transcription_data, chunk_index, chunk_offset, start_time)
+            
+            if not chunks:
+                logger.error(f"❌ No chunks created for YouTube chunk {chunk_index + 1}")
+                return None
+            
+            # Create embeddings
+            embeddings = await self._create_embeddings_async([c['text'] for c in chunks])
+            
+            if not embeddings:
+                logger.error(f"❌ Embeddings failed for YouTube chunk {chunk_index + 1}")
+                return None
+            
+            return {
+                'success': True,
+                'chunks': chunks,
+                'embeddings': embeddings,
+                'transcription': transcription_data.get('transcription', ''),
+                'chunk_index': chunk_index,
+                'chunk_offset': chunk_offset
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ YouTube chunk processing failed: {e}")
+            return None
+
+    def _create_youtube_timestamped_chunks(self, transcription_data: dict, chunk_index: int = 0, 
+                                         chunk_offset: float = 0, start_time: float = 0) -> list:
+        """
+        Create timestamped chunks from YouTube transcription data
+        
+        Args:
+            transcription_data: Transcription data (Gemini API format)
+            chunk_index: Index of the video chunk
+            chunk_offset: Time offset for this chunk
+            start_time: Start time of this chunk
+            
+        Returns:
+            List of timestamped chunks
+        """
+        try:
+            chunks = []
+            
+            # Check if we have segments (Whisper format) or full transcription (Gemini format)
+            segments = transcription_data.get('segments', [])
+            full_transcription = transcription_data.get('transcription', '')
+            
+            if segments:
+                # Whisper format with segments
+                logger.info(f"📝 Creating chunks from {len(segments)} segments")
+                for i, segment in enumerate(segments):
+                    # Adjust timestamps to global timeline
+                    global_start = segment.get('start', 0) + start_time
+                    global_end = segment.get('end', 0) + start_time
+                    
+                    chunk_data = {
+                        'text': segment.get('text', ''),
+                        'full_context': segment.get('text', ''),
+                        'source': 'youtube',
+                        'title': f'YouTube Video - Chunk {chunk_index + 1}',
+                        'url': '',  # Will be set by caller
+                        'processed_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                        'start_timestamp': global_start,
+                        'end_timestamp': global_end,
+                        'chunk_index': i,
+                        'total_chunks': len(segments),
+                        'video_chunk_index': chunk_index,
+                        'youtube_chunk_start': start_time,
+                        'youtube_chunk_end': start_time + 600  # 10 minutes
+                    }
+                    chunks.append(chunk_data)
+            elif full_transcription:
+                # Gemini format - split full transcription into chunks
+                logger.info(f"📝 Creating chunks from full transcription ({len(full_transcription)} chars)")
+                
+                # Split transcription into sentences
+                sentences = full_transcription.split('. ')
+                if not sentences:
+                    sentences = [full_transcription]
+                
+                # Group sentences into chunks of ~200 words each
+                words_per_chunk = 200
+                current_chunk = []
+                current_word_count = 0
+                chunk_duration = 600  # 10 minutes per chunk
+                
+                for i, sentence in enumerate(sentences):
+                    sentence_words = len(sentence.split())
+                    current_chunk.append(sentence)
+                    current_word_count += sentence_words
+                    
+                    # Create chunk when we reach word limit or end of sentences
+                    if current_word_count >= words_per_chunk or i == len(sentences) - 1:
+                        chunk_text = '. '.join(current_chunk)
+                        if not chunk_text.endswith('.'):
+                            chunk_text += '.'
+                        
+                        # Estimate timestamps based on chunk position within the video chunk
+                        # Each text chunk should be roughly proportional to the video chunk duration
+                        chunk_duration_seconds = 600  # 10 minutes per video chunk
+                        total_text_chunks = len(sentences) // words_per_chunk + 1  # Estimate total chunks
+                        chunk_duration_per_text_chunk = chunk_duration_seconds / max(total_text_chunks, 1)
+                        
+                        chunk_start = start_time + (len(chunks) * chunk_duration_per_text_chunk)
+                        chunk_end = start_time + ((len(chunks) + 1) * chunk_duration_per_text_chunk)
+                        
+                        chunk_data = {
+                            'text': chunk_text,
+                            'full_context': chunk_text,
+                            'source': 'youtube',
+                            'title': f'YouTube Video - Chunk {chunk_index + 1}',
+                            'url': '',  # Will be set by caller
+                            'processed_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                            'start_timestamp': chunk_start,
+                            'end_timestamp': chunk_end,
+                            'chunk_index': len(chunks),
+                            'total_chunks': 0,  # Will be updated later
+                            'video_chunk_index': chunk_index,
+                            'youtube_chunk_start': start_time,
+                            'youtube_chunk_end': start_time + 600  # 10 minutes
+                        }
+                        chunks.append(chunk_data)
+                        
+                        # Reset for next chunk
+                        current_chunk = []
+                        current_word_count = 0
+                
+                # Update total_chunks for all chunks
+                for chunk in chunks:
+                    chunk['total_chunks'] = len(chunks)
+                
+                logger.info(f"✅ Created {len(chunks)} chunks from full transcription")
+            else:
+                logger.error("❌ No transcription data found")
+                return []
+            
+            return chunks
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to create YouTube timestamped chunks: {e}")
+            return []
+
+    async def _store_youtube_chunks_in_pinecone(self, chunks: list, embeddings: list, company_name: str, 
+                                              qudemo_id: str, video_url: str) -> bool:
+        """
+        Store YouTube chunks and embeddings in Pinecone
+        
+        Args:
+            chunks: List of chunk data
+            embeddings: List of embeddings
+            company_name: Company name for storage
+            qudemo_id: QuDemo ID for storage
+            video_url: Original video URL
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Use Standard Plan - multiple indexes for better organization
+            index_name = "qudemo-video-index"  # Dedicated video index for Standard Plan
+            
+            # Check if index exists
+            existing_indexes = [index.name for index in self.pc.list_indexes()]
+            
+            if index_name not in existing_indexes:
+                try:
+                    logger.info(f"Creating new Pinecone video index: {index_name}")
+                    self.pc.create_index(
+                        name=index_name,
+                        dimension=3072,  # OpenAI embedding dimension
+                        metric='cosine',
+                        spec=ServerlessSpec(
+                            cloud='aws',
+                            region='us-east-1'
+                        )
+                    )
+                    # Wait for index to be ready
+                    time.sleep(10)
+                except Exception as ce:
+                    msg = str(ce)
+                    if 'max serverless indexes' in msg.lower() or 'forbidden' in msg.lower():
+                        # Fallback to default index if quota reached
+                        index_name = self.default_index_name
+                        logger.warning(f"Index quota reached; falling back to default index: {index_name}")
+                    else:
+                        raise
+            
+            # Get index and namespace per company and qudemo
+            index = self.pc.Index(index_name)
+            namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}" if qudemo_id else company_name.lower().replace(' ', '-')
+            logger.info(f"Storing YouTube data in namespace: '{namespace}' in index: '{index_name}'")
+            
+            # Prepare vectors for upsert
+            vectors = []
+            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+                vector_id = f"{company_name}_{qudemo_id}_{video_url}_{i}" if qudemo_id else f"{company_name}_{video_url}_{i}"
+                
+                # Extract and validate timestamps
+                chunk_start = float(chunk.get('start_timestamp', 0.0)) if isinstance(chunk, dict) else 0.0
+                chunk_end = float(chunk.get('end_timestamp', 0.0)) if isinstance(chunk, dict) else 0.0
+                
+                vector_data = {
+                    'id': vector_id,
+                    'values': embedding,
+                    'metadata': {
+                        'company': company_name,
+                        'qudemo_id': qudemo_id,
+                        'video_url': video_url,
+                        'chunk_index': i,
+                        'text': chunk['text'] if isinstance(chunk, dict) else str(chunk),
+                        'start': chunk_start,
+                        'end': chunk_end,
+                        'title': chunk.get('title', 'Unknown'),
+                        'language': 'en',  # Default language
+                        'word_count': len(chunk.get('text', '').split()) if isinstance(chunk, dict) else 0,
+                        'source_type': 'youtube',
+                        'video_chunk_index': chunk.get('video_chunk_index', 0),
+                        'youtube_chunk_start': chunk.get('youtube_chunk_start', 0),
+                        'youtube_chunk_end': chunk.get('youtube_chunk_end', 0)
+                    }
+                }
+                
+                # Debug timestamp storage
+                if chunk_start > 0.0 or chunk_end > 0.0:
+                    logger.info(f"Storing YouTube chunk {i+1}: start={chunk_start:.2f}s, end={chunk_end:.2f}s")
+                
+                vectors.append(vector_data)
+            
+            # Upsert vectors in batches
+            batch_size = 100
+            for i in range(0, len(vectors), batch_size):
+                batch = vectors[i:i + batch_size]
+                index.upsert(vectors=batch, namespace=namespace)
+                logger.info(f"Upserted YouTube batch {i//batch_size + 1}")
+            
+            logger.info(f"Successfully stored {len(vectors)} YouTube vectors in Pinecone for {company_name} qudemo {qudemo_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"YouTube Pinecone storage failed: {e}")
+            return False
+
+    async def _create_embeddings_async(self, texts: List[str]) -> List[List[float]]:
+        """
+        Create embeddings for text chunks using OpenAI (async version)
+        
+        Args:
+            texts: List of text chunks to embed
+            
+        Returns:
+            List of embeddings
+        """
+        try:
+            logger.info(f"Creating embeddings for {len(texts)} chunks...")
+            
+            embeddings = []
+            batch_size = 100  # OpenAI batch size limit
+            
+            for i in range(0, len(texts), batch_size):
+                batch = texts[i:i + batch_size]
+                
+                try:
+                    response = openai.embeddings.create(
+                        input=batch,
+                        model="text-embedding-3-large"
+                    )
+                    batch_embeddings = [e.embedding for e in response.data]
+                    embeddings.extend(batch_embeddings)
+                    
+                    logger.info(f"Created embeddings for batch {i//batch_size + 1}")
+                    
+                except Exception as e:
+                    logger.error(f"Batch embedding failed: {e}")
+                    # Create zero embeddings for failed batch
+                    zero_embedding = [0.0] * 3072  # OpenAI embedding dimension
+                    embeddings.extend([zero_embedding] * len(batch))
+            
+            return embeddings
+            
+        except Exception as e:
+            logger.error(f"Embedding creation failed: {e}")
+            return []
+    
+    async def _process_generic_video(self, video_url: str, company_name: str, qudemo_id: str) -> Dict:
+        """
+        Process generic video (fallback for unknown video types)
+        
+        Args:
+            video_url: Video URL
+            company_name: Company name for storage
+            qudemo_id: QuDemo ID for storage
+            
+        Returns:
+            Dict with processing results
+        """
+        try:
+            logger.info(f"🎬 Processing generic video: {video_url}")
+            
+            # Try to extract transcription using Gemini API
+            transcription_data = self.extract_transcription_with_gemini(video_url)
+            
+            if not transcription_data:
+                logger.error("❌ Failed to extract transcription from generic video")
+                return {
+                    'success': False,
+                    'error': 'Failed to extract transcription from video',
+                    'video_url': video_url,
+                    'company_name': company_name,
+                    'qudemo_id': qudemo_id
+                }
+            
+            logger.info(f"✅ Generic video transcription extracted: {len(transcription_data.get('transcription', ''))} characters")
+            
+            # Process with full transcription data
+            return await self._process_full_transcription(video_url, company_name, qudemo_id, transcription_data)
+            
+        except Exception as e:
+            logger.error(f"❌ Generic video processing failed: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'video_url': video_url,
+                'company_name': company_name,
+                'qudemo_id': qudemo_id
             }
     
     async def _process_full_transcription(self, video_url: str, company_name: str, qudemo_id: str, transcription_data: Dict) -> Dict:

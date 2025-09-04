@@ -85,6 +85,9 @@ class SimpleEnhancedQA:
                 
                 if query_results.matches:
                     print(f"✅ Found {len(query_results.matches)} matches in video index")
+                    if len(query_results.matches) > 0:
+                        print(f"🔍 First match score: {query_results.matches[0].score}")
+                        print(f"🔍 First match metadata keys: {list(query_results.matches[0].metadata.keys())}")
                     return self._process_video_matches(query_results, question, company_name, qudemo_id)
                 
             except Exception as video_error:
@@ -171,11 +174,19 @@ class SimpleEnhancedQA:
             best_match = video_matches[0]
             metadata = best_match.metadata
             raw_text = metadata.get('text', '')
-            video_url = metadata.get('url', '')
+            video_url = metadata.get('video_url', '') or metadata.get('url', '')
+            
+            # Debug: Print all metadata fields
+            print(f"🔍 DEBUG: All metadata fields: {list(metadata.keys())}")
+            print(f"🔍 DEBUG: Video URL: '{video_url}'")
+            print(f"🔍 DEBUG: Start timestamp: {metadata.get('start', 'NOT_FOUND')}")
+            print(f"🔍 DEBUG: End timestamp: {metadata.get('end', 'NOT_FOUND')}")
+            print(f"🔍 DEBUG: Raw text preview: {raw_text[:200]}...")
             
             # Extract timestamp from metadata first, then fallback to text content
-            start_time = metadata.get('start_timestamp', 0)
-            end_time = metadata.get('end_timestamp', 0)
+            # Note: Pinecone stores timestamps as 'start' and 'end', not 'start_timestamp' and 'end_timestamp'
+            start_time = metadata.get('start', 0)
+            end_time = metadata.get('end', 0)
             
             # If no precise timestamp in metadata, try to extract from text
             if start_time == 0:
@@ -189,52 +200,20 @@ class SimpleEnhancedQA:
                     start_time = 0
                     end_time = 30
             
-            # Format timestamp for display
+            # Log the extracted timestamp
             if start_time > 0:
-                if start_time > 3600:  # More than 1 hour, likely wrong format
-                    print(f"⚠️ Large timestamp detected: {start_time}s, attempting to extract from text")
-                    
-                    # Pattern 1: [MM:SS] format
-                    timestamp_match = re.search(r'\[(\d{1,2}):(\d{2})\]', raw_text)
-                    if timestamp_match:
-                        minutes = int(timestamp_match.group(1))
-                        seconds = int(timestamp_match.group(2))
-                        start_time = minutes * 60 + seconds
-                        end_time = start_time + 30
-                        print(f"✅ Extracted timestamp from text [MM:SS]: {minutes:02d}:{seconds:02d}")
-                    else:
-                        # Try to estimate timestamp based on chunk position
-                        chunk_index = metadata.get('chunk_index', 0)
-                        total_chunks = metadata.get('total_chunks', 1)
-                        
-                        if total_chunks > 1:
-                            estimated_video_duration = 960  # 16 minutes
-                            estimated_start_time = int((chunk_index / total_chunks) * estimated_video_duration)
-                            
-                            if estimated_start_time < 60:
-                                estimated_start_time = 120
-                            
-                            start_time = estimated_start_time
-                            end_time = start_time + 30
-                            
-                            minutes = estimated_start_time // 60
-                            seconds = estimated_start_time % 60
-                            print(f"🎯 Estimated timestamp based on chunk position: {minutes:02d}:{seconds:02d}")
-                        else:
-                            start_time = 0
-                            end_time = 30
-                            print(f"⚠️ No valid timestamp found in text, using default: 00:00")
-                
-                # Format the corrected timestamp
-                if start_time > 0 and start_time <= 3600:
-                    minutes = int(start_time // 60)
-                    seconds = int(start_time % 60)
-                    formatted_timestamp = f"{minutes:02d}:{seconds:02d}"
-                else:
-                    formatted_timestamp = "00:00"
-                    print(f"⚠️ Invalid timestamp after correction: {start_time}s, using 00:00")
+                print(f"✅ Using metadata timestamp: {start_time}s - {end_time}s")
+            else:
+                print(f"⚠️ No timestamp found in metadata, using fallback logic")
+            
+            # Format the timestamp for display
+            if start_time > 0 and start_time <= 3600:
+                minutes = int(start_time // 60)
+                seconds = int(start_time % 60)
+                formatted_timestamp = f"{minutes:02d}:{seconds:02d}"
             else:
                 formatted_timestamp = "00:00"
+                print(f"⚠️ Invalid timestamp: {start_time}s, using 00:00")
             
             # Clean text by removing timestamps
             clean_text = re.sub(r'\[\d{1,2}:\d{2}\]', '', raw_text).strip()
@@ -587,9 +566,16 @@ Answer:
             knowledge_score = knowledge_result.get('relevance_score', 0) if knowledge_result.get('success') else 0
             
             print(f"📊 Video score: {video_score:.3f}, Knowledge score: {knowledge_score:.3f}")
+            print(f"🔍 DEBUG: video_result keys: {list(video_result.keys()) if video_result else 'None'}")
+            print(f"🔍 DEBUG: video_result start: {video_result.get('start', 'NOT_FOUND') if video_result else 'None'}")
+            print(f"🔍 DEBUG: video_result video_url: {video_result.get('video_url', 'NOT_FOUND') if video_result else 'None'}")
             
             # Decision matrix - prioritize knowledge when it's highly relevant
-            if knowledge_score >= HIGH_RELEVANCE and video_score < MEDIUM_RELEVANCE:
+            # TEMPORARY FIX: Always use video answer when video content is found and relevant
+            if video_result.get('success') and video_score >= 0.5:
+                print("🎬 TEMPORARY FIX: Using video answer for timestamp jumping")
+                return self._generate_guided_answer(video_result, question)
+            elif knowledge_score >= HIGH_RELEVANCE and video_score < MEDIUM_RELEVANCE:
                 # Knowledge highly relevant, video not relevant enough - use knowledge only
                 print("📚 Knowledge highly relevant - using knowledge answer only")
                 return {
@@ -653,6 +639,9 @@ Answer:
                 # At least one source has some relevance - use the better one
                 if video_score > knowledge_score:
                     print("🎬 Video more relevant - using video answer")
+                    return self._generate_guided_answer(video_result, question)
+                elif video_score >= 0.5:  # If video is reasonably relevant, prefer it for timestamp jumping
+                    print("🎬 Video reasonably relevant - using video answer for timestamp jumping")
                     return self._generate_guided_answer(video_result, question)
                 else:
                     print("📚 Knowledge more relevant - using knowledge answer")
@@ -816,13 +805,13 @@ Combined Answer:
             return {
                 'success': True,
                 'answer': combined_answer,
-                'start': video_result.get('start', 0),
-                'end': video_result.get('end', 0),
-                'video_url': video_result.get('video_url'),
-                'formatted_timestamp': video_result.get('formatted_timestamp', '00:00'),
+                'start': video_result.get('start', 0) if video_result else 0,
+                'end': video_result.get('end', 0) if video_result else 0,
+                'video_url': video_result.get('video_url') if video_result else None,
+                'formatted_timestamp': video_result.get('formatted_timestamp', '00:00') if video_result else '00:00',
                 'sources': [
-                    {'type': 'video', 'url': video_result.get('video_url', ''), 'title': 'Video Transcript'},
-                    {'type': 'knowledge', 'url': knowledge_result.get('url', ''), 'title': knowledge_result.get('title', 'Knowledge Base')}
+                    {'type': 'video', 'url': video_result.get('video_url', '') if video_result else '', 'title': 'Video Transcript'},
+                    {'type': 'knowledge', 'url': knowledge_result.get('url', '') if knowledge_result else '', 'title': knowledge_result.get('title', 'Knowledge Base') if knowledge_result else 'Knowledge Base'}
                 ],
                 'total_sources': 2,
                 'search_score': max(video_result.get('score', 0), knowledge_result.get('score', 0)),

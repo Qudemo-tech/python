@@ -22,12 +22,19 @@ class EnhancedVideoProcessor:
     
     def __init__(self):
         """Initialize enhanced video processor"""
-        try:
-            self.knowledge_integration = get_enhanced_knowledge_integration()
-            logger.info("✅ Enhanced Video Processor initialized")
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize Enhanced Video Processor: {e}")
-            raise
+        self.knowledge_integration = None
+        logger.info("✅ Enhanced Video Processor initialized")
+    
+    def _get_knowledge_integration(self):
+        """Get knowledge integration (lazy initialization)"""
+        if self.knowledge_integration is None:
+            try:
+                self.knowledge_integration = get_enhanced_knowledge_integration()
+                logger.info("✅ Enhanced Knowledge Integration loaded")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not load Enhanced Knowledge Integration: {e}")
+                # Don't raise error, just log warning
+        return self.knowledge_integration
     
     async def process_youtube_video(self, video_url: str, company_name: str, qudemo_id: str) -> Dict:
         """Process YouTube video with enhanced transcript extraction using Gemini"""

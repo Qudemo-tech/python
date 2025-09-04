@@ -1,32 +1,25 @@
-# Exported from Render on 2025-07-14T11:53:59Z
+# Production configuration for Render deployment
 services:
   - type: web
-    name: qudemo-python-api
+    name: qudemo-python-backend
     env: python
-    plan: free
+    plan: starter
     buildCommand: |
-      cd backend/pythonn
+      pip install --upgrade pip
       pip install -r requirements-python312.txt
-      playwright install chromium
-    startCommand: |
-      cd backend/pythonn
-      python main.py
+    startCommand: python start_production.py
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.0
+      - key: PYTHON_ENV
+        value: production
       - key: PORT
         value: 5001
-      - key: RENDER
-        value: true
+      - key: HOST
+        value: 0.0.0.0
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
     healthCheckPath: /health
     autoDeploy: true
-    scaling:
-      minInstances: 0
-      maxInstances: 1
-    resources:
-      cpu: 0.5
-      memory: 512MB
-    disk:
-      name: data
-      mountPath: /opt/render/project/src/backend/pythonn/uploads
-      sizeGB: 1

@@ -71,12 +71,16 @@ async def lifespan(app: FastAPI):
             return
         
         # Initialize Enhanced Video Processor
-        if initialize_enhanced_video_processor():
-            enhanced_video_processor = get_enhanced_video_processor()
-            logger.info("✅ Enhanced Video Processor initialized")
-        else:
-            logger.error("❌ Failed to initialize Enhanced Video Processor")
-            return
+        try:
+            if initialize_enhanced_video_processor():
+                enhanced_video_processor = get_enhanced_video_processor()
+                logger.info("✅ Enhanced Video Processor initialized")
+            else:
+                logger.warning("⚠️ Enhanced Video Processor initialization failed, will use direct processor")
+                enhanced_video_processor = None
+        except Exception as e:
+            logger.warning(f"⚠️ Enhanced Video Processor initialization failed: {e}, will use direct processor")
+            enhanced_video_processor = None
         
         # Initialize existing video processing system
         try:
@@ -282,17 +286,40 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                     logger.info(f"🎬 Detected video type: {video_type}")
                     
                     if video_type != 'unknown':
-                        # Process video using enhanced video processor
-                        if video_type == 'youtube':
-                            logger.info(f"🎥 Processing YouTube video: {video_url}")
-                            result = await enhanced_video_processor.process_youtube_video(
-                                video_url, company_name, qudemo_id
-                            )
-                        else:  # loom
-                            logger.info(f"🎥 Processing Loom video: {video_url}")
-                            result = await enhanced_video_processor.process_loom_video(
-                                video_url, company_name, qudemo_id
-                            )
+                        # Process video using enhanced video processor or fallback
+                        if enhanced_video_processor:
+                            # Use enhanced video processor
+                            if video_type == 'youtube':
+                                logger.info(f"🎥 Processing YouTube video: {video_url}")
+                                result = await enhanced_video_processor.process_youtube_video(
+                                    video_url, company_name, qudemo_id
+                                )
+                            else:  # loom
+                                logger.info(f"🎥 Processing Loom video: {video_url}")
+                                result = await enhanced_video_processor.process_loom_video(
+                                    video_url, company_name, qudemo_id
+                                )
+                        else:
+                            # Fallback to direct processor
+                            logger.info(f"🎥 Using direct processor for {video_type} video: {video_url}")
+                            from video_processing import process_video
+                            result = process_video(video_url, company_name, qudemo_id)
+                            
+                            # Convert result format to match enhanced processor
+                            if result and result.get('success'):
+                                result = {
+                                    'success': True,
+                                    'chunks_stored': result.get('result', {}).get('chunks_created', 0),
+                                    'video_type': video_type,
+                                    'company_name': company_name,
+                                    'qudemo_id': qudemo_id
+                                }
+                            else:
+                                result = {
+                                    'success': False,
+                                    'error': result.get('error', 'Unknown error') if result else 'No result returned',
+                                    'chunks_stored': 0
+                                }
                         
                         logger.info(f"📊 Video processing result: {result}")
                         

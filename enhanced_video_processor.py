@@ -84,32 +84,30 @@ class EnhancedVideoProcessor:
             }
     
     async def process_loom_video(self, video_url: str, company_name: str, qudemo_id: str) -> Dict:
-        """Process Loom video with enhanced transcript extraction using Gemini"""
+        """Process Loom video with Whisper transcription using loom_processor"""
         try:
             logger.info(f"🎥 Processing Loom video for {company_name} qudemo {qudemo_id}")
             
-            # Use the new Gemini Transcription Processor
-            from gemini_transcription import GeminiTranscriptionProcessor
+            # Use the Loom Video Processor with Whisper
+            from loom_processor import LoomVideoProcessor
             
             # Initialize the processor
-            gemini_api_key = os.getenv('GEMINI_API_KEY')
-            pinecone_api_key = os.getenv('PINECONE_API_KEY')
             openai_api_key = os.getenv('OPENAI_API_KEY')
+            pinecone_api_key = os.getenv('PINECONE_API_KEY')
             
-            if not all([gemini_api_key, pinecone_api_key, openai_api_key]):
-                raise Exception("Missing required API keys: GEMINI_API_KEY, PINECONE_API_KEY, OPENAI_API_KEY")
+            if not all([openai_api_key, pinecone_api_key]):
+                raise Exception("Missing required API keys: OPENAI_API_KEY, PINECONE_API_KEY")
             
-            processor = GeminiTranscriptionProcessor(
-                gemini_api_key=gemini_api_key,
-                pinecone_api_key=pinecone_api_key,
-                openai_api_key=openai_api_key
+            processor = LoomVideoProcessor(
+                openai_api_key=openai_api_key,
+                pinecone_api_key=pinecone_api_key
             )
             
             # Process the video with qudemo_id for proper namespace
-            result = await processor.process_video_with_qudemo(video_url, company_name, qudemo_id)
+            result = processor.process_video(video_url, company_name, qudemo_id)
             
             if result and result.get('success'):
-                logger.info(f"✅ Successfully processed Loom video using Gemini")
+                logger.info(f"✅ Successfully processed Loom video using Whisper")
                 return {
                     'success': True,
                     'chunks_stored': result.get('chunks_created', 0),

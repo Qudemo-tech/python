@@ -1152,7 +1152,7 @@ The video provides practical examples and step-by-step guidance for implementing
         Production-ready video processing pipeline with intelligent fallback strategies
         
         Args:
-            video_url: YouTube video URL
+            video_url: YouTube or Loom video URL
             company_name: Company name for organization
             qudemo_id: Qudemo ID for proper namespace isolation
             
@@ -1163,27 +1163,16 @@ The video provides practical examples and step-by-step guidance for implementing
             logger.info(f"🎯 Starting video processing pipeline for: {video_url}")
             logger.info(f"🏢 Company: {company_name}, QuDemo ID: {qudemo_id}")
             
-            # Check if Gemini API is overloaded before attempting
-            if self._is_gemini_overloaded():
-                logger.warning("⚠️ Gemini API appears overloaded - skipping to intelligent fallback")
-                return await self._process_long_video_fallback(video_url, company_name, qudemo_id)
-            
-            # Step 1: Attempt full transcription with Gemini API (primary method)
-            logger.info("🎬 Step 1: Attempting full video transcription with Gemini API...")
-            transcription_data = self.extract_transcription_with_gemini(video_url)
-            
-            if transcription_data:
-                logger.info("✅ Full transcription successful - processing with complete content")
-                return await self._process_full_transcription(video_url, company_name, qudemo_id, transcription_data)
-            
-            # Step 2: If full transcription fails, check if this is a known problematic video
-            if self._is_likely_long_video(video_url):
-                logger.info("🎬 Step 2: Known problematic video detected - using hybrid processing approach")
-                return await self._process_hybrid_long_video(video_url, company_name, qudemo_id)
-            
-            # Step 3: Final fallback - intelligent content generation
-            logger.warning("⚠️ Step 3: All transcription methods failed - using intelligent fallback")
-            return await self._process_long_video_fallback(video_url, company_name, qudemo_id)
+            # Check video type and route accordingly
+            if 'loom.com' in video_url:
+                logger.info("🎬 Detected Loom video - using Loom-specific processing")
+                return await self._process_loom_video(video_url, company_name, qudemo_id)
+            elif 'youtube.com' in video_url or 'youtu.be' in video_url:
+                logger.info("🎬 Detected YouTube video - using YouTube processing pipeline")
+                return await self._process_youtube_video(video_url, company_name, qudemo_id)
+            else:
+                logger.warning("⚠️ Unknown video type - attempting generic processing")
+                return await self._process_generic_video(video_url, company_name, qudemo_id)
             
         except Exception as e:
             logger.error(f"❌ Video processing failed: {e}")

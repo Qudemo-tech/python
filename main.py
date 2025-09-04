@@ -269,6 +269,8 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
             
             for video_url in request.video_urls:
                 try:
+                    logger.info(f"🔍 Processing video URL: {video_url}")
+                    
                     # Determine video type
                     if 'youtube.com' in video_url or 'youtu.be' in video_url:
                         video_type = 'youtube'
@@ -277,16 +279,22 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                     else:
                         video_type = 'unknown'
                     
+                    logger.info(f"🎬 Detected video type: {video_type}")
+                    
                     if video_type != 'unknown':
                         # Process video using enhanced video processor
                         if video_type == 'youtube':
+                            logger.info(f"🎥 Processing YouTube video: {video_url}")
                             result = await enhanced_video_processor.process_youtube_video(
                                 video_url, company_name, qudemo_id
                             )
                         else:  # loom
+                            logger.info(f"🎥 Processing Loom video: {video_url}")
                             result = await enhanced_video_processor.process_loom_video(
                                 video_url, company_name, qudemo_id
                             )
+                        
+                        logger.info(f"📊 Video processing result: {result}")
                         
                         if result['success']:
                             total_chunks += result['chunks_stored']

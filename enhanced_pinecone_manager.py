@@ -90,6 +90,10 @@ class EnhancedPineconeManager:
         # Initialize OpenAI client for embeddings
         self.openai_client = OpenAI(api_key=self.openai_api_key)
         
+        # Rate limiting for OpenAI API
+        self.last_embedding_time = 0
+        self.min_embedding_interval = 0.1  # 100ms between embedding requests
+        
         # Performance monitoring
         self.performance_metrics = {
             'query_times': [],
@@ -171,27 +175,64 @@ class EnhancedPineconeManager:
             return 'knowledge'
     
     async def generate_embedding(self, text: str, model: str = 'text-embedding-3-large') -> List[float]:
-        """Generate embedding with specified model"""
-        try:
-            start_time = time.time()
-            
-            response = await asyncio.to_thread(
-                self.openai_client.embeddings.create,
-                model=model,
-                input=text
-            )
-            
-            embedding = response.data[0].embedding
-            embedding_time = time.time() - start_time
-            
-            # Track performance
-            self.performance_metrics['query_times'].append(embedding_time)
-            
-            return embedding
-            
-        except Exception as e:
-            logger.error(f"❌ Error generating embedding: {e}")
-            raise
+        """Generate embedding with specified model and robust retry logic"""
+        max_retries = 3
+        base_delay = 2
+        
+        # Fallback models in case primary model fails
+        fallback_models = ['text-embedding-3-small', 'text-embedding-ada-002']
+        models_to_try = [model] + fallback_models
+        
+        # Rate limiting to prevent API overload
+        current_time = time.time()
+        time_since_last = current_time - self.last_embedding_time
+        if time_since_last < self.min_embedding_interval:
+            sleep_time = self.min_embedding_interval - time_since_last
+            logger.debug(f"⏳ Rate limiting: waiting {sleep_time:.2f}s")
+            await asyncio.sleep(sleep_time)
+        
+        for model_to_try in models_to_try:
+            for attempt in range(max_retries):
+                try:
+                    start_time = time.time()
+                    
+                    # Use direct synchronous call instead of asyncio.to_thread to avoid connection issues
+                    response = self.openai_client.embeddings.create(
+                        model=model_to_try,
+                        input=text,
+                        timeout=30  # 30 second timeout
+                    )
+                    
+                    embedding = response.data[0].embedding
+                    embedding_time = time.time() - start_time
+                    
+                    # Update rate limiting timestamp
+                    self.last_embedding_time = time.time()
+                    
+                    # Track performance
+                    self.performance_metrics['query_times'].append(embedding_time)
+                    
+                    if model_to_try != model:
+                        logger.info(f"✅ Embedding generated with fallback model {model_to_try}")
+                    else:
+                        logger.debug(f"✅ Embedding generated successfully with {model_to_try}")
+                    return embedding
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Embedding attempt {attempt + 1} with {model_to_try} failed: {e}")
+                    
+                    if attempt < max_retries - 1:
+                        # Exponential backoff with jitter
+                        delay = base_delay * (2 ** attempt) + (hash(str(attempt)) % 2)
+                        logger.info(f"⏳ Retrying {model_to_try} in {delay}s...")
+                        await asyncio.sleep(delay)
+                    else:
+                        logger.warning(f"⚠️ Model {model_to_try} failed after {max_retries} attempts, trying next model...")
+                        break  # Try next model
+        
+        # If all models failed
+        logger.error(f"❌ All embedding models failed: {models_to_try}")
+        raise Exception(f"Failed to generate embedding with all models: {models_to_try}")
     
     async def store_semantic_chunks(self, chunks: List[Dict], company_name: str, qudemo_id: str, 
                             content_type: str = 'web_scraping') -> Dict:
@@ -210,9 +251,14 @@ class EnhancedPineconeManager:
             # Prepare vectors for batch upsert
             vectors_to_upsert = []
             
+            successful_chunks = 0
+            failed_chunks = 0
+            
             for i, chunk in enumerate(chunks):
                 try:
-                    # Generate embedding
+                    logger.info(f"🔄 Processing chunk {i+1}/{len(chunks)}: {chunk.get('title', 'Untitled')[:50]}...")
+                    
+                    # Generate embedding with retry logic
                     embedding = await self.generate_embedding(chunk['text'])
                     
                     # Prepare metadata with Standard Plan optimizations
@@ -253,10 +299,15 @@ class EnhancedPineconeManager:
                     }
                     
                     vectors_to_upsert.append(vector_record)
+                    successful_chunks += 1
+                    logger.info(f"✅ Chunk {i+1} processed successfully")
                     
                 except Exception as e:
-                    logger.error(f"❌ Error processing chunk {i}: {e}")
+                    failed_chunks += 1
+                    logger.error(f"❌ Error processing chunk {i+1}: {e}")
                     continue
+            
+            logger.info(f"📊 Chunk processing summary: {successful_chunks} successful, {failed_chunks} failed")
             
             if vectors_to_upsert:
                 # Batch upsert to Pinecone

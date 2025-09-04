@@ -426,6 +426,43 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
         
         logger.info(f"🎉 All processing completed! Total chunks stored: {total_chunks}")
         
+        # Notify Node.js backend that processing is complete
+        try:
+            logger.info("🔄 Notifying Node.js backend of processing completion...")
+            
+            # Get Node.js backend URL from environment
+            node_backend_url = os.getenv('NODE_BACKEND_URL', 'http://localhost:3001')
+            
+            # Prepare notification data
+            notification_data = {
+                'qudemo_id': qudemo_id,
+                'company_name': company_name,
+                'processing_complete': True,
+                'total_chunks_stored': total_chunks,
+                'videos': request.video_urls if request.video_urls else [],
+                'websites': [request.website_url] if request.website_url else [],
+                'videos_processed': len(request.video_urls) if request.video_urls else 0,
+                'website_processed': 1 if request.website_url else 0,
+                'processing_order': processing_order
+            }
+            
+            # Send notification to Node.js backend
+            import requests
+            notification_response = requests.post(
+                f"{node_backend_url}/api/qudemos/{qudemo_id}/processing-complete",
+                json=notification_data,
+                timeout=30
+            )
+            
+            if notification_response.status_code == 200:
+                logger.info("✅ Successfully notified Node.js backend of processing completion")
+            else:
+                logger.warning(f"⚠️ Node.js backend notification failed: {notification_response.status_code}")
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to notify Node.js backend: {e}")
+            # Don't fail the entire request if notification fails
+        
         return {
             'success': True,
             'message': f"Successfully processed qudemo content. Total chunks stored: {total_chunks}",
@@ -433,7 +470,12 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
             'company_name': company_name,
             'qudemo_id': qudemo_id,
             'processing_order': processing_order,
-            'optimization_note': "Videos processed first for faster results, website processed second"
+            'optimization_note': "Videos processed first for faster results, website processed second",
+            # Add the structure that Node.js backend expects
+            'videos': request.video_urls if request.video_urls else [],
+            'websites': [request.website_url] if request.website_url else [],
+            'videos_processed': len(request.video_urls) if request.video_urls else 0,
+            'website_processed': 1 if request.website_url else 0
         }
             
     except Exception as e:

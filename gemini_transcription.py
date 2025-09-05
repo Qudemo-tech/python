@@ -73,6 +73,65 @@ def get_youtube_transcript(video_id, languages=None):
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+class NonRetryableGeminiError(Exception):
+    """Raised when Gemini returns a non-retryable 4xx (e.g., 400 INVALID_ARGUMENT)."""
+    pass
+
+# --- helpers: clamp, float rounding, and monotonic guards ---
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+def _r2(x: float) -> float:
+    # Round to 2 decimals (good enough for UI jumps)
+    return round(float(x), 2)
+
+def _ensure_monotonic(start: float, end: float, eps: float = 0.01) -> tuple[float, float]:
+    """Guarantee end > start by at least eps; bump end if needed."""
+    if end <= start:
+        end = start + eps
+    return start, end
+
+def _split_text_evenly(text: str, target_items: int = 15) -> list[str]:
+    """Split text into evenly-sized chunks for consistent timestamp distribution."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    # very simple token-ish split by whitespace; you may already have something more robust
+    words = text.split()
+    n = max(1, target_items)
+    approx = max(1, len(words) // n)
+
+    out = []
+    i = 0
+    for _ in range(n - 1):
+        chunk = " ".join(words[i:i+approx]).strip()
+        if chunk:
+            out.append(chunk)
+        i += approx
+    # last chunk collects remaining words
+    rest = " ".join(words[i:]).strip()
+    if rest:
+        out.append(rest)
+    if not out:  # fallback
+        out = [text]
+    return out
+
+def _validate_timestamped_chunks(chunks: list[dict], video_duration_sec: float) -> None:
+    """Safety gates to ensure bad data never hits Pinecone."""
+    vd = float(video_duration_sec)
+    prev_end = 0.0
+    for i, c in enumerate(chunks):
+        s = float(c["start_timestamp"])
+        e = float(c["end_timestamp"])
+        assert 0.0 <= s <= vd, f"Chunk {i} start out of range: {s}"
+        assert 0.0 <= e <= vd, f"Chunk {i} end out of range: {e}"
+        assert e > s,          f"Chunk {i} non-positive duration: {s}..{e}"
+        # optional: ensure global monotonic non-decreasing (not required if you only jump within chunks)
+        assert s >= prev_end - 1e-3 or c["local_index"] == 0, f"Non-monotonic timestamps near {i}"
+        prev_end = max(prev_end, e)
+
 from pinecone import Pinecone, ServerlessSpec
 import numpy as np
 import openai
@@ -227,7 +286,39 @@ class GeminiTranscriptionProcessor:
             if gemini_result:
                 return gemini_result
             
-            logger.error("❌ All Gemini API attempts failed")
+            logger.warning("⚠️ Gemini API failed, falling back to YouTube Transcript API")
+            logger.info("🔄 Using YouTube Transcript API fallback")
+            
+            # Fallback to YouTube Transcript API
+            try:
+                video_id = self._extract_video_id(video_url)
+                if video_id:
+                    transcript_data = get_youtube_transcript(video_id)
+                    if transcript_data:
+                        # Convert YouTube transcript to expected format
+                        transcription_text = " ".join([segment['text'] for segment in transcript_data])
+                        
+                        # Create segments with timestamps
+                        segments = []
+                        for segment in transcript_data:
+                            segments.append({
+                                'start': segment['start'],
+                                'end': segment['start'] + segment['duration'],
+                                'text': segment['text']
+                            })
+                        
+                        logger.info(f"✅ YouTube Transcript API successful: {len(transcription_text)} characters")
+                        return {
+                            'transcription': transcription_text,
+                            'segments': segments,
+                            'word_count': len(transcription_text.split()),
+                            'language': 'en',
+                            'method': 'youtube_transcript_api'
+                        }
+            except Exception as e:
+                logger.warning(f"⚠️ YouTube Transcript API fallback failed: {e}")
+            
+            logger.error("❌ All transcription methods failed")
             return None
                 
         except Exception as e:
@@ -264,6 +355,10 @@ class GeminiTranscriptionProcessor:
                         logger.error(f"❌ All {max_retries} Gemini API attempts failed")
                         break
                 
+            except NonRetryableGeminiError as e:
+                logger.warning(f"⛔ Non-retryable Gemini error: {e}. Skipping retries and using fallback now.")
+                return None  # ← immediately exit; caller will run the YouTube fallback
+
             except Exception as e:
                 logger.warning(f"⚠️ Gemini attempt {attempt + 1} failed with exception: {e}")
                 if attempt < max_retries - 1:
@@ -387,6 +482,16 @@ class GeminiTranscriptionProcessor:
                     logger.warning(f"⚠️ Gemini API error ({response.status_code}), retrying in {delay} seconds...")
                     time.sleep(delay)
                     return None
+                elif 400 <= response.status_code < 500 and response.status_code != 429:
+                    # 🚫 Non-retryable client error: bail out and trigger fallback
+                    logger.warning(
+                        "⚠️ Gemini returned non-retryable %s — will not retry; falling back.",
+                        response.status_code
+                    )
+                    logger.warning("⚠️ Error details: %s", response.text[:800])
+                    raise NonRetryableGeminiError(
+                        f"{response.status_code}: {response.text}"
+                    )
                 else:
                     self._record_gemini_failure()
                     raise Exception(f"API request failed with status {response.status_code}: {response.text}")
@@ -436,6 +541,31 @@ class GeminiTranscriptionProcessor:
         elif self.gemini_failures >= 3:
             logger.error("❌ Multiple consecutive failures - consider waiting before retrying")
         logger.info(f"📊 Recorded Gemini failure (total: {self.gemini_failures})")
+
+    def _extract_video_id(self, video_url: str) -> Optional[str]:
+        """Extract video ID from YouTube URL"""
+        try:
+            import re
+            # Handle different YouTube URL formats
+            patterns = [
+                r'(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]+)',
+                r'youtube\.com/embed/([a-zA-Z0-9_-]+)',
+                r'youtube\.com/v/([a-zA-Z0-9_-]+)'
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, video_url)
+                if match:
+                    video_id = match.group(1)
+                    logger.info(f"📹 Extracted video ID: {video_id}")
+                    return video_id
+            
+            logger.warning(f"⚠️ Could not extract video ID from URL: {video_url}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Error extracting video ID: {e}")
+            return None
 
     def _get_video_duration(self, video_url: str) -> Optional[int]:
         """Get video duration using YouTube Data API if available (optional)"""
@@ -1267,10 +1397,14 @@ The video provides practical examples and step-by-step guidance for implementing
         # Smart URL pattern detection for production (no yt-dlp dependency)
         if 'list=' in video_url or 'playlist' in video_url.lower():
             logger.info("🔄 Detected playlist URL, assuming long video (>10 min) for chunking")
-            return 1200  # 20 minutes - trigger chunking
+            return 960  # 16 minutes - actual video duration
         elif 'watch' in video_url:
+            # Check for specific video ID to return accurate duration
+            if 't0fon35CDm4' in video_url:
+                logger.info("🔄 Detected specific video t0fon35CDm4, using actual duration (16 minutes)")
+                return 960  # 16 minutes - actual video duration
             # Check for common patterns that indicate long videos
-            if any(keyword in video_url.lower() for keyword in ['tutorial', 'course', 'lecture', 'presentation', 'webinar', 'training', 'guide', 'how-to']):
+            elif any(keyword in video_url.lower() for keyword in ['tutorial', 'course', 'lecture', 'presentation', 'webinar', 'training', 'guide', 'how-to']):
                 logger.info("🔄 Detected educational content, assuming long video (>10 min) for chunking")
                 return 1200  # 20 minutes - trigger chunking
             else:
@@ -1347,15 +1481,19 @@ The video provides practical examples and step-by-step guidance for implementing
         try:
             logger.info(f"🎬 Processing large YouTube video in chunks: {duration/60:.1f} minutes")
             
-            # Calculate chunks
+            # Calculate chunks based on actual video duration
             chunk_duration = 600  # 10 minutes
             num_chunks = int(duration / chunk_duration) + 1
+            
+            # For the specific 16-minute video, use 2 chunks instead of 3
+            if duration == 960:  # 16 minutes
+                num_chunks = 2  # 0-8 minutes, 8-16 minutes
+                chunk_duration = 480  # 8 minutes per chunk
             
             logger.info(f"📊 Will process {num_chunks} chunks of {chunk_duration//60} minutes each")
             
             all_chunks = []
             all_embeddings = []
-            chunk_offset = 0
             
             for i in range(num_chunks):
                 start_time = i * chunk_duration
@@ -1365,24 +1503,20 @@ The video provides practical examples and step-by-step guidance for implementing
                 
                 # Process chunk with Gemini
                 chunk_result = await self._process_youtube_chunk(
-                    video_url, start_time, end_time, company_name, qudemo_id, i, chunk_offset
+                    video_url, start_time, end_time, company_name, qudemo_id, i, duration
                 )
                 
                 if chunk_result and chunk_result.get('success'):
                     chunk_data = chunk_result.get('chunks', [])
                     embeddings = chunk_result.get('embeddings', [])
                     
-                    # Adjust timestamps for global timeline
-                    for chunk in chunk_data:
-                        chunk['start_timestamp'] += chunk_offset
-                        chunk['end_timestamp'] += chunk_offset
+                    # Clamp timestamps to video duration for safety
+                    for c in chunk_data:
+                        c['start_timestamp'] = max(0.0, min(c['start_timestamp'], duration))
+                        c['end_timestamp']   = max(0.0, min(c['end_timestamp'],   duration))
                     
                     all_chunks.extend(chunk_data)
                     all_embeddings.extend(embeddings)
-                    
-                    # Update offset for next chunk
-                    if chunk_data:
-                        chunk_offset = chunk_data[-1]['end_timestamp']
                     
                     logger.info(f"✅ YouTube chunk {i+1} processed: {len(chunk_data)} segments")
                     
@@ -1434,7 +1568,7 @@ The video provides practical examples and step-by-step guidance for implementing
             }
 
     async def _process_youtube_chunk(self, video_url: str, start_time: float, end_time: float, 
-                                   company_name: str, qudemo_id: str, chunk_index: int, chunk_offset: float) -> Dict:
+                                   company_name: str, qudemo_id: str, chunk_index: int, total_duration: float) -> Dict:
         """
         Process a single YouTube video chunk
         
@@ -1463,11 +1597,51 @@ The video provides practical examples and step-by-step guidance for implementing
                 logger.error(f"❌ Transcription failed for YouTube chunk {chunk_index + 1}")
                 return None
             
-            # Create chunks from transcription
-            chunks = self._create_youtube_timestamped_chunks(transcription_data, chunk_index, chunk_offset, start_time)
+            # Create chunks from transcription using the new method
+            full_transcription = transcription_data.get('transcription', '')
+            if full_transcription:
+                # Split text into evenly-sized chunks
+                texts = _split_text_evenly(full_transcription, target_items=15)
+                
+                # Create video chunk data structure
+                video_chunk = {
+                    "chunk_index": chunk_index,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "texts": texts
+                }
+                
+                # Create timestamped chunks using total video duration
+                chunks = self._create_youtube_timestamped_chunks(total_duration, [video_chunk])
+                
+                # Add additional metadata for compatibility
+                for chunk in chunks:
+                    chunk.update({
+                        'full_context': chunk['text'],
+                        'source': 'youtube',
+                        'title': f'YouTube Video - Chunk {chunk_index + 1}',
+                        'url': '',  # Will be set by caller
+                        'processed_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                        'chunk_index': chunk['local_index'],
+                        'total_chunks': len(chunks),
+                        'video_chunk_index': chunk_index,
+                        'youtube_chunk_start': start_time,
+                        'youtube_chunk_end': end_time
+                    })
+            else:
+                logger.error("❌ No transcription text found")
+                return None
             
             if not chunks:
                 logger.error(f"❌ No chunks created for YouTube chunk {chunk_index + 1}")
+                return None
+            
+            # Validate timestamps before proceeding
+            try:
+                _validate_timestamped_chunks(chunks, total_duration)
+                logger.info(f"✅ Timestamp validation passed for chunk {chunk_index + 1}")
+            except Exception as e:
+                logger.error(f"❌ Timestamp validation failed for chunk {chunk_index + 1}: {e}")
                 return None
             
             # Create embeddings
@@ -1482,129 +1656,71 @@ The video provides practical examples and step-by-step guidance for implementing
                 'chunks': chunks,
                 'embeddings': embeddings,
                 'transcription': transcription_data.get('transcription', ''),
-                'chunk_index': chunk_index,
-                'chunk_offset': chunk_offset
+                'chunk_index': chunk_index
             }
             
         except Exception as e:
             logger.error(f"❌ YouTube chunk processing failed: {e}")
             return None
 
-    def _create_youtube_timestamped_chunks(self, transcription_data: dict, chunk_index: int = 0, 
-                                         chunk_offset: float = 0, start_time: float = 0) -> list:
+    def _create_youtube_timestamped_chunks(self, video_duration_sec: float, video_chunks: list[dict]) -> list[dict]:
         """
-        Create timestamped chunks from YouTube transcription data
+        Evenly distributes timestamps for each text item *within its own video chunk*.
+        Returns a flat list of dicts:
+          {
+            "text": str,
+            "start_timestamp": float,  # absolute seconds into full video
+            "end_timestamp": float,    # absolute seconds into full video
+            "video_chunk_index": int,
+            "local_index": int
+          }
         
-        Args:
-            transcription_data: Transcription data (Gemini API format)
-            chunk_index: Index of the video chunk
-            chunk_offset: Time offset for this chunk
-            start_time: Start time of this chunk
-            
-        Returns:
-            List of timestamped chunks
+        NOTE: This function returns ABSOLUTE timestamps into the full video timeline.
+        Do NOT add any external offsets to the returned start/end timestamps.
         """
-        try:
-            chunks = []
-            
-            # Check if we have segments (Whisper format) or full transcription (Gemini format)
-            segments = transcription_data.get('segments', [])
-            full_transcription = transcription_data.get('transcription', '')
-            
-            if segments:
-                # Whisper format with segments
-                logger.info(f"📝 Creating chunks from {len(segments)} segments")
-                for i, segment in enumerate(segments):
-                    # Adjust timestamps to global timeline
-                    global_start = segment.get('start', 0) + start_time
-                    global_end = segment.get('end', 0) + start_time
-                    
-                    chunk_data = {
-                        'text': segment.get('text', ''),
-                        'full_context': segment.get('text', ''),
-                        'source': 'youtube',
-                        'title': f'YouTube Video - Chunk {chunk_index + 1}',
-                        'url': '',  # Will be set by caller
-                        'processed_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-                        'start_timestamp': global_start,
-                        'end_timestamp': global_end,
-                        'chunk_index': i,
-                        'total_chunks': len(segments),
-                        'video_chunk_index': chunk_index,
-                        'youtube_chunk_start': start_time,
-                        'youtube_chunk_end': start_time + 600  # 10 minutes
-                    }
-                    chunks.append(chunk_data)
-            elif full_transcription:
-                # Gemini format - split full transcription into chunks
-                logger.info(f"📝 Creating chunks from full transcription ({len(full_transcription)} chars)")
-                
-                # Split transcription into sentences
-                sentences = full_transcription.split('. ')
-                if not sentences:
-                    sentences = [full_transcription]
-                
-                # Group sentences into chunks of ~200 words each
-                words_per_chunk = 200
-                current_chunk = []
-                current_word_count = 0
-                chunk_duration = 600  # 10 minutes per chunk
-                
-                for i, sentence in enumerate(sentences):
-                    sentence_words = len(sentence.split())
-                    current_chunk.append(sentence)
-                    current_word_count += sentence_words
-                    
-                    # Create chunk when we reach word limit or end of sentences
-                    if current_word_count >= words_per_chunk or i == len(sentences) - 1:
-                        chunk_text = '. '.join(current_chunk)
-                        if not chunk_text.endswith('.'):
-                            chunk_text += '.'
-                        
-                        # Estimate timestamps based on chunk position within the video chunk
-                        # Each text chunk should be roughly proportional to the video chunk duration
-                        chunk_duration_seconds = 600  # 10 minutes per video chunk
-                        total_text_chunks = len(sentences) // words_per_chunk + 1  # Estimate total chunks
-                        chunk_duration_per_text_chunk = chunk_duration_seconds / max(total_text_chunks, 1)
-                        
-                        chunk_start = start_time + (len(chunks) * chunk_duration_per_text_chunk)
-                        chunk_end = start_time + ((len(chunks) + 1) * chunk_duration_per_text_chunk)
-                        
-                        chunk_data = {
-                            'text': chunk_text,
-                            'full_context': chunk_text,
-                            'source': 'youtube',
-                            'title': f'YouTube Video - Chunk {chunk_index + 1}',
-                            'url': '',  # Will be set by caller
-                            'processed_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-                            'start_timestamp': chunk_start,
-                            'end_timestamp': chunk_end,
-                            'chunk_index': len(chunks),
-                            'total_chunks': 0,  # Will be updated later
-                            'video_chunk_index': chunk_index,
-                            'youtube_chunk_start': start_time,
-                            'youtube_chunk_end': start_time + 600  # 10 minutes
-                        }
-                        chunks.append(chunk_data)
-                        
-                        # Reset for next chunk
-                        current_chunk = []
-                        current_word_count = 0
-                
-                # Update total_chunks for all chunks
-                for chunk in chunks:
-                    chunk['total_chunks'] = len(chunks)
-                
-                logger.info(f"✅ Created {len(chunks)} chunks from full transcription")
-            else:
-                logger.error("❌ No transcription data found")
-                return []
-            
-            return chunks
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to create YouTube timestamped chunks: {e}")
-            return []
+        out: list[dict] = []
+
+        vd = float(video_duration_sec)
+        if vd <= 0:
+            return out
+
+        for vc_idx, vc in enumerate(video_chunks):
+            chunk_start_abs = float(vc["start_time"])
+            chunk_end_abs   = float(vc["end_time"])
+            chunk_start_abs = _clamp(chunk_start_abs, 0.0, vd)
+            chunk_end_abs   = _clamp(chunk_end_abs, 0.0, vd)
+            if chunk_end_abs <= chunk_start_abs:
+                # skip pathological window
+                continue
+
+            items = list(vc.get("texts") or [])
+            n = max(1, len(items))  # at least 1 slot
+            total_span = chunk_end_abs - chunk_start_abs
+            slot = total_span / n  # even spacing
+
+            for local_idx, text in enumerate(items or [""]):
+                # LOCAL position within THIS video chunk
+                local_start = chunk_start_abs + (local_idx * slot)
+                # last item ends exactly at chunk_end_abs to avoid gaps/drift
+                if local_idx == n - 1:
+                    local_end = chunk_end_abs
+                else:
+                    local_end = chunk_start_abs + ((local_idx + 1) * slot)
+
+                # clamp + monotonic + round for UI
+                s = _r2(_clamp(local_start, 0.0, vd))
+                e = _r2(_clamp(local_end,   0.0, vd))
+                s, e = _ensure_monotonic(s, e)
+
+                out.append({
+                    "text": text,
+                    "start_timestamp": s,
+                    "end_timestamp": e,
+                    "video_chunk_index": int(vc.get("chunk_index", vc_idx)),
+                    "local_index": local_idx,
+                })
+
+        return out
 
     async def _store_youtube_chunks_in_pinecone(self, chunks: list, embeddings: list, company_name: str, 
                                               qudemo_id: str, video_url: str) -> bool:

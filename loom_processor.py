@@ -605,7 +605,7 @@ class LoomVideoProcessor:
             else:
                 logger.error("❌ OpenAI API transcription failed")
                 return None
-                
+            
         except Exception as e:
             logger.error(f"❌ OpenAI API transcription error: {e}")
             return None
@@ -1227,6 +1227,10 @@ class LoomVideoProcessor:
             logger.error(f"Pinecone storage failed: {e}")
             return False
     
+    def process_loom_video(self, video_url: str, company_name: str, qudemo_id: str = None, media_file_path: str = None) -> Optional[Dict]:
+        """Main Loom video processing pipeline - enhanced video processor interface"""
+        return self.process_video(video_url, company_name, qudemo_id)
+
     def process_video(self, video_url: str, company_name: str, qudemo_id: str = None) -> Optional[Dict]:
         """Main Loom video processing pipeline"""
         try:

@@ -90,7 +90,7 @@ class EnhancedVideoProcessor:
                 'chunks_stored': 0
             }
     
-    async def process_loom_video(self, video_url: str, company_name: str, qudemo_id: str) -> Dict:
+    async def process_loom_video(self, video_url: str, company_name: str, qudemo_id: str, media_file_path: str = None) -> Dict:
         """Process Loom video with Whisper transcription using loom_processor"""
         try:
             logger.info(f"🎥 Processing Loom video for {company_name} qudemo {qudemo_id}")
@@ -111,19 +111,19 @@ class EnhancedVideoProcessor:
             )
             
             # Process the video with qudemo_id for proper namespace
-            result = processor.process_video(video_url, company_name, qudemo_id)
+            result = processor.process_loom_video(video_url, company_name, qudemo_id, media_file_path)
             
             if result and result.get('success'):
                 logger.info(f"✅ Successfully processed Loom video using Whisper")
                 return {
                     'success': True,
-                    'chunks_stored': result.get('chunks_created', 0),
+                    'chunks_stored': result.get('chunks_stored', 0),
                     'video_type': 'loom',
                     'company_name': company_name,
                     'qudemo_id': qudemo_id,
                     'video_title': result.get('title', ''),
                     'video_duration': result.get('duration', ''),
-                    'total_segments': result.get('chunks_created', 0),
+                    'total_segments': result.get('chunks_stored', 0),
                     'storage_details': result
                 }
             else:

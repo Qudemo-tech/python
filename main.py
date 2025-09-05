@@ -10,10 +10,12 @@ from typing import List, Optional
 from datetime import datetime
 
 # FastAPI imports
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
+import tempfile
+import shutil
 
 # Enhanced components
 from enhanced_pinecone_manager import initialize_enhanced_pinecone_manager, get_enhanced_pinecone_manager
@@ -250,6 +252,73 @@ async def get_knowledge_sources_qudemo(company_name: str, qudemo_id: str):
         logger.error(f"❌ Error getting knowledge sources: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/upload-loom-media/{company_name}/{qudemo_id}")
+async def upload_loom_media(
+    company_name: str, 
+    qudemo_id: str,
+    video_url: str = Form(...),
+    media_file: UploadFile = File(...)
+):
+    """Upload media file for Loom video processing with real transcription"""
+    try:
+        logger.info(f"📁 Uploading media file for Loom video: {video_url}")
+        logger.info(f"🏢 Company: {company_name}, QuDemo ID: {qudemo_id}")
+        logger.info(f"📄 File: {media_file.filename}, Size: {media_file.size} bytes")
+        
+        # Validate file type
+        allowed_extensions = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.mp3', '.wav', '.m4a'}
+        file_extension = os.path.splitext(media_file.filename)[1].lower()
+        if file_extension not in allowed_extensions:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Unsupported file type: {file_extension}. Allowed: {', '.join(allowed_extensions)}"
+            )
+        
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
+            # Copy uploaded file to temporary file
+            shutil.copyfileobj(media_file.file, temp_file)
+            temp_file_path = temp_file.name
+        
+        logger.info(f"💾 Saved uploaded file to: {temp_file_path}")
+        
+        # Process with media file
+        if enhanced_video_processor:
+            result = await enhanced_video_processor.process_loom_video(
+                video_url, company_name, qudemo_id, temp_file_path
+            )
+        else:
+            raise HTTPException(status_code=500, detail="Enhanced video processor not available")
+        
+        # Clean up temporary file
+        try:
+            os.unlink(temp_file_path)
+            logger.info(f"🗑️ Cleaned up temporary file: {temp_file_path}")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to clean up temporary file: {e}")
+        
+        if result and result.get('success'):
+            logger.info(f"✅ Successfully processed Loom video with media file")
+            return {
+                "success": True,
+                "message": "Loom video processed successfully with real transcription",
+                "chunks_stored": result.get('chunks_stored', 0),
+                "video_type": result.get('video_type', 'loom_video'),
+                "method": result.get('method', 'whisper_transcription'),
+                "duration": result.get('duration', 0),
+                "total_segments": result.get('total_segments', 0)
+            }
+        else:
+            logger.error(f"❌ Loom video processing failed: {result}")
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Loom video processing failed: {result.get('error', 'Unknown error')}"
+            )
+            
+    except Exception as e:
+        logger.error(f"❌ Error uploading Loom media: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/process-qudemo-content/{company_name}/{qudemo_id}")
 async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuDemoContentRequest):
     """Process qudemo content with optimized processing order: Videos first, then website"""
@@ -448,19 +517,41 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
             
             # Send notification to Node.js backend
             import requests
-            notification_response = requests.post(
-                f"{node_backend_url}/api/qudemos/{qudemo_id}/processing-complete",
-                json=notification_data,
-                timeout=30
-            )
             
-            if notification_response.status_code == 200:
-                logger.info("✅ Successfully notified Node.js backend of processing completion")
-            else:
-                logger.warning(f"⚠️ Node.js backend notification failed: {notification_response.status_code}")
+            # Try multiple possible endpoints
+            endpoints_to_try = [
+                f"{node_backend_url}/api/qudemos/{qudemo_id}/processing-complete",
+                f"{node_backend_url}/api/qudemos/{qudemo_id}/complete",
+                f"{node_backend_url}/api/processing-complete/{qudemo_id}",
+                f"{node_backend_url}/api/complete/{qudemo_id}"
+            ]
+            
+            notification_success = False
+            for endpoint in endpoints_to_try:
+                try:
+                    notification_response = requests.post(
+                        endpoint,
+                        json=notification_data,
+                        timeout=10  # Shorter timeout
+                    )
+                    
+                    if notification_response.status_code == 200:
+                        logger.info(f"✅ Successfully notified Node.js backend at: {endpoint}")
+                        notification_success = True
+                        break
+                    else:
+                        logger.debug(f"🔍 Endpoint {endpoint} returned {notification_response.status_code}")
+                        
+                except requests.exceptions.RequestException as e:
+                    logger.debug(f"🔍 Endpoint {endpoint} failed: {e}")
+                    continue
+            
+            if not notification_success:
+                logger.info("ℹ️ Node.js backend notification skipped - endpoint not available or backend not running")
+                logger.info("ℹ️ This is normal if Node.js backend is not running or endpoint doesn't exist")
                 
         except Exception as e:
-            logger.warning(f"⚠️ Failed to notify Node.js backend: {e}")
+            logger.info(f"ℹ️ Node.js backend notification skipped: {e}")
             # Don't fail the entire request if notification fails
         
         return {

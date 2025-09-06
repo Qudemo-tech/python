@@ -21,7 +21,11 @@ import shutil
 from enhanced_pinecone_manager import initialize_enhanced_pinecone_manager, get_enhanced_pinecone_manager
 from enhanced_knowledge_integration import initialize_enhanced_knowledge_integration, get_enhanced_knowledge_integration
 from enhanced_qa_simple import initialize_simple_enhanced_qa, get_simple_enhanced_qa
+from context_first_qa import initialize_context_first_qa, get_context_first_qa
 from final_gemini_scraper import FinalGeminiScraper
+
+# New universal scraper system
+from universal_help_scraper import UniversalScraperIntegration
 
 # Video processing imports
 from enhanced_video_processor import initialize_enhanced_video_processor, get_enhanced_video_processor
@@ -38,12 +42,14 @@ logger = logging.getLogger(__name__)
 enhanced_pinecone_manager = None
 enhanced_knowledge_integration = None
 enhanced_qa_system = None
+context_first_qa_system = None
 enhanced_video_processor = None
+universal_scraper_integration = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for FastAPI"""
-    global enhanced_pinecone_manager, enhanced_knowledge_integration, enhanced_qa_system, enhanced_video_processor
+    global enhanced_pinecone_manager, enhanced_knowledge_integration, enhanced_qa_system, context_first_qa_system, enhanced_video_processor, universal_scraper_integration
     
     try:
         logger.info("🚀 Starting Enhanced QuDemo Python Backend...")
@@ -72,6 +78,14 @@ async def lifespan(app: FastAPI):
             logger.error("❌ Failed to initialize Enhanced Q&A System")
             return
         
+        # Initialize Context-First Q&A System
+        if initialize_context_first_qa():
+            context_first_qa_system = get_context_first_qa()
+            logger.info("✅ Context-First Q&A System initialized")
+        else:
+            logger.error("❌ Failed to initialize Context-First Q&A System")
+            return
+        
         # Initialize Enhanced Video Processor
         try:
             if initialize_enhanced_video_processor():
@@ -94,6 +108,14 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"⚠️ Could not initialize existing video processing system: {e}")
         
+        # Initialize Universal Scraper Integration
+        try:
+            universal_scraper_integration = UniversalScraperIntegration()
+            logger.info("✅ Universal Scraper Integration initialized")
+        except Exception as e:
+            logger.warning(f"⚠️ Universal Scraper Integration initialization failed: {e}")
+            universal_scraper_integration = None
+        
         logger.info("🎉 All enhanced components initialized successfully!")
         
     except Exception as e:
@@ -108,6 +130,9 @@ async def lifespan(app: FastAPI):
         if enhanced_pinecone_manager:
             enhanced_pinecone_manager.cleanup_cache()
             logger.info("🧹 Enhanced Pinecone Manager cache cleaned")
+        
+        # Universal scraper doesn't need cleanup
+        
         logger.info("✅ Shutdown completed successfully")
     except Exception as e:
         logger.error(f"❌ Error during shutdown: {e}")
@@ -136,6 +161,12 @@ class QuestionRequest(BaseModel):
 class QuDemoContentRequest(BaseModel):
     video_urls: Optional[List[str]] = []
     website_url: Optional[str] = None
+
+class UrlRequest(BaseModel):
+    url: str
+
+class BatchUrlRequest(BaseModel):
+    urls: List[str]
 
 @app.get("/")
 async def root():
@@ -210,6 +241,50 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
                 'end': answer_result.get('end', 0),
                 'video_url': answer_result.get('video_url'),
                 'answer_source': answer_result.get('source', 'combined')
+            }
+        else:
+            return {
+                'success': False,
+                'error': answer_result.get('error', 'Unknown error'),
+                'answer': answer_result.get('answer', ''),
+                'sources': []
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Error processing question: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ask-context/{company_name}/{qudemo_id}")
+async def ask_question_context_first(company_name: str, qudemo_id: str, request: QuestionRequest):
+    """Ask a question using context-first QA system with semantic retrieval and neural re-ranking"""
+    try:
+        if not context_first_qa_system:
+            raise HTTPException(status_code=500, detail="Context-First Q&A System not initialized")
+        
+        logger.info(f"🧠 Context-First QA: {request.question} for {company_name} qudemo {qudemo_id}")
+        
+        # Use context-first Q&A system to get answer
+        answer_result = context_first_qa_system.ask_question(
+            question=request.question,
+            company_name=company_name,
+            qudemo_id=qudemo_id
+        )
+        
+        if answer_result['success']:
+            return {
+                'success': True,
+                'answer': answer_result['answer'],
+                'sources': answer_result['sources'],
+                'total_sources': answer_result['total_sources'],
+                'search_score': answer_result['search_score'],
+                'content_types_found': answer_result['content_types_found'],
+                'difficulty_level': answer_result['difficulty_level'],
+                'estimated_time': answer_result['estimated_time'],
+                'start': answer_result.get('start', 0),
+                'end': answer_result.get('end', 0),
+                'video_url': answer_result.get('video_url'),
+                'formatted_timestamp': answer_result.get('formatted_timestamp'),
+                'answer_source': 'context_first'
             }
         else:
             return {
@@ -464,30 +539,79 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
             logger.info("✅ Step 1 (Videos) completed successfully!")
             
         if request.website_url:
-            logger.info(f"🌐 Step 2: Processing website (this may take longer): {request.website_url}")
-            logger.info("⏱️ Website scraping typically takes 3-10 minutes depending on content size")
+            logger.info(f"🌐 Step 2: Processing website with universal scraper: {request.website_url}")
             processing_order.append("website")
             
-            gemini_api_key = os.getenv('GEMINI_API_KEY')
-            if not gemini_api_key:
-                raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable not set")
+            website_success = False
             
-            scraper = FinalGeminiScraper(gemini_api_key=gemini_api_key)
-            website_results = await scraper.scrape_website_comprehensive(request.website_url)
+            # Try new universal scraper system first
+            if universal_scraper_integration:
+                try:
+                    logger.info("🚀 Using new universal scraper system...")
+                    website_results = await universal_scraper_integration.scrape_website_universal(
+                        website_url=request.website_url,
+                        company_name=company_name,
+                        qudemo_id=qudemo_id
+                    )
+                    
+                    if website_results and len(website_results) > 0:
+                        # Store website results
+                        store_result = await enhanced_knowledge_integration.store_semantic_chunks(
+                            chunks=website_results,
+                            company_name=company_name,
+                            qudemo_id=qudemo_id
+                        )
+                        
+                        if store_result['success']:
+                            total_chunks += store_result['chunks_stored']
+                            logger.info(f"✅ Universal scraper successful: {store_result['chunks_stored']} chunks stored")
+                            logger.info(f"📊 Extracted {len(website_results)} content chunks")
+                            website_success = True
+                        else:
+                            logger.error(f"❌ Universal scraper storage failed: {store_result.get('error', 'Unknown error')}")
+                    else:
+                        logger.warning("⚠️ Universal scraper returned no results")
+                        logger.info("🔄 Falling back to legacy scraper...")
+                        
+                except Exception as e:
+                    logger.error(f"❌ Universal scraper error: {e}")
+                    logger.info("🔄 Falling back to legacy scraper...")
             
-            if website_results and len(website_results) > 0:
-                # Store website results
-                store_result = await enhanced_knowledge_integration.store_semantic_chunks(
-                    chunks=website_results,
-                    company_name=company_name,
-                    qudemo_id=qudemo_id
-                )
-                
-                if store_result['success']:
-                    total_chunks += store_result['chunks_stored']
-                    logger.info(f"✅ Website processed: {store_result['chunks_stored']} chunks stored")
-                else:
-                    logger.error(f"❌ Website storage failed: {store_result.get('error', 'Unknown error')}")
+            # Fallback to legacy scraper if universal system failed or not available
+            if not website_success:
+                try:
+                    logger.info("🔄 Using legacy scraper as fallback...")
+                    logger.info("⏱️ Legacy scraping typically takes 3-10 minutes depending on content size")
+                    
+                    gemini_api_key = os.getenv('GEMINI_API_KEY')
+                    if not gemini_api_key:
+                        raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable not set")
+                    
+                    scraper = FinalGeminiScraper(gemini_api_key=gemini_api_key)
+                    website_results = await scraper.scrape_website_comprehensive(request.website_url)
+                    
+                    if website_results and len(website_results) > 0:
+                        # Store website results
+                        store_result = await enhanced_knowledge_integration.store_semantic_chunks(
+                            chunks=website_results,
+                            company_name=company_name,
+                            qudemo_id=qudemo_id
+                        )
+                        
+                        if store_result['success']:
+                            total_chunks += store_result['chunks_stored']
+                            logger.info(f"✅ Legacy scraper successful: {store_result['chunks_stored']} chunks stored")
+                            website_success = True
+                        else:
+                            logger.error(f"❌ Legacy scraper storage failed: {store_result.get('error', 'Unknown error')}")
+                    else:
+                        logger.error("❌ Legacy scraper returned no results")
+                        
+                except Exception as e:
+                    logger.error(f"❌ Legacy scraper error: {e}")
+            
+            if not website_success:
+                logger.error("❌ Both universal and legacy scraping failed")
         
         # Final completion message
         if request.website_url:
@@ -590,6 +714,62 @@ async def get_pinecone_status():
     except Exception as e:
         logger.error(f"❌ Error getting Pinecone status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# New Universal Scraper Endpoints
+
+@app.post("/process-url-universal/{company_name}/{qudemo_id}")
+async def process_url_universal(company_name: str, qudemo_id: str, request: UrlRequest):
+    """Process a single URL using the new universal scraper system"""
+    try:
+        if not universal_scraper_integration:
+            raise HTTPException(status_code=500, detail="Universal Scraper Integration not initialized")
+        
+        logger.info(f"🚀 Processing URL with universal scraper: {request.url}")
+        
+        website_results = await universal_scraper_integration.scrape_website_universal(
+            website_url=request.url,
+            company_name=company_name,
+            qudemo_id=qudemo_id
+        )
+        
+        if website_results and len(website_results) > 0:
+            # Store website results
+            store_result = await enhanced_knowledge_integration.store_semantic_chunks(
+                chunks=website_results,
+                company_name=company_name,
+                qudemo_id=qudemo_id
+            )
+            
+            if store_result['success']:
+                return {
+                    'success': True,
+                    'url': request.url,
+                    'company_name': company_name,
+                    'qudemo_id': qudemo_id,
+                    'content_chunks': len(website_results),
+                    'stored_chunks': store_result['chunks_stored'],
+                    'timestamp': datetime.now().isoformat()
+                }
+            else:
+                return {
+                    'success': False,
+                    'url': request.url,
+                    'error': f"Storage failed: {store_result.get('error', 'Unknown error')}",
+                    'timestamp': datetime.now().isoformat()
+                }
+        else:
+            return {
+                'success': False,
+                'url': request.url,
+                'error': 'No content extracted from URL',
+                'timestamp': datetime.now().isoformat()
+            }
+        
+    except Exception as e:
+        logger.error(f"❌ Error processing URL: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Request models moved to top of file
 
 if __name__ == "__main__":
     import uvicorn

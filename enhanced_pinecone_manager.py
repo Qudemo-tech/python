@@ -264,6 +264,7 @@ class EnhancedPineconeManager:
                     # Prepare metadata with Standard Plan optimizations
                     metadata = {
                         'text': chunk['text'],
+                        'content': chunk['text'],  # Also store as 'content' for compatibility
                         'source': chunk.get('source', 'unknown'),
                         'source_type': content_type,
                         'title': chunk.get('title', ''),
@@ -279,7 +280,8 @@ class EnhancedPineconeManager:
                         'content_category': chunk.get('content_category', 'general'),
                         'has_steps': chunk.get('has_steps', False),
                         'is_complete': chunk.get('is_complete', True),
-                        'word_count': chunk.get('word_count', 0)
+                        'word_count': chunk.get('word_count', 0),
+                        'content_has_text': True  # Data contract flag
                     }
                     
                     # Add video-specific metadata

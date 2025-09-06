@@ -294,7 +294,7 @@ class LoomVideoProcessor:
                         
                         return True
                     else:
-                        logger.warning(f"Merge failed: {merge_result.stderr[:200]}...")
+                        logger.warning(f"Merge failed: {result.stderr[:200]}...")
                         
                         # Clean up failed download
                         if os.path.exists(output_path):
@@ -1062,9 +1062,18 @@ class LoomVideoProcessor:
             for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
                 vector_id = f"{company_name}_{qudemo_id}_{video_url}_{i}" if qudemo_id else f"{company_name}_{video_url}_{i}"
                 
-                # Extract and validate timestamps
+                # Extract and validate timestamps with hygiene
                 chunk_start = float(chunk.get('start_timestamp', 0.0)) if isinstance(chunk, dict) else 0.0
                 chunk_end = float(chunk.get('end_timestamp', 0.0)) if isinstance(chunk, dict) else 0.0
+                duration = float(chunk.get('duration', 0.0)) if isinstance(chunk, dict) else 0.0
+                
+                # Timestamp hygiene - validate timestamps
+                has_timestamps = chunk_start >= 0 and chunk_end > chunk_start and (duration == 0 or chunk_end <= duration)
+                seekable = has_timestamps and duration > 0
+                
+                # Clean timestamps - only store valid ones
+                clean_start = chunk_start if has_timestamps else 0
+                clean_end = chunk_end if has_timestamps else 0
                 
                 vector_data = {
                     'id': vector_id,
@@ -1075,13 +1084,17 @@ class LoomVideoProcessor:
                         'video_url': video_url,
                         'chunk_index': i,
                         'text': chunk['text'] if isinstance(chunk, dict) else str(chunk),
-                        'start': chunk_start,
-                        'end': chunk_end,
+                        'start': clean_start,
+                        'end': clean_end,
                         'title': chunk.get('title', 'Unknown'),
                         'language': 'en',  # Default language
                         'word_count': len(chunk.get('text', '').split()) if isinstance(chunk, dict) else 0,
-                        'source_type': 'video',
-                        'video_chunk_index': chunk.get('video_chunk_index', 0)
+                        'source_type': 'video_transcript',
+                        'source': 'loom',
+                        'video_chunk_index': chunk.get('video_chunk_index', 0),
+                        'has_timestamps': has_timestamps,
+                        'seekable': seekable,
+                        'duration': duration
                     }
                 }
                 

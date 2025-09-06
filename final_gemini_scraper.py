@@ -984,13 +984,14 @@ Respond only with the JSON object, no additional text. Ensure the content is COM
             
             if extracted and extracted.get('content'):
                 content_length = len(extracted['content'])
-                # More flexible content validation - accept shorter content for help articles
-                if content_length > 50:  # Reduced from 200 to 50 characters
+                # Store content with flexible validation
+                if content_length >= 100:  # Minimum 100 characters (more flexible)
                     extracted['url'] = url
+                    extracted['content_has_text'] = True  # Data contract flag
                     print(f"✅ Content extracted: {content_length} characters")
                     return extracted
                 else:
-                    print(f"⚠️ Content too short ({content_length} chars) from {url}")
+                    print(f"⚠️ Content too short ({content_length} chars) from {url} - SKIPPING STORAGE")
                     return None
             else:
                 print(f"⚠️ No content extracted from {url}")

@@ -21,6 +21,7 @@ import shutil
 from enhanced_pinecone_manager import initialize_enhanced_pinecone_manager, get_enhanced_pinecone_manager
 from enhanced_knowledge_integration import initialize_enhanced_knowledge_integration, get_enhanced_knowledge_integration
 from enhanced_qa_simple import initialize_simple_enhanced_qa, get_simple_enhanced_qa
+from enhanced_qa_semantic import initialize_enhanced_semantic_qa, get_enhanced_semantic_qa
 from context_first_qa import initialize_context_first_qa, get_context_first_qa
 from final_gemini_scraper import FinalGeminiScraper
 
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 enhanced_pinecone_manager = None
 enhanced_knowledge_integration = None
 enhanced_qa_system = None
+enhanced_semantic_qa_system = None
 context_first_qa_system = None
 enhanced_video_processor = None
 universal_scraper_integration = None
@@ -49,7 +51,7 @@ universal_scraper_integration = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for FastAPI"""
-    global enhanced_pinecone_manager, enhanced_knowledge_integration, enhanced_qa_system, context_first_qa_system, enhanced_video_processor, universal_scraper_integration
+    global enhanced_pinecone_manager, enhanced_knowledge_integration, enhanced_qa_system, enhanced_semantic_qa_system, context_first_qa_system, enhanced_video_processor, universal_scraper_integration
     
     try:
         logger.info("🚀 Starting Enhanced QuDemo Python Backend...")
@@ -76,6 +78,14 @@ async def lifespan(app: FastAPI):
             logger.info("✅ Enhanced Q&A System initialized")
         else:
             logger.error("❌ Failed to initialize Enhanced Q&A System")
+            return
+        
+        # Initialize Enhanced Semantic Q&A System
+        if initialize_enhanced_semantic_qa():
+            enhanced_semantic_qa_system = get_enhanced_semantic_qa()
+            logger.info("✅ Enhanced Semantic Q&A System initialized")
+        else:
+            logger.error("❌ Failed to initialize Enhanced Semantic Q&A System")
             return
         
         # Initialize Context-First Q&A System
@@ -192,6 +202,7 @@ async def health_check():
             "pinecone_manager": enhanced_pinecone_manager is not None,
             "knowledge_integration": enhanced_knowledge_integration is not None,
             "qa_system": enhanced_qa_system is not None,
+            "semantic_qa_system": enhanced_semantic_qa_system is not None,
             "video_processor": enhanced_video_processor is not None
         }
         
@@ -241,6 +252,50 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
                 'end': answer_result.get('end', 0),
                 'video_url': answer_result.get('video_url'),
                 'answer_source': answer_result.get('source', 'combined')
+            }
+        else:
+            return {
+                'success': False,
+                'error': answer_result.get('error', 'Unknown error'),
+                'answer': answer_result.get('answer', ''),
+                'sources': []
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Error processing question: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ask-semantic/{company_name}/{qudemo_id}")
+async def ask_question_semantic(company_name: str, qudemo_id: str, request: QuestionRequest):
+    """Ask a question using enhanced semantic QA system with intent understanding and strict quality control"""
+    try:
+        if not enhanced_semantic_qa_system:
+            raise HTTPException(status_code=500, detail="Enhanced Semantic Q&A System not initialized")
+        
+        logger.info(f"🧠 Enhanced Semantic QA: {request.question} for {company_name} qudemo {qudemo_id}")
+        
+        # Use enhanced semantic Q&A system to get answer
+        answer_result = enhanced_semantic_qa_system.ask_question(
+            question=request.question,
+            company_name=company_name,
+            qudemo_id=qudemo_id
+        )
+        
+        if answer_result['success']:
+            return {
+                'success': True,
+                'answer': answer_result['answer'],
+                'sources': answer_result['sources'],
+                'total_sources': answer_result['total_sources'],
+                'search_score': answer_result['search_score'],
+                'content_types_found': answer_result['content_types_found'],
+                'difficulty_level': answer_result['difficulty_level'],
+                'estimated_time': answer_result['estimated_time'],
+                'start': answer_result.get('start', 0),
+                'end': answer_result.get('end', 0),
+                'video_url': answer_result.get('video_url'),
+                'formatted_timestamp': answer_result.get('formatted_timestamp'),
+                'answer_source': 'enhanced_semantic'
             }
         else:
             return {

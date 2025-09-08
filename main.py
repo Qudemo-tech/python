@@ -6,7 +6,7 @@ Optimized for Q&A, video processing, and web scraping
 
 import os
 import logging
-from typing import List, Optional
+from typing import List, Optional, Dict
 from datetime import datetime
 
 # FastAPI imports
@@ -24,6 +24,7 @@ from enhanced_qa_simple import initialize_simple_enhanced_qa, get_simple_enhance
 from enhanced_qa_semantic import initialize_enhanced_semantic_qa, get_enhanced_semantic_qa
 from context_first_qa import initialize_context_first_qa, get_context_first_qa
 from final_gemini_scraper import FinalGeminiScraper
+from enhanced_scraper_with_failure_handling import initialize_enhanced_scraper, get_enhanced_scraper
 
 # New universal scraper system
 from universal_help_scraper import UniversalScraperIntegration
@@ -47,11 +48,12 @@ enhanced_semantic_qa_system = None
 context_first_qa_system = None
 enhanced_video_processor = None
 universal_scraper_integration = None
+enhanced_scraper = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for FastAPI"""
-    global enhanced_pinecone_manager, enhanced_knowledge_integration, enhanced_qa_system, enhanced_semantic_qa_system, context_first_qa_system, enhanced_video_processor, universal_scraper_integration
+    global enhanced_pinecone_manager, enhanced_knowledge_integration, enhanced_qa_system, enhanced_semantic_qa_system, context_first_qa_system, enhanced_video_processor, universal_scraper_integration, enhanced_scraper
     
     try:
         logger.info("🚀 Starting Enhanced QuDemo Python Backend...")
@@ -125,6 +127,18 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"⚠️ Universal Scraper Integration initialization failed: {e}")
             universal_scraper_integration = None
+        
+        # Initialize Enhanced Scraper with Failure Handling
+        try:
+            if initialize_enhanced_scraper():
+                enhanced_scraper = get_enhanced_scraper()
+                logger.info("✅ Enhanced Scraper with Failure Handling initialized")
+            else:
+                logger.warning("⚠️ Enhanced Scraper initialization failed")
+                enhanced_scraper = None
+        except Exception as e:
+            logger.warning(f"⚠️ Enhanced Scraper initialization failed: {e}")
+            enhanced_scraper = None
         
         logger.info("🎉 All enhanced components initialized successfully!")
         
@@ -203,7 +217,8 @@ async def health_check():
             "knowledge_integration": enhanced_knowledge_integration is not None,
             "qa_system": enhanced_qa_system is not None,
             "semantic_qa_system": enhanced_semantic_qa_system is not None,
-            "video_processor": enhanced_video_processor is not None
+            "video_processor": enhanced_video_processor is not None,
+            "enhanced_scraper": enhanced_scraper is not None
         }
         
         all_healthy = all(components_status.values())
@@ -463,6 +478,11 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
         
         total_chunks = 0
         processing_order = []
+        processing_errors = []
+        successful_content = {
+            "videos": [],
+            "websites": []
+        }
         
         # Step 1: Process videos first (faster processing)
         if request.video_urls and len(request.video_urls) > 0:
@@ -522,9 +542,20 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                     if result and result.get('success'):
                         chunks_stored = result.get('chunks_stored', 0)
                         total_chunks += chunks_stored
+                        successful_content["videos"].append({
+                            "url": video_url,
+                            "type": "youtube",
+                            "chunks_stored": chunks_stored
+                        })
                         logger.info(f"✅ YouTube video processed: {chunks_stored} chunks stored")
                     else:
-                        logger.error(f"❌ YouTube video processing failed: {result.get('error', 'Unknown error') if result else 'No result'}")
+                        error_msg = result.get('error', 'Unknown error') if result else 'No result'
+                        processing_errors.append({
+                            "type": "video",
+                            "url": video_url,
+                            "error": error_msg
+                        })
+                        logger.error(f"❌ YouTube video processing failed: {error_msg}")
                         
                     # Add delay between YouTube videos to prevent conflicts
                     if i < len(youtube_videos) - 1:
@@ -575,9 +606,20 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                     if result and result.get('success'):
                         chunks_stored = result.get('chunks_stored', 0)
                         total_chunks += chunks_stored
+                        successful_content["videos"].append({
+                            "url": video_url,
+                            "type": "loom",
+                            "chunks_stored": chunks_stored
+                        })
                         logger.info(f"✅ Loom video processed: {chunks_stored} chunks stored")
                     else:
-                        logger.error(f"❌ Loom video processing failed: {result.get('error', 'Unknown error') if result else 'No result'}")
+                        error_msg = result.get('error', 'Unknown error') if result else 'No result'
+                        processing_errors.append({
+                            "type": "video",
+                            "url": video_url,
+                            "error": error_msg
+                        })
+                        logger.error(f"❌ Loom video processing failed: {error_msg}")
                         
                     # Add delay between Loom videos to prevent conflicts
                     if i < len(loom_videos) - 1:
@@ -632,66 +674,130 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                     logger.error(f"❌ Universal scraper error: {e}")
                     logger.info("🔄 Falling back to legacy scraper...")
             
-            # Fallback to legacy scraper if universal system failed or not available
+            # Use enhanced scraper with failure handling if universal system failed or not available
             if not website_success:
                 try:
-                    logger.info("🔄 Using legacy scraper as fallback...")
-                    logger.info("⏱️ Legacy scraping typically takes 3-10 minutes depending on content size")
+                    logger.info("🔄 Using enhanced scraper with failure handling...")
+                    logger.info("⏱️ Enhanced scraping with anti-bot detection...")
                     
-                    gemini_api_key = os.getenv('GEMINI_API_KEY')
-                    if not gemini_api_key:
-                        raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable not set")
-                    
-                    scraper = FinalGeminiScraper(gemini_api_key=gemini_api_key)
-                    website_results = await scraper.scrape_website_comprehensive(request.website_url)
-                    
-                    if website_results and len(website_results) > 0:
-                        # Store website results
-                        store_result = await enhanced_knowledge_integration.store_semantic_chunks(
-                            chunks=website_results,
-                            company_name=company_name,
-                            qudemo_id=qudemo_id
-                        )
+                    if enhanced_scraper:
+                        # Use enhanced scraper with failure handling
+                        website_result = await enhanced_scraper.scrape_website_with_failure_handling(request.website_url)
                         
-                        if store_result['success']:
-                            total_chunks += store_result['chunks_stored']
-                            logger.info(f"✅ Legacy scraper successful: {store_result['chunks_stored']} chunks stored")
-                            website_success = True
+                        if website_result['success'] and website_result['content']:
+                            # Store website results
+                            store_result = await enhanced_knowledge_integration.store_semantic_chunks(
+                                chunks=website_result['content'],
+                                company_name=company_name,
+                                qudemo_id=qudemo_id
+                            )
+                            
+                            if store_result['success']:
+                                total_chunks += store_result['chunks_stored']
+                                successful_content["websites"].append({
+                                    "url": request.website_url,
+                                    "chunks_stored": store_result['chunks_stored']
+                                })
+                                logger.info(f"✅ Enhanced scraper successful: {store_result['chunks_stored']} chunks stored")
+                                website_success = True
+                            else:
+                                logger.error(f"❌ Enhanced scraper storage failed: {store_result.get('error', 'Unknown error')}")
                         else:
-                            logger.error(f"❌ Legacy scraper storage failed: {store_result.get('error', 'Unknown error')}")
+                            # Website scraping failed - add to errors
+                            processing_errors.append({
+                                "type": "website",
+                                "url": request.website_url,
+                                "error": website_result.get('error_message', 'Unknown error'),
+                                "error_type": website_result.get('error_type', 'unknown'),
+                                "protection_detected": website_result.get('protection_detected', False)
+                            })
+                            logger.error(f"❌ Enhanced scraper failed: {website_result.get('error_message', 'Unknown error')}")
                     else:
-                        logger.error("❌ Legacy scraper returned no results")
+                        # Fallback to legacy scraper if enhanced scraper not available
+                        logger.info("🔄 Enhanced scraper not available, using legacy scraper...")
                         
+                        gemini_api_key = os.getenv('GEMINI_API_KEY')
+                        if not gemini_api_key:
+                            raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable not set")
+                        
+                        scraper = FinalGeminiScraper(gemini_api_key=gemini_api_key)
+                        website_results = await scraper.scrape_website_comprehensive(request.website_url)
+                        
+                        if website_results and len(website_results) > 0:
+                            # Store website results
+                            store_result = await enhanced_knowledge_integration.store_semantic_chunks(
+                                chunks=website_results,
+                                company_name=company_name,
+                                qudemo_id=qudemo_id
+                            )
+                            
+                            if store_result['success']:
+                                total_chunks += store_result['chunks_stored']
+                                successful_content["websites"].append({
+                                    "url": request.website_url,
+                                    "chunks_stored": store_result['chunks_stored']
+                                })
+                                logger.info(f"✅ Legacy scraper successful: {store_result['chunks_stored']} chunks stored")
+                                website_success = True
+                            else:
+                                logger.error(f"❌ Legacy scraper storage failed: {store_result.get('error', 'Unknown error')}")
+                        else:
+                            logger.error("❌ Legacy scraper returned no results")
+                            
                 except Exception as e:
-                    logger.error(f"❌ Legacy scraper error: {e}")
+                    logger.error(f"❌ Website scraping error: {e}")
+                    processing_errors.append({
+                        "type": "website",
+                        "url": request.website_url,
+                        "error": str(e),
+                        "error_type": "scraping_error",
+                        "protection_detected": False
+                    })
             
             if not website_success:
                 logger.error("❌ Both universal and legacy scraping failed")
         
         # Final completion message
         if request.website_url:
-            logger.info("✅ Step 2 (Website) completed successfully!")
+            if website_success:
+                logger.info("✅ Step 2 (Website) completed successfully!")
+            else:
+                logger.info("⚠️ Step 2 (Website) failed - anti-bot protection detected")
         
-        logger.info(f"🎉 All processing completed! Total chunks stored: {total_chunks}")
+        if total_chunks > 0:
+            logger.info(f"🎉 Processing completed! Total chunks stored: {total_chunks}")
+        else:
+            logger.info("❌ No content could be processed - all sources failed")
         
         # Notify Node.js backend that processing is complete
         try:
             logger.info("🔄 Notifying Node.js backend of processing completion...")
             
             # Get Node.js backend URL from environment
-            node_backend_url = os.getenv('NODE_BACKEND_URL', 'http://localhost:3001')
+            node_backend_url = os.getenv('NODE_BACKEND_URL', 'http://localhost:5000')
             
-            # Prepare notification data
+            # Set a timeout for the entire notification process
+            import signal
+            import threading
+            
+            # Use threading timeout instead of signal (Windows compatible)
+            notification_timeout = 10  # 10 seconds timeout
+            
+            # Prepare notification data - only include successful content
             notification_data = {
                 'qudemo_id': qudemo_id,
                 'company_name': company_name,
                 'processing_complete': True,
                 'total_chunks_stored': total_chunks,
-                'videos': request.video_urls if request.video_urls else [],
-                'websites': [request.website_url] if request.website_url else [],
-                'videos_processed': len(request.video_urls) if request.video_urls else 0,
-                'website_processed': 1 if request.website_url else 0,
-                'processing_order': processing_order
+                'videos': [video['url'] for video in successful_content['videos']],
+                'websites': [website['url'] for website in successful_content['websites']],
+                'videos_processed': len(successful_content['videos']),
+                'website_processed': len(successful_content['websites']),
+                'processing_order': processing_order,
+                # Add error information for the frontend
+                'processing_errors': processing_errors,
+                'has_errors': len(processing_errors) > 0,
+                'has_anti_bot_protection': any(error.get('protection_detected', False) for error in processing_errors)
             }
             
             # Send notification to Node.js backend
@@ -706,24 +812,36 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
             ]
             
             notification_success = False
-            for endpoint in endpoints_to_try:
-                try:
-                    notification_response = requests.post(
-                        endpoint,
-                        json=notification_data,
-                        timeout=10  # Shorter timeout
-                    )
-                    
-                    if notification_response.status_code == 200:
-                        logger.info(f"✅ Successfully notified Node.js backend at: {endpoint}")
-                        notification_success = True
-                        break
-                    else:
-                        logger.debug(f"🔍 Endpoint {endpoint} returned {notification_response.status_code}")
+            
+            def try_notification():
+                nonlocal notification_success
+                for endpoint in endpoints_to_try:
+                    try:
+                        notification_response = requests.post(
+                            endpoint,
+                            json=notification_data,
+                            timeout=5  # Very short timeout to prevent hanging
+                        )
                         
-                except requests.exceptions.RequestException as e:
-                    logger.debug(f"🔍 Endpoint {endpoint} failed: {e}")
-                    continue
+                        if notification_response.status_code == 200:
+                            logger.info(f"✅ Successfully notified Node.js backend at: {endpoint}")
+                            notification_success = True
+                            return
+                        else:
+                            logger.debug(f"🔍 Endpoint {endpoint} returned {notification_response.status_code}")
+                            
+                    except requests.exceptions.RequestException as e:
+                        logger.debug(f"🔍 Endpoint {endpoint} failed: {e}")
+                        continue
+            
+            # Use threading timeout for Windows compatibility
+            notification_thread = threading.Thread(target=try_notification)
+            notification_thread.daemon = True
+            notification_thread.start()
+            notification_thread.join(timeout=notification_timeout)
+            
+            if notification_thread.is_alive():
+                logger.info("ℹ️ Notification timeout - continuing without notification")
             
             if not notification_success:
                 logger.info("ℹ️ Node.js backend notification skipped - endpoint not available or backend not running")
@@ -733,19 +851,50 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
             logger.info(f"ℹ️ Node.js backend notification skipped: {e}")
             # Don't fail the entire request if notification fails
         
+        # Check if any content was successfully processed
+        if total_chunks == 0:
+            logger.error("❌ No content could be processed - QuDemo should not be created")
+            return {
+                'success': False,
+                'message': "No content could be processed. All sources failed due to restrictions or errors.",
+                'total_chunks_stored': 0,
+                'company_name': company_name,
+                'qudemo_id': qudemo_id,
+                'processing_order': processing_order,
+                'optimization_note': "All content sources failed to process",
+                # Enhanced status information
+                'successful_content': successful_content,
+                'processing_errors': processing_errors,
+                'has_errors': True,
+                'has_anti_bot_protection': any(error.get('protection_detected', False) for error in processing_errors),
+                # Add the structure that Node.js backend expects
+                'videos': [],
+                'websites': [],
+                'videos_processed': 0,
+                'website_processed': 0
+            }
+        
+        # Generate user-friendly status message
+        status_message = _generate_processing_status_message(successful_content, processing_errors, total_chunks)
+        
         return {
             'success': True,
-            'message': f"Successfully processed qudemo content. Total chunks stored: {total_chunks}",
+            'message': status_message,
             'total_chunks_stored': total_chunks,
             'company_name': company_name,
             'qudemo_id': qudemo_id,
             'processing_order': processing_order,
             'optimization_note': "Videos processed first for faster results, website processed second",
+            # Enhanced status information
+            'successful_content': successful_content,
+            'processing_errors': processing_errors,
+            'has_errors': len(processing_errors) > 0,
+            'has_anti_bot_protection': any(error.get('protection_detected', False) for error in processing_errors),
             # Add the structure that Node.js backend expects
-            'videos': request.video_urls if request.video_urls else [],
-            'websites': [request.website_url] if request.website_url else [],
-            'videos_processed': len(request.video_urls) if request.video_urls else 0,
-            'website_processed': 1 if request.website_url else 0
+            'videos': [video['url'] for video in successful_content['videos']],
+            'websites': [website['url'] for website in successful_content['websites']],
+            'videos_processed': len(successful_content['videos']),
+            'website_processed': len(successful_content['websites'])
         }
             
     except Exception as e:
@@ -768,6 +917,205 @@ async def get_pinecone_status():
             
     except Exception as e:
         logger.error(f"❌ Error getting Pinecone status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/cleanup-qudemo/{company_name}/{qudemo_id}")
+async def cleanup_qudemo_data(company_name: str, qudemo_id: str):
+    """Clean up all Pinecone data for a specific QuDemo"""
+    try:
+        logger.info(f"🧹 Starting cleanup for QuDemo: {qudemo_id} in company: {company_name}")
+        
+        if not enhanced_pinecone_manager:
+            raise HTTPException(status_code=500, detail="Enhanced Pinecone Manager not initialized")
+        
+        cleanup_results = {
+            'company_name': company_name,
+            'qudemo_id': qudemo_id,
+            'cleaned_indexes': [],
+            'total_vectors_deleted': 0,
+            'errors': []
+        }
+        
+        # Clean up each index
+        for index_name, index_id in enhanced_pinecone_manager.indexes.items():
+            try:
+                logger.info(f"🧹 Cleaning up {index_name} index: {index_id}")
+                
+                # Create namespace for this company and qudemo (consistent with storage format)
+                namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
+                
+                # Get the index
+                index = enhanced_pinecone_manager.pc.Index(index_id)
+                
+                # Delete all vectors in the namespace
+                try:
+                    # Query to get all vectors in the namespace
+                    query_result = index.query(
+                        vector=[0.0] * 1536,  # Dummy vector for query
+                        top_k=10000,  # Large number to get all vectors
+                        include_metadata=True,
+                        namespace=namespace
+                    )
+                    
+                    if query_result.matches:
+                        # Extract vector IDs
+                        vector_ids = [match.id for match in query_result.matches]
+                        
+                        # Delete the vectors
+                        index.delete(ids=vector_ids, namespace=namespace)
+                        
+                        vectors_deleted = len(vector_ids)
+                        cleanup_results['total_vectors_deleted'] += vectors_deleted
+                        cleanup_results['cleaned_indexes'].append({
+                            'index_name': index_name,
+                            'index_id': index_id,
+                            'namespace': namespace,
+                            'vectors_deleted': vectors_deleted
+                        })
+                        
+                        logger.info(f"✅ Deleted {vectors_deleted} vectors from {index_name} index")
+                    else:
+                        logger.info(f"ℹ️ No vectors found in {index_name} index for namespace {namespace}")
+                        cleanup_results['cleaned_indexes'].append({
+                            'index_name': index_name,
+                            'index_id': index_id,
+                            'namespace': namespace,
+                            'vectors_deleted': 0
+                        })
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not query/delete from {index_name} index: {e}")
+                    cleanup_results['errors'].append({
+                        'index_name': index_name,
+                        'error': str(e)
+                    })
+                    
+            except Exception as e:
+                logger.error(f"❌ Error cleaning up {index_name} index: {e}")
+                cleanup_results['errors'].append({
+                    'index_name': index_name,
+                    'error': str(e)
+                })
+        
+        logger.info(f"✅ QuDemo cleanup completed: {cleanup_results['total_vectors_deleted']} vectors deleted")
+        
+        return {
+            "success": True,
+            "message": f"QuDemo cleanup completed successfully",
+            "data": cleanup_results
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error in QuDemo cleanup: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/delete-company-data/{company_name}")
+async def delete_company_data(company_name: str):
+    """Delete ALL Pinecone data for a company (all QuDemos, all indexes)"""
+    try:
+        logger.info(f"🗑️ Starting complete company deletion for: {company_name}")
+        
+        if not enhanced_pinecone_manager:
+            raise HTTPException(status_code=500, detail="Enhanced Pinecone Manager not initialized")
+        
+        cleanup_results = {
+            'company_name': company_name,
+            'cleaned_indexes': [],
+            'total_vectors_deleted': 0,
+            'total_namespaces_cleaned': 0,
+            'errors': []
+        }
+        
+        # Clean up each index
+        for index_name, index_id in enhanced_pinecone_manager.indexes.items():
+            try:
+                logger.info(f"🗑️ Cleaning up {index_name} index: {index_id}")
+                
+                # Get the index
+                index = enhanced_pinecone_manager.pc.Index(index_id)
+                
+                # Get all namespaces in this index
+                try:
+                    stats = index.describe_index_stats()
+                    namespaces = stats.get('namespaces', {})
+                    
+                    company_namespaces = []
+                    # Normalize company name to match storage format
+                    normalized_company_name = company_name.lower().replace(' ', '-')
+                    for namespace_name in namespaces.keys():
+                        if namespace_name.startswith(f"{normalized_company_name}-"):
+                            company_namespaces.append(namespace_name)
+                    
+                    logger.info(f"📊 Found {len(company_namespaces)} namespaces for company {company_name} in {index_name} index")
+                    
+                    index_vectors_deleted = 0
+                    for namespace in company_namespaces:
+                        try:
+                            # Query to get all vectors in this namespace
+                            query_result = index.query(
+                                vector=[0.0] * 1536,  # Dummy vector for query
+                                top_k=10000,  # Large number to get all vectors
+                                include_metadata=True,
+                                namespace=namespace
+                            )
+                            
+                            if query_result.matches:
+                                # Extract vector IDs
+                                vector_ids = [match.id for match in query_result.matches]
+                                
+                                # Delete the vectors
+                                index.delete(ids=vector_ids, namespace=namespace)
+                                
+                                vectors_deleted = len(vector_ids)
+                                index_vectors_deleted += vectors_deleted
+                                cleanup_results['total_namespaces_cleaned'] += 1
+                                
+                                logger.info(f"✅ Deleted {vectors_deleted} vectors from namespace {namespace}")
+                            else:
+                                logger.info(f"ℹ️ No vectors found in namespace {namespace}")
+                                
+                        except Exception as e:
+                            logger.warning(f"⚠️ Could not clean namespace {namespace}: {e}")
+                            cleanup_results['errors'].append({
+                                'index_name': index_name,
+                                'namespace': namespace,
+                                'error': str(e)
+                            })
+                    
+                    cleanup_results['total_vectors_deleted'] += index_vectors_deleted
+                    cleanup_results['cleaned_indexes'].append({
+                        'index_name': index_name,
+                        'index_id': index_id,
+                        'namespaces_cleaned': len(company_namespaces),
+                        'vectors_deleted': index_vectors_deleted
+                    })
+                    
+                    logger.info(f"✅ Cleaned {index_name} index: {index_vectors_deleted} vectors from {len(company_namespaces)} namespaces")
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not get namespace stats for {index_name} index: {e}")
+                    cleanup_results['errors'].append({
+                        'index_name': index_name,
+                        'error': str(e)
+                    })
+                    
+            except Exception as e:
+                logger.error(f"❌ Error cleaning up {index_name} index: {e}")
+                cleanup_results['errors'].append({
+                    'index_name': index_name,
+                    'error': str(e)
+                })
+        
+        logger.info(f"🎉 Company deletion completed: {cleanup_results['total_vectors_deleted']} vectors deleted from {cleanup_results['total_namespaces_cleaned']} namespaces")
+        
+        return {
+            "success": True,
+            "message": f"Company data deletion completed successfully",
+            "data": cleanup_results
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error in company data deletion: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # New Universal Scraper Endpoints
@@ -825,6 +1173,53 @@ async def process_url_universal(company_name: str, qudemo_id: str, request: UrlR
         raise HTTPException(status_code=500, detail=str(e))
 
 # Request models moved to top of file
+
+def _generate_processing_status_message(successful_content: Dict, processing_errors: List[Dict], total_chunks: int) -> str:
+    """Generate user-friendly processing status message"""
+    messages = []
+    
+    # Add successful content summary
+    if successful_content['videos']:
+        video_count = len(successful_content['videos'])
+        total_video_chunks = sum(video['chunks_stored'] for video in successful_content['videos'])
+        messages.append(f"✅ {video_count} video(s) processed successfully ({total_video_chunks} chunks)")
+    
+    if successful_content['websites']:
+        website_count = len(successful_content['websites'])
+        total_website_chunks = sum(website['chunks_stored'] for website in successful_content['websites'])
+        messages.append(f"✅ {website_count} website(s) scraped successfully ({total_website_chunks} chunks)")
+    
+    # Add error information
+    if processing_errors:
+        messages.append("\n⚠️ Processing Issues:")
+        
+        for error in processing_errors:
+            if error['type'] == 'website':
+                if error.get('protection_detected', False):
+                    messages.append(f"🛡️ Website '{error['url']}' has anti-bot protection - scraping blocked")
+                    messages.append(f"   Reason: {error['error']}")
+                else:
+                    messages.append(f"❌ Website '{error['url']}' scraping failed")
+                    messages.append(f"   Reason: {error['error']}")
+            elif error['type'] == 'video':
+                messages.append(f"❌ Video '{error['url']}' processing failed")
+                messages.append(f"   Reason: {error['error']}")
+    
+    # Add overall summary
+    if total_chunks > 0:
+        messages.append(f"\n📊 Total: {total_chunks} content chunks available for Q&A")
+        
+        if processing_errors:
+            messages.append("💡 You can ask questions about the successfully processed content")
+        else:
+            messages.append("🎉 All content processed successfully!")
+    else:
+        messages.append("\n❌ No content could be processed")
+        messages.append("🛡️ All content sources failed due to restrictions or errors")
+        messages.append("💡 Please try different content sources or contact support")
+        messages.append("⚠️ QuDemo will not be created without successful content")
+    
+    return "\n".join(messages)
 
 if __name__ == "__main__":
     import uvicorn

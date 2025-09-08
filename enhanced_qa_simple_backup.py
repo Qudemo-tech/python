@@ -179,14 +179,14 @@ class SimpleEnhancedQA:
             # Debug: Print all metadata fields
             print(f"🔍 DEBUG: All metadata fields: {list(metadata.keys())}")
             print(f"🔍 DEBUG: Video URL: '{video_url}'")
-            print(f"🔍 DEBUG: Start timestamp: {metadata.get('start', 'NOT_FOUND')}")
-            print(f"🔍 DEBUG: End timestamp: {metadata.get('end', 'NOT_FOUND')}")
+            print(f"🔍 DEBUG: Start timestamp: {metadata.get('start_timestamp', 'NOT_FOUND')}")
+            print(f"🔍 DEBUG: End timestamp: {metadata.get('end_timestamp', 'NOT_FOUND')}")
             print(f"🔍 DEBUG: Raw text preview: {raw_text[:200]}...")
             
             # Extract timestamp from metadata first, then fallback to text content
-            # Note: Pinecone stores timestamps as 'start' and 'end', not 'start_timestamp' and 'end_timestamp'
-            start_time = metadata.get('start', 0)
-            end_time = metadata.get('end', 0)
+            # Note: Pinecone stores timestamps as 'start_timestamp' and 'end_timestamp'
+            start_time = metadata.get('start_timestamp', 0)
+            end_time = metadata.get('end_timestamp', 0)
             
             # If no precise timestamp in metadata, try to extract from text
             if start_time == 0:

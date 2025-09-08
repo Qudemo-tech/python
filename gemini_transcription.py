@@ -11,6 +11,7 @@ import json
 import tempfile
 import subprocess
 import re
+import bisect
 from datetime import datetime
 from typing import Dict, Optional, List
 from urllib.parse import urlparse
@@ -24,6 +25,99 @@ import openai
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Timestamp parsing and interpolation functions
+TS_RE = re.compile(r"\[(\d{1,2}:)?\d{1,2}:\d{2}(?:\.\d{1,3})?\]")
+
+def parse_time(ts: str) -> float:
+    """Parse timestamp string to seconds"""
+    parts = ts.split(":")
+    parts = [float(p) for p in parts]
+    if len(parts) == 3:
+        h, m, s = parts
+        return h*3600 + m*60 + s
+    elif len(parts) == 2:
+        m, s = parts
+        return m*60 + s
+    else:
+        return parts[0]
+
+def extract_anchors(text: str):
+    """
+    Extract timestamp anchors from text with inline timestamps
+    Returns:
+      clean_text: text with timestamp tags removed
+      anchors: list of (char_idx_in_clean_text, time_sec)
+    """
+    anchors = []
+    clean = []
+    i_clean = 0
+    last_end = 0
+    for m in TS_RE.finditer(text):
+        # copy text before tag
+        seg = text[last_end:m.start()]
+        clean.append(seg); i_clean += len(seg)
+        # parse tag
+        raw = m.group(0)[1:-1]  # drop brackets
+        t = parse_time(raw.replace(" ", ""))
+        anchors.append((i_clean, t))
+        last_end = m.end()
+    # tail
+    seg = text[last_end:]
+    clean.append(seg); i_clean += len(seg)
+    clean_text = "".join(clean)
+
+    # edge-pins if none present
+    if not anchors:
+        anchors = [(0, 0.0), (len(clean_text), len(clean_text) / 15.0)]  # fallback 15 cps
+
+    return clean_text, anchors
+
+def time_at_char(i: int, anchors):
+    """Linear interpolation of time at char index i using anchors"""
+    idxs = [a[0] for a in anchors]
+    pos = bisect.bisect_right(idxs, i) - 1
+    if pos < 0:
+        return anchors[0][1]
+    if pos >= len(anchors) - 1:
+        return anchors[-1][1]
+    iL, tL = anchors[pos]
+    iR, tR = anchors[pos + 1]
+    if iR == iL:
+        return tL
+    frac = (i - iL) / (iR - iL)
+    return tL + frac * (tR - tL)
+
+def char_at_time(t: float, anchors, text_len: int):
+    """Inverse of time_at_char: find smallest i with time_at_char(i) >= t"""
+    times = [a[1] for a in anchors]
+    pos = bisect.bisect_right(times, t) - 1
+    if pos < 0:
+        return 0
+    if pos >= len(anchors) - 1:
+        return text_len
+    iL, tL = anchors[pos]
+    iR, tR = anchors[pos + 1]
+    if tR == tL:
+        return iR
+    frac = (t - tL) / (tR - tL)
+    i = int(round(iL + frac * (iR - iL)))
+    return max(0, min(text_len, i))
+
+def extend_to_word_boundary(text: str, end_i: int, max_lookahead_chars=200):
+    """Extend to word boundary if end_i lands in middle of word"""
+    n = len(text)
+    i = end_i
+    # If already at boundary or at end, return as-is
+    if i >= n or (i < n and not text[i].isalnum()):
+        return end_i
+    limit = min(n, end_i + max_lookahead_chars)
+    while i < limit and text[i].isalnum():
+        i += 1
+    # consume trailing punctuation for cleaner boundaries
+    while i < limit and text[i] in ",;:)]}\"'":
+        i += 1
+    return i
 
 class NonRetryableGeminiError(Exception):
     """Raised when Gemini returns a non-retryable 4xx (e.g., 400 INVALID_ARGUMENT)."""
@@ -216,8 +310,8 @@ class GeminiTranscriptionProcessor:
     
     def extract_transcription_with_whisper(self, video_url: str) -> Optional[Dict]:
         """
-        Extract transcription from YouTube video using production-safe approach
-        Strategy: Direct metadata-based content generation (no yt-dlp to avoid IP blacklisting)
+        Extract transcription from YouTube video using multiple methods
+        Strategy: Try YouTube Transcript API first, then Gemini API, then metadata fallback
         
         Args:
             video_url: YouTube video URL
@@ -230,10 +324,23 @@ class GeminiTranscriptionProcessor:
                 raise Exception("Not a YouTube URL")
             
             logger.info(f"🎬 Extracting transcription from: {video_url}")
-            logger.info("🎬 Using production-safe approach: Metadata-based content only")
-            logger.info("ℹ️ Skipping yt-dlp to avoid YouTube IP blacklisting in production")
             
-            # Use only metadata-based content generation (production-safe)
+            # Try YouTube Transcript API first for real timestamps
+            youtube_result = self._try_youtube_transcript_api(video_url)
+            if youtube_result:
+                logger.info("✅ Real transcription extracted successfully with YouTube Transcript API")
+                return youtube_result
+            
+            # Try Gemini API as second option
+            logger.info("🎬 YouTube Transcript API failed, trying Gemini API")
+            gemini_result = self._try_gemini_api_with_overload_handling(video_url)
+            if gemini_result:
+                logger.info("✅ Real transcription extracted successfully with Gemini API")
+                return gemini_result
+            
+            # Fallback to metadata-based content if both fail
+            logger.info("⚠️ Both YouTube and Gemini APIs failed, using metadata-based fallback")
+            logger.info("ℹ️ This will not include real timestamps")
             return self._create_metadata_based_content(video_url)
                 
         except Exception as e:
@@ -282,68 +389,92 @@ class GeminiTranscriptionProcessor:
 
     def _create_simple_fallback_content(self, video_url: str, video_id: str) -> Optional[Dict]:
         """
-        Create production-safe fallback content for YouTube videos
-        Uses video metadata to generate useful content without downloading
+        FAILED: Cannot extract real content from video
+        Returns None to prevent fake content generation
         """
         try:
-            logger.info(f"🔄 Creating production-safe fallback content for video: {video_id}")
-            
-            # Extract playlist information if available
-            playlist_info = ""
-            if "list=" in video_url:
-                playlist_match = re.search(r'list=([^&]+)', video_url)
-                if playlist_match:
-                    playlist_id = playlist_match.group(1)
-                    playlist_info = f"This video is part of playlist: {playlist_id}"
-            
-            # Create informative content based on video metadata
-            content = f"""
-            YouTube Video Information:
-            Video ID: {video_id}
-            URL: {video_url}
-            {playlist_info}
-            
-            Production-Safe Processing:
-            This video has been processed using a production-safe approach that avoids
-            YouTube's automated access restrictions. The system generates useful metadata
-            and placeholder content to maintain knowledge base integrity.
-            
-            Content Status:
-            - Video identified and cataloged
-            - Metadata extracted successfully
-            - Placeholder content generated for searchability
-            - Ready for manual transcript upload if needed
-            
-            Processing Details:
-            - Method: Production-safe metadata extraction
-            - Timestamp: {datetime.now().isoformat()}
-            - Status: Successfully processed without YouTube API calls
-            
-            Note: For full transcript access, consider:
-            1. Manual transcript upload
-            2. Development environment processing
-            3. Alternative content sources
-            """
-            
-            # Create multiple segments for better chunking
-            content_lines = [line.strip() for line in content.strip().split('\n') if line.strip()]
-            segments = []
-            
-            for i, line in enumerate(content_lines):
-                segments.append({
-                    'start': float(i * 4),  # 4 seconds per segment
-                    'end': float((i + 1) * 4),
-                    'text': line
-                })
-            
-            return {
-                'content': content.strip(),
-                'segments': segments,
-                'summary': f"YouTube Video {video_id} - Production-safe processing completed"
-            }
+            logger.error(f"❌ Cannot extract real content from video: {video_id}")
+            logger.error(f"❌ URL: {video_url}")
+            logger.error(f"❌ Returning None to prevent fake content generation")
+            return None
             
         except Exception as e:
-            logger.error(f"❌ Production-safe fallback content creation failed: {e}")
+            logger.error(f"❌ Error in fallback content creation: {e}")
+            return None
+
+    def _try_youtube_transcript_api(self, video_url: str) -> Optional[Dict]:
+        """
+        Try to extract transcription using YouTube Transcript API
+        This provides real timestamps and is the most reliable method
+        """
+        try:
+            from youtube_transcript_api import YouTubeTranscriptApi
+            from youtube_transcript_api.formatters import TextFormatter
+            
+            # Extract video ID from URL
+            video_id = self._extract_video_id(video_url)
+            if not video_id:
+                logger.error("❌ Could not extract video ID from URL")
+                return None
+            
+            logger.info(f"🎬 Trying YouTube Transcript API for video: {video_id}")
+            
+            # Try to get transcript
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+            
+            if not transcript_list:
+                logger.warning("⚠️ No transcript available for this video")
+                return None
+            
+            # Format transcript with timestamps
+            formatted_transcript = ""
+            segments = []
+            
+            for entry in transcript_list:
+                start_time = entry['start']
+                duration = entry['duration']
+                text = entry['text']
+                
+                # Format timestamp as [MM:SS] or [HH:MM:SS]
+                if start_time < 3600:  # Less than 1 hour
+                    timestamp = f"[{int(start_time//60):02d}:{int(start_time%60):02d}]"
+                else:  # 1 hour or more
+                    hours = int(start_time//3600)
+                    minutes = int((start_time%3600)//60)
+                    seconds = int(start_time%60)
+                    timestamp = f"[{hours:02d}:{minutes:02d}:{seconds:02d}]"
+                
+                formatted_transcript += f"{timestamp} {text}\n"
+                
+                segments.append({
+                    'text': text,
+                    'start': start_time,
+                    'end': start_time + duration
+                })
+            
+            if formatted_transcript:
+                logger.info(f"✅ YouTube Transcript API successful: {len(segments)} segments")
+                logger.info(f"📝 Total characters: {len(formatted_transcript)}")
+                
+                return {
+                    'transcription': formatted_transcript,
+                    'segments': segments,
+                    'word_count': len(formatted_transcript.split()),
+                    'language': 'en',
+                    'method': 'youtube_transcript_api',
+                    'summary': '',
+                    'metadata': {
+                        'video_id': video_id,
+                        'video_url': video_url,
+                        'segments_count': len(segments),
+                        'has_timestamps': True
+                    }
+                }
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"⚠️ YouTube Transcript API failed: {e}")
             return None
 
     # yt-dlp download method removed for production safety
@@ -746,46 +877,11 @@ class GeminiTranscriptionProcessor:
             
             video_id = video_id_match.group(1)
             
-            # Create a structured fallback transcription for long videos
-            fallback_text = f"""[00:00] Video ID: {video_id}
-
-[00:05] This is a 16-minute video about building browser agents for sales automation.
-
-[00:10] The video covers how to build agents that automate post-call workflows for BDRs.
-
-[00:15] Key topics covered:
-- Building browser agents for qualified leads
-- Building browser agents for disqualified leads
-- Automating CRM updates
-- Automating follow-up emails
-- Sales handoff automation
-
-[00:20] The video demonstrates how to create agents that handle:
-- Post-call workflow automation
-- CRM data entry
-- Email follow-ups
-- Sales team notifications
-
-[00:25] This is a comprehensive tutorial on sales automation using browser agents.
-
-[00:30] The content is relevant for questions about:
-- Disqualified lead agents
-- Sales workflow automation
-- CRM integration
-- Browser automation"""
-            
-            result_dict = {
-                'transcription': fallback_text,
-                'segments': [{'text': fallback_text, 'start': 0.0, 'end': 60.0}],
-                'language': 'en',
-                'word_count': len(fallback_text.split()),
-                'title': f'Long YouTube Video {video_id}',
-                'duration': 'Long video (16+ minutes)',
-                'method': 'fallback_transcription_long_video'
-            }
-            
-            logger.info("✅ Fallback transcription created successfully for long video")
-            return result_dict
+            # FAILED: Cannot extract real content from video
+            logger.error(f"❌ Cannot extract real content from video: {video_id}")
+            logger.error(f"❌ URL: {video_url}")
+            logger.error(f"❌ Returning None to prevent fake content generation")
+            return None
             
         except Exception as e:
             logger.error(f"❌ Fallback transcription failed: {e}")
@@ -906,93 +1002,32 @@ class GeminiTranscriptionProcessor:
     
     async def _create_intelligent_fallback_content(self, video_url: str, video_id: str) -> str:
         """
-        Create intelligent fallback content for long videos using Gemini API
-        Generates comprehensive, structured content that can be used for Q&A
+        FAILED: Cannot extract real content from video
+        Returns None to prevent fake content generation
         """
         try:
-            logger.info(f"🧠 Creating intelligent fallback content using Gemini API for video: {video_id}")
-            
-            # Create a detailed prompt for Gemini to analyze the video
-            prompt = f"""Analyze the YouTube video at {video_url}. 
-
-Based on its content, title, description, and any available metadata, generate a detailed, structured summary that covers:
-
-1. **Main Topic & Purpose**: What is this video about and what does it teach?
-2. **Key Concepts**: List the main concepts, techniques, or methods covered
-3. **Step-by-Step Process**: If applicable, outline the main steps or workflow
-4. **Technical Details**: Any technical requirements, tools, or platforms mentioned
-5. **Use Cases**: What problems does this solve or what scenarios is it useful for?
-6. **Best Practices**: Any tips, recommendations, or best practices shared
-7. **Common Pitfalls**: Any warnings or things to avoid mentioned
-
-Format the output as a comprehensive, well-structured summary that someone could use to:
-- Understand what the video covers
-- Answer specific questions about the content
-- Implement the techniques described
-- Know if this video is relevant to their needs
-
-Make the content detailed enough for Q&A purposes while being concise and well-organized."""
-            
-            try:
-                # Try to use Gemini API to generate intelligent content
-                response = self.model.generate_content(prompt)
-                if response and response.text:
-                    logger.info("✅ Gemini API generated intelligent fallback content")
-                    return response.text
-                else:
-                    logger.warning("⚠️ Gemini API returned empty response, using generic fallback")
-                    return self._create_generic_fallback_content(video_url, video_id)
-                    
-            except Exception as gemini_error:
-                logger.warning(f"⚠️ Gemini API failed for fallback content: {gemini_error}")
-                logger.info("🔄 Falling back to generic content generation")
-                return self._create_generic_fallback_content(video_url, video_id)
+            logger.error(f"❌ Cannot extract real content from video: {video_id}")
+            logger.error(f"❌ URL: {video_url}")
+            logger.error(f"❌ Returning None to prevent fake content generation")
+            return None
             
         except Exception as e:
-            logger.error(f"❌ Error creating intelligent fallback content: {e}")
-            return self._create_generic_fallback_content(video_url, video_id)
+            logger.error(f"❌ Error in intelligent fallback content creation: {e}")
+            return None
     
     def _create_generic_fallback_content(self, video_url: str, video_id: str) -> str:
         """
-        Create generic fallback content when Gemini API is unavailable
+        FAILED: Cannot extract real content from video
+        Returns None to prevent fake content generation
         """
         try:
-            # Create structured content based on video context
-            content = f"""This is a 16-minute YouTube video about building browser agents for sales automation.
-
-The video covers how to build agents that automate post-call workflows for BDRs (Business Development Representatives).
-
-Key topics covered:
-- Building browser agents for qualified leads
-- Building browser agents for disqualified leads
-- Automating CRM updates
-- Automating follow-up emails
-- Sales handoff automation
-
-The video demonstrates how to create agents that handle:
-- Post-call workflow automation
-- CRM data entry
-- Email follow-ups
-- Sales team notifications
-
-This is a comprehensive tutorial on sales automation using browser agents.
-
-The content is relevant for questions about:
-- Disqualified lead agents
-- Sales workflow automation
-- CRM integration
-- Browser automation
-- BDR workflow optimization
-- Post-call automation
-- Sales process automation
-- Lead qualification automation
-
-The video provides practical examples and step-by-step guidance for implementing sales automation solutions."""
-            
-            return content
+            logger.error(f"❌ Cannot extract real content from video: {video_id}")
+            logger.error(f"❌ URL: {video_url}")
+            logger.error(f"❌ Returning None to prevent fake content generation")
+            return None
             
         except Exception as e:
-            logger.error(f"❌ Error creating generic fallback content: {e}")
+            logger.error(f"❌ Error in generic fallback content creation: {e}")
             return None
 
     def _fallback_video_analysis(self, video_url: str) -> Optional[Dict]:
@@ -1001,79 +1036,27 @@ The video provides practical examples and step-by-step guidance for implementing
         Attempts to analyze video based on URL and available metadata
         """
         try:
-            logger.info(f"🔄 Attempting fallback analysis for: {video_url}")
+            logger.error(f"❌ Cannot extract real content from video: {video_url}")
+            logger.error(f"❌ Returning None to prevent fake content generation")
+            return None
             
-            # Extract video ID from URL
-            import re
-            video_id_match = re.search(r'(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]+)', video_url)
-            if not video_id_match:
-                logger.error("❌ Could not extract video ID from URL")
-                return None
-            
-            video_id = video_id_match.group(1)
-            logger.info(f"📹 Extracted video ID: {video_id}")
-            
-            # Create a basic analysis prompt
-            prompt = f"""
-            Analyze this YouTube video based on its ID: {video_id}
-            
-            Please provide a summary of what this video might be about based on:
-            1. The video ID pattern
-            2. Common YouTube video content patterns
-            3. Any available metadata
-            
-            Return in JSON format:
-            {{
-                "title": "Estimated video title",
-                "transcription": "Summary of likely content based on video ID and patterns",
-                "duration": "Unknown",
-                "language": "en",
-                "word_count": "Number of words in summary",
-                "method": "fallback_analysis"
-            }}
-            """
-            
-            # Call Gemini for fallback analysis
-            response = self.model.generate_content(prompt)
-            
-            if response.text:
-                try:
-                    result = json.loads(response.text)
-                    logger.info(f"✅ Fallback analysis completed")
-                    logger.info(f"📹 Estimated title: {result.get('title', 'Unknown')}")
-                    logger.info(f"📝 Word count: {result.get('word_count', 'Unknown')}")
-                    return result
-                except json.JSONDecodeError:
-                    logger.warning("⚠️ Fallback response not in JSON format")
-                    return {
-                        "title": f"YouTube Video ({video_id})",
-                        "transcription": f"Video analysis for {video_id}. Content could not be directly accessed due to YouTube restrictions.",
-                        "duration": "Unknown",
-                        "language": "en",
-                        "word_count": len(response.text.split()),
-                        "method": "fallback_analysis"
-                    }
-            else:
-                logger.error("❌ Empty fallback response")
-                return None
-                
         except Exception as e:
-            logger.error(f"❌ Fallback analysis failed: {e}")
+            logger.error(f"❌ Error in fallback video analysis: {e}")
             return None
     
     def chunk_transcription(
         self,
         transcription: str,
         segments: Optional[List[Dict]] = None,
-        chunk_size: int = 2000,  # Increased from 1000 for more substantial chunks
-        overlap: int = 300,       # Increased from 200 for better context
-        max_chunk_duration: int = 120,  # Increased from 60 for longer chunks
+        chunk_size: int = 400,   # Reduced for very focused chunks
+        overlap: int = 50,       # Minimal overlap for cleaner boundaries
+        max_chunk_duration: int = 10,  # Maximum 10 seconds per chunk for precision
     ) -> List[Dict]:
         """
-        Create timestamped chunks from transcription.
+        Create timestamped chunks from transcription with maximum 10-second precision.
 
         If timestamped segments are available (Gemini may not provide them), build
-        chunks by aggregating segments until reaching target size or max duration.
+        chunks by aggregating segments until reaching target size or max duration (10s).
         Otherwise fall back to character-based chunking without timestamps.
 
         Returns list of dicts: { text: str, start: float, end: float }
@@ -1087,8 +1070,15 @@ The video provides practical examples and step-by-step guidance for implementing
             def flush_chunk():
                 nonlocal current_text_parts, current_start, current_end
                 if current_text_parts and current_start is not None and current_end is not None:
+                    # Join text parts properly to avoid breaking words
+                    combined_text = ' '.join(current_text_parts).strip()
+                    
+                    # Clean up any formatting issues
+                    combined_text = re.sub(r'\s+', ' ', combined_text)  # Replace multiple spaces
+                    combined_text = re.sub(r'([a-z])([A-Z])', r'\1 \2', combined_text)  # Add space between camelCase
+                    
                     chunks.append({
-                        'text': ' '.join(current_text_parts).strip(),
+                        'text': combined_text,
                         'start': float(max(0.0, current_start)),
                         'end': float(max(current_start, current_end)),
                     })
@@ -1114,10 +1104,30 @@ The video provides practical examples and step-by-step guidance for implementing
                 current_text_len = sum(len(p) for p in current_text_parts) + (len(current_text_parts) - 1)
                 current_duration = current_end - (current_start or current_end)
                 
-                # Ensure chunks are substantial - don't create tiny chunks
+                # Ensure chunks are very focused - maximum 10 seconds per chunk
                 if current_text_len >= chunk_size or current_duration >= max_chunk_duration:
-                    # Only flush if we have substantial content
-                    if current_text_len >= 300:  # Reduced minimum for better merging
+                    # Add small buffer (1-2 seconds) to complete the current word if we're at 10-second limit
+                    if current_duration >= max_chunk_duration and current_duration < max_chunk_duration + 2:
+                        # Check if we're in the middle of a word by looking at the combined text
+                        combined_text = ' '.join(current_text_parts).strip()
+                        if combined_text and not combined_text.endswith(' '):
+                            # Check if the last word is incomplete (no space after it)
+                            last_space_index = combined_text.rfind(' ')
+                            if last_space_index > 0:
+                                last_word = combined_text[last_space_index + 1:]
+                                # If last word is likely incomplete, add buffer
+                                # More aggressive detection: any word without proper punctuation is likely incomplete
+                                if (len(last_word) < 8 or 
+                                    not last_word.endswith(('.', '!', '?', ',', ':', ';', ')', ']', '}')) or
+                                    last_word.lower() in ['whe', 'co', 'an', 'the', 'and', 'or', 'but', 'for', 'nor', 'yet', 'so']):
+                                    continue
+                                
+                                # Additional check: if the combined text doesn't end with proper sentence punctuation, continue
+                                if not combined_text.endswith(('.', '!', '?', ':', ';')):
+                                    continue
+                    
+                    # Only flush if we have meaningful content
+                    if current_text_len >= 100:  # Very small minimum for precise chunks
                         flush_chunk()
                     else:
                         # Continue accumulating for a more substantial chunk
@@ -1136,7 +1146,11 @@ The video provides practical examples and step-by-step guidance for implementing
                         last_chunk = filtered_chunks[-1]
                         # Only merge if the combined chunk won't be too long
                         if len(last_chunk['text']) + len(chunk['text']) < 2000:
-                            last_chunk['text'] += ' ' + chunk['text']
+                            # Merge text properly to avoid breaking words
+                            merged_text = last_chunk['text'] + ' ' + chunk['text']
+                            # Clean up any formatting issues
+                            merged_text = re.sub(r'\s+', ' ', merged_text).strip()
+                            last_chunk['text'] = merged_text
                             last_chunk['end'] = chunk['end']
                             logger.info(f"🔗 Merged small chunk ({len(chunk['text'])} chars) with previous chunk")
                         else:
@@ -1199,14 +1213,158 @@ The video provides practical examples and step-by-step guidance for implementing
                             nss, _ = next_match
                             end = int(nss)
                         else:
-                            end = start + min(max(len(sent) // 15, 3), 20)
+                            # Limit chunk duration to maximum 10 seconds
+                            end = start + min(max(len(sent) // 15, 3), 10)
                     else:
-                        end = start + min(max(len(sent) // 15, 3), 20)
+                        # Limit chunk duration to maximum 10 seconds
+                        end = start + min(max(len(sent) // 15, 3), 10)
                     
                     parsed.append({'text': sent.strip(), 'start': float(start), 'end': float(end)})
                 
-                logger.info(f"📄 Created {len(parsed)} chunks from inline timestamps (format: {pattern_str})")
-                return parsed
+                # Apply 10-second limit by splitting large chunks
+                final_chunks = []
+                for chunk in parsed:
+                    start_time = chunk['start']
+                    end_time = chunk['end']
+                    text = chunk['text']
+                    
+                    # If chunk is larger than 10 seconds, split it
+                    if end_time - start_time > 10:
+                        # Split into 10-second segments
+                        current_start = start_time
+                        while current_start < end_time:
+                            current_end = min(current_start + 10, end_time)
+                            
+                            # Estimate text portion for this segment
+                            duration_ratio = (current_end - current_start) / (end_time - start_time)
+                            text_length = len(text)
+                            start_char = int((current_start - start_time) / (end_time - start_time) * text_length)
+                            end_char = int((current_end - start_time) / (end_time - start_time) * text_length)
+                            
+                            # Find word boundaries to avoid splitting words
+                            # Adjust start_char to beginning of word
+                            while start_char > 0 and text[start_char] not in ' \t\n':
+                                start_char -= 1
+                            if start_char > 0:
+                                start_char += 1  # Move past the space
+                            
+                            # Adjust end_char to end of word
+                            while end_char < text_length and text[end_char] not in ' \t\n':
+                                end_char += 1
+                            
+                            # Always check for incomplete words and add buffer if needed
+                            segment_text = text[start_char:end_char].strip()
+                            if segment_text:
+                                # Check if the last word is incomplete
+                                last_space_index = segment_text.rfind(' ')
+                                if last_space_index > 0:
+                                    last_word = segment_text[last_space_index + 1:]
+                                    # If last word is likely incomplete, add buffer
+                                    # More aggressive detection: any word without proper punctuation is likely incomplete
+                                    if (len(last_word) < 8 or 
+                                        not last_word.endswith(('.', '!', '?', ',', ':', ';', ')', ']', '}')) or
+                                        last_word.lower() in ['whe', 'co', 'an', 'the', 'and', 'or', 'but', 'for', 'nor', 'yet', 'so']):
+                                        # Calculate how much extra time we need to complete the word
+                                        extra_chars = end_char - int((current_end - start_time) / (end_time - start_time) * text_length)
+                                        if extra_chars > 0:
+                                            # Estimate extra time needed (roughly 2-3 characters per second)
+                                            extra_time = min(3.0, extra_chars / 2.0)  # Max 3 seconds buffer for better completion
+                                            current_end = min(current_end + extra_time, end_time)
+                                            # Recalculate end_char with the extended time
+                                            end_char = int((current_end - start_time) / (end_time - start_time) * text_length)
+                                            # Find word boundary again
+                                            while end_char < text_length and text[end_char] not in ' \t\n':
+                                                end_char += 1
+                                
+                                # Additional check: if the segment doesn't end with proper sentence punctuation, extend it
+                                # Re-check segment_text after word completion
+                                segment_text = text[start_char:end_char].strip()
+                                if segment_text and not segment_text.endswith(('.', '!', '?', ':', ';')):
+                                    # Try to extend to the next sentence boundary
+                                    next_sentence_chars = 0
+                                    temp_end_char = end_char
+                                    while temp_end_char < text_length and next_sentence_chars < 100:  # Max 100 chars lookahead
+                                        if text[temp_end_char] in '.!?:;':
+                                            next_sentence_chars = temp_end_char - end_char + 1
+                                            break
+                                        temp_end_char += 1
+                                    
+                                    if next_sentence_chars > 0 and next_sentence_chars < 50:  # Only if reasonable distance
+                                        # Calculate extra time for sentence completion
+                                        extra_time = min(2.0, next_sentence_chars / 3.0)  # Max 2 seconds for sentence
+                                        current_end = min(current_end + extra_time, end_time)
+                                        end_char = int((current_end - start_time) / (end_time - start_time) * text_length)
+                            
+                            # Get the final segment text after word completion
+                            segment_text = text[start_char:end_char].strip()
+                            if segment_text:
+                                # Debug logging
+                                logger.info(f"🔍 Chunk text before word completion: '{segment_text}'")
+                                
+                                # Final check: if the segment still ends with an incomplete word, try to complete it
+                                if not segment_text.endswith(('.', '!', '?', ':', ';', ',', ')', ']', '}')):
+                                    logger.info(f"🔍 Incomplete word detected, attempting completion...")
+                                    # Look ahead to find the next complete word
+                                    temp_end_char = end_char
+                                    while temp_end_char < text_length and temp_end_char - end_char < 100:  # Max 100 chars lookahead
+                                        if text[temp_end_char] in ' \t\n':
+                                            # Found a space, check if this completes a word
+                                            temp_segment = text[start_char:temp_end_char].strip()
+                                            if temp_segment and temp_segment.endswith(('.', '!', '?', ':', ';', ',', ')', ']', '}')):
+                                                # This looks like a complete segment
+                                                end_char = temp_end_char
+                                                break
+                                        temp_end_char += 1
+                                    
+                                    # If still no complete word found, try to find the next sentence boundary
+                                    if temp_end_char >= text_length or temp_end_char - end_char >= 100:
+                                        temp_end_char = end_char
+                                        while temp_end_char < text_length and temp_end_char - end_char < 150:  # Max 150 chars lookahead
+                                            if text[temp_end_char] in '.!?:;':
+                                                # Found sentence boundary
+                                                end_char = temp_end_char + 1
+                                                break
+                                            temp_end_char += 1
+                                
+                                # Update segment_text with the final result
+                                segment_text = text[start_char:end_char].strip()
+                            
+                            # Final safety check: if the segment still ends with an incomplete word, extend it
+                            if segment_text and not segment_text.endswith(('.', '!', '?', ':', ';', ',', ')', ']', '}')):
+                                # Look for the next space or punctuation to complete the word
+                                temp_end_char = end_char
+                                while temp_end_char < text_length and temp_end_char - end_char < 200:  # Max 200 chars lookahead
+                                    if text[temp_end_char] in ' \t\n.!?:;,)]}':
+                                        # Found a word boundary
+                                        end_char = temp_end_char
+                                        break
+                                    temp_end_char += 1
+                                
+                                # Update segment_text with the final result
+                                segment_text = text[start_char:end_char].strip()
+                                logger.info(f"🔍 Chunk text after word completion: '{segment_text}'")
+                                
+                                # Update current_end to reflect the word completion
+                                # Calculate the new end time based on the extended text
+                                if end_char > int((current_end - start_time) / (end_time - start_time) * text_length):
+                                    # Text was extended, so we need to extend the time proportionally
+                                    text_extension_ratio = end_char / int((current_end - start_time) / (end_time - start_time) * text_length)
+                                    current_end = min(current_start + (current_end - current_start) * text_extension_ratio, end_time)
+                            
+                            if segment_text:
+                                final_chunks.append({
+                                    'text': segment_text,
+                                    'start': current_start,
+                                    'end': current_end
+                                })
+                            
+                            current_start = current_end
+                    else:
+                        # Chunk is already 10 seconds or less
+                        final_chunks.append(chunk)
+                
+                logger.info(f"📄 Created {len(final_chunks)} chunks from inline timestamps (10-second limit applied)")
+                return final_chunks
 
         # Final fallback: character-based chunks without timestamps
         fallback_chunks: List[Dict] = []

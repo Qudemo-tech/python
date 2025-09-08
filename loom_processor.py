@@ -1054,7 +1054,10 @@ class LoomVideoProcessor:
             
             # Get index and namespace per company and qudemo
             index = self.pc.Index(index_name)
-            namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}" if qudemo_id else company_name.lower().replace(' ', '-')
+            # Always require qudemo_id for proper isolation
+            if not qudemo_id:
+                raise ValueError("qudemo_id is required for proper data isolation")
+            namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
             logger.info(f"Storing data in namespace: '{namespace}' in index: '{index_name}'")
             
             # Prepare vectors for upsert
@@ -1189,7 +1192,10 @@ class LoomVideoProcessor:
             
             # Get index and namespace per company and qudemo
             index = self.pc.Index(index_name)
-            namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}" if qudemo_id else company_name.lower().replace(' ', '-')
+            # Always require qudemo_id for proper isolation
+            if not qudemo_id:
+                raise ValueError("qudemo_id is required for proper data isolation")
+            namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
             logger.info(f"Storing data in namespace: '{namespace}' in index: '{index_name}'")
             
             # Prepare vectors for upsert

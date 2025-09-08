@@ -289,8 +289,8 @@ class EnhancedSemanticQA:
                 candidate.update({
                     'seekable': metadata.get('seekable', False),
                     'has_timestamps': metadata.get('has_timestamps', False),
-                    'start': metadata.get('start', 0),
-                    'end': metadata.get('end', 0),
+                    'start': metadata.get('start_timestamp', 0),
+                    'end': metadata.get('end_timestamp', 0),
                     'duration': metadata.get('duration', 0),
                     'video_url': metadata.get('video_url', '')
                 })

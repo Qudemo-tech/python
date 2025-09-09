@@ -18,10 +18,10 @@ from sklearn.metrics.pairwise import cosine_similarity
 class EnhancedSemanticQA:
     """Enhanced Q&A system with semantic understanding and context-aware relevance"""
     
-    # Enhanced thresholds for better quality control
+    # Enhanced thresholds for better quality control (restored to original)
     KNOWLEDGE_MIN_RELEVANCE = 0.65  # Higher threshold for knowledge
-    VIDEO_MIN_RELEVANCE = 0.75      # Much higher threshold for videos
-    SEMANTIC_SIMILARITY_THRESHOLD = 0.8  # High semantic similarity required
+    VIDEO_MIN_RELEVANCE = 0.4       # Lowered threshold for videos
+    SEMANTIC_SIMILARITY_THRESHOLD = 0.2  # Very low threshold to allow more content
     CONTEXT_UNDERSTANDING_THRESHOLD = 0.7  # Context understanding threshold
     
     # Retrieval parameters
@@ -160,20 +160,24 @@ class EnhancedSemanticQA:
         }
     
     def _enhanced_semantic_retrieval(self, question: str, question_analysis: Dict, company_name: str, qudemo_id: str) -> Dict:
-        """Enhanced semantic retrieval with intent-aware searching"""
+        """Enhanced semantic retrieval with BEST CHUNK ONLY strategy"""
         try:
             # Get question embedding
-            question_embedding = self._get_embedding(question, model="text-embedding-3-small")
+            question_embedding = self._get_embedding(question, model="text-embedding-3-large")
             
             # Create enhanced query with intent context
             enhanced_query = self._create_enhanced_query(question, question_analysis)
-            enhanced_embedding = self._get_embedding(enhanced_query, model="text-embedding-3-small")
+            enhanced_embedding = self._get_embedding(enhanced_query, model="text-embedding-3-large")
             
             namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
             
-            # Search both indexes with enhanced parameters
+            # Search both indexes with enhanced parameters - but limit to top results
             video_results = self._search_with_intent('video', namespace, question_embedding, enhanced_embedding, question_analysis)
             knowledge_results = self._search_with_intent('knowledge', namespace, question_embedding, enhanced_embedding, question_analysis)
+            
+            # Note: Filtering moved to after scoring to ensure enhanced_score is available
+            
+            print(f"🔍 Retrieved: {len(video_results)} video chunks, {len(knowledge_results)} knowledge chunks")
             
             return {
                 'video': video_results,
@@ -292,7 +296,7 @@ class EnhancedSemanticQA:
                     'start': metadata.get('start_timestamp', 0),
                     'end': metadata.get('end_timestamp', 0),
                     'duration': metadata.get('duration', 0),
-                    'video_url': metadata.get('video_url', '')
+                    'video_url': metadata.get('video_url', '') or metadata.get('url', '')
                 })
             elif index_type == 'knowledge':
                 candidate.update({
@@ -322,15 +326,10 @@ class EnhancedSemanticQA:
             if not all_candidates:
                 return {'video': [], 'knowledge': []}
             
-            # Get question embedding for semantic comparison
-            question_embedding = self._get_embedding(question, model="text-embedding-3-small")
-            
             # Calculate enhanced scores for each candidate
             for candidate in all_candidates:
-                # Semantic similarity score
-                candidate_text = f"{candidate['title']} {candidate['summary']} {candidate['text_truncated']}"
-                candidate_embedding = self._get_embedding(candidate_text, model="text-embedding-3-small")
-                semantic_score = cosine_similarity([question_embedding], [candidate_embedding])[0][0]
+                # Use existing Pinecone score as semantic similarity (already computed)
+                semantic_score = candidate.get('score', 0)
                 
                 # Intent alignment score
                 intent_score = self._calculate_intent_alignment(candidate, question_analysis)
@@ -341,7 +340,9 @@ class EnhancedSemanticQA:
                 # Quality score
                 quality_score = self._calculate_quality_score(candidate)
                 
-                # Final enhanced score
+                # Removed complex timestamp scoring to keep it simple
+                
+                # Final enhanced score (restored to simple version)
                 final_score = (
                     0.35 * semantic_score +
                     0.25 * intent_score +
@@ -358,8 +359,12 @@ class EnhancedSemanticQA:
             # Sort by enhanced score
             all_candidates.sort(key=lambda x: x['enhanced_score'], reverse=True)
             
-            # Apply quality thresholds
-            filtered_candidates = [c for c in all_candidates if c['enhanced_score'] >= 0.6]
+            # Apply quality thresholds (restored to simple version)
+            filtered_candidates = [c for c in all_candidates if c['enhanced_score'] >= 0.3]
+            
+            # NEW: Apply temporal prior re-ranking for better topic positioning
+            if filtered_candidates:
+                filtered_candidates = self._rerank_with_time_bias(filtered_candidates, question)
             
             # Separate back into video/knowledge
             video_candidates = [c for c in filtered_candidates if c['index_type'] == 'video']
@@ -471,28 +476,283 @@ class EnhancedSemanticQA:
             print(f"❌ Quality score error: {e}")
             return 0.0
     
+    def _calculate_timestamp_relevance(self, candidate: Dict, question: str, question_analysis: Dict) -> float:
+        """Calculate how relevant the chunk's timestamps are to the question"""
+        try:
+            # Only apply to video candidates
+            if candidate.get('index_type') != 'video':
+                return 0.5  # Neutral score for knowledge candidates
+            
+            # Extract key terms from question
+            question_lower = question.lower()
+            key_terms = []
+            
+            # Extract important words (longer than 3 chars, not common words)
+            common_words = {'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'what', 'how', 'when', 'where', 'why', 'who'}
+            words = question_lower.split()
+            key_terms = [word for word in words if len(word) > 3 and word not in common_words]
+            
+            # Get chunk content
+            content = candidate.get('content', '').lower()
+            
+            # Check if key terms appear in the chunk content
+            term_matches = 0
+            for term in key_terms:
+                if term in content:
+                    term_matches += 1
+            
+            # Calculate relevance score based on term matches
+            if not key_terms:
+                relevance_score = 0.5  # No key terms to match
+            else:
+                relevance_score = term_matches / len(key_terms)
+            
+            # Boost score if question intent matches content type
+            intent_type = question_analysis.get('intent_type', '')
+            if intent_type == 'what_is' and any(word in content for word in ['definition', 'means', 'stands for', 'is a']):
+                relevance_score += 0.2
+            elif intent_type == 'how_to' and any(word in content for word in ['steps', 'process', 'how to', 'tutorial']):
+                relevance_score += 0.2
+            elif intent_type == 'view' and any(word in content for word in ['example', 'instance', 'case', 'scenario']):
+                relevance_score += 0.2
+            
+            # NEW: Prefer earlier timestamps for better topic positioning
+            start_time = candidate.get('start', 0)
+            if start_time > 0:
+                # Boost score for earlier timestamps (prefer chunks that start earlier in the video)
+                # This helps avoid chunks at the end of topic discussions
+                if start_time < 300:  # First 5 minutes
+                    relevance_score += 0.4  # Increased boost
+                elif start_time < 600:  # First 10 minutes
+                    relevance_score += 0.3  # Increased boost
+                elif start_time < 900:  # First 15 minutes
+                    relevance_score += 0.2  # Increased boost
+                else:  # After 15 minutes - penalize
+                    relevance_score -= 0.2  # Penalty for late timestamps
+            
+            # Ensure score is between 0 and 1
+            return min(1.0, max(0.0, relevance_score))
+            
+        except Exception as e:
+            print(f"❌ Timestamp relevance error: {e}")
+            return 0.5
+    
+    def _rerank_with_time_bias(self, candidates: list, query: str) -> list:
+        """Re-rank candidates with temporal bias to prefer earlier timestamps for topic-based queries"""
+        try:
+            import math
+            
+            if not candidates:
+                return candidates
+            
+            K = len(candidates)
+            
+            # 1) Calculate rank normalization
+            ranked = sorted(candidates, key=lambda c: c['enhanced_score'], reverse=True)
+            for r, c in enumerate(ranked, start=1):
+                c['ranknorm'] = (K - r + 1) / K
+            
+            # 2) Intent-aware time prior
+            intent = self._classify_temporal_intent(query)
+            
+            if intent == 'early':
+                lam, gamma, reverse = 2.0, 2.0, False  # Stronger bias for early content
+            elif intent == 'late':
+                lam, gamma, reverse = 0.8, 1.2, True
+            else:  # neutral
+                lam, gamma, reverse = 0.4, 1.0, False
+            
+            # 3) Apply temporal prior to each candidate
+            for c in ranked:
+                if c.get('index_type') == 'video' and c.get('start', 0) > 0:
+                    # Get video duration (estimate from max timestamp or use default)
+                    max_duration = max(c.get('end', 0) for c in candidates if c.get('end', 0) > 0)
+                    if max_duration == 0:
+                        max_duration = 1200  # Default 20 minutes
+                    
+                    p = c['start'] / max_duration
+                    prior_arg = (1 - p) if reverse else p
+                    time_prior = math.exp(-lam * (prior_arg ** gamma))
+                    
+                    # Combine enhanced score with rank normalization and time prior
+                    base = c['enhanced_score'] * 0.9 + c['ranknorm'] * 0.1
+                    c['final_score'] = base * time_prior
+                else:
+                    # For knowledge candidates or video without timestamps, use original score
+                    c['final_score'] = c['enhanced_score']
+            
+            # 4) Sort by final score
+            ranked.sort(key=lambda x: x['final_score'], reverse=True)
+            
+            print(f"🕒 Temporal re-ranking applied (intent: {intent}, λ={lam}, γ={gamma})")
+            if ranked:
+                best = ranked[0]
+                print(f"🕒 Best chunk: {best.get('start', 0)}s (enhanced: {best.get('enhanced_score', 0):.3f}, final: {best['final_score']:.3f})")
+                
+                # Show top 3 for debugging
+                print(f"🕒 Top 3 candidates:")
+                for i, c in enumerate(ranked[:3]):
+                    print(f"   {i+1}. {c.get('start', 0)}s (enhanced: {c.get('enhanced_score', 0):.3f}, final: {c.get('final_score', 0):.3f})")
+            
+            return ranked
+            
+        except Exception as e:
+            print(f"❌ Temporal re-ranking error: {e}")
+            return candidates
+    
+    def _classify_temporal_intent(self, query: str) -> str:
+        """Classify query intent for temporal bias (early, neutral, late)"""
+        query_lower = query.lower()
+        
+        # Early-preferring intents (tips, hacks, how-to, setup, beginners, introduction, what is)
+        early_keywords = [
+            'tips', 'hacks', 'how to', 'setup', 'beginners', 'introduction', 'what is',
+            'guide', 'tutorial', 'steps', 'process', 'create', 'build', 'make',
+            'suggest', 'recommend', 'advice', 'help', 'start', 'begin'
+        ]
+        
+        # Late-preferring intents (summary, conclusion, final thoughts, recap, TL;DR)
+        late_keywords = [
+            'summary', 'conclusion', 'final thoughts', 'recap', 'tl;dr', 'tldr',
+            'key takeaways', 'main points', 'overview', 'wrap up', 'ending',
+            'final verdict', 'bottom line', 'in summary'
+        ]
+        
+        # Check for early-preferring keywords
+        if any(keyword in query_lower for keyword in early_keywords):
+            return 'early'
+        
+        # Check for late-preferring keywords
+        if any(keyword in query_lower for keyword in late_keywords):
+            return 'late'
+        
+        # Default to neutral
+        return 'neutral'
+    
+    def _validate_timestamps(self, candidate: Dict, question: str, question_analysis: Dict) -> bool:
+        """Validate that the chunk's timestamps are relevant to the question"""
+        try:
+            # Get timestamps
+            start = candidate.get('start', 0)
+            end = candidate.get('end', 0)
+            
+            # Basic timestamp validation
+            if start >= end or start < 0:
+                print(f"❌ Invalid timestamp range: {start}-{end}")
+                return False
+            
+            # Check if timestamps are reasonable (not too long or too short)
+            duration = end - start
+            if duration < 3:  # Too short (lowered from 5s)
+                print(f"❌ Timestamp too short: {duration}s")
+                return False
+            if duration > 600:  # Too long (10 minutes, increased from 5)
+                print(f"❌ Timestamp too long: {duration}s")
+                return False
+            
+            # NEW: Penalize chunks that are too late in the video (likely end of topics)
+            if start > 900:  # After 15 minutes
+                print(f"⚠️ Timestamp too late in video: {start}s (likely end of topic)")
+                # Don't fail validation, but warn - this helps avoid end-of-topic chunks
+            
+            # Check content relevance
+            content = candidate.get('content', '').lower()
+            question_lower = question.lower()
+            
+            # Extract key terms from question
+            key_terms = []
+            common_words = {'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'what', 'how', 'when', 'where', 'why', 'who'}
+            words = question_lower.split()
+            key_terms = [word for word in words if len(word) > 3 and word not in common_words]
+            
+            # Check if key terms appear in content (optional validation)
+            if key_terms:
+                term_matches = sum(1 for term in key_terms if term in content)
+                relevance_ratio = term_matches / len(key_terms)
+                
+                # Only warn if very low relevance, don't fail validation
+                if relevance_ratio < 0.2:
+                    print(f"⚠️ Low content relevance: {relevance_ratio:.2f} (continuing anyway)")
+                    # Don't return False, just warn
+            
+            # Check intent-specific validation (made optional to avoid being too strict)
+            intent_type = question_analysis.get('intent_type', '')
+            if intent_type == 'what_is':
+                # For definition questions, look for definition indicators (optional check)
+                definition_words = ['definition', 'means', 'stands for', 'is a', 'refers to', 'mvp', 'minimum viable product']
+                if not any(word in content for word in definition_words):
+                    print(f"⚠️ No definition indicators found for 'what_is' question (continuing anyway)")
+                    # Don't return False, just warn
+            
+            elif intent_type == 'how_to':
+                # For how-to questions, look for procedural indicators (optional check)
+                procedural_words = ['steps', 'process', 'how to', 'tutorial', 'guide', 'method']
+                if not any(word in content for word in procedural_words):
+                    print(f"⚠️ No procedural indicators found for 'how_to' question (continuing anyway)")
+                    # Don't return False, just warn
+            
+            elif intent_type == 'view':
+                # For example questions, look for example indicators (optional check)
+                example_words = ['example', 'instance', 'case', 'scenario', 'for instance', 'such as']
+                if not any(word in content for word in example_words):
+                    print(f"⚠️ No example indicators found for 'view' question (continuing anyway)")
+                    # Don't return False, just warn
+            
+            print(f"✅ Timestamp validation passed: {start}-{end}s")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Timestamp validation error: {e}")
+            return False
+    
     def _intelligent_answer_selection(self, question: str, question_analysis: Dict, scored_candidates: Dict) -> Dict:
-        """Intelligent answer selection with strict quality control"""
+        """Intelligent answer selection with BEST CHUNK ONLY strategy"""
         try:
             video_candidates = scored_candidates['video']
             knowledge_candidates = scored_candidates['knowledge']
             
-            # Get best candidates
-            best_video = video_candidates[0] if video_candidates else None
-            best_knowledge = knowledge_candidates[0] if knowledge_candidates else None
+            # Get best candidates (single best, not combined) - use final_score if available
+            best_video = video_candidates[0] if video_candidates and len(video_candidates) > 0 else None
+            best_knowledge = knowledge_candidates[0] if knowledge_candidates and len(knowledge_candidates) > 0 else None
             
-            print(f"🔍 Best video score: {best_video['enhanced_score']:.3f if best_video else 0}")
-            print(f"🔍 Best knowledge score: {best_knowledge['enhanced_score']:.3f if best_knowledge else 0}")
+            # Use final_score if available (from temporal re-ranking), otherwise enhanced_score
+            video_score = best_video.get('final_score', best_video.get('enhanced_score', 0)) if best_video else 0
+            knowledge_score = best_knowledge.get('final_score', best_knowledge.get('enhanced_score', 0)) if best_knowledge else 0
+            print(f"🔍 Best video score: {video_score:.3f}")
+            print(f"🔍 Best knowledge score: {knowledge_score:.3f}")
+            if best_video:
+                print(f"🔍 Video URL: {best_video.get('video_url', 'EMPTY')}")
+                print(f"🔍 Video URL (alt): {best_video.get('url', 'EMPTY')}")
             
             # Apply strict quality gates
             video_passes_gate = self._video_passes_quality_gate(best_video, question_analysis)
             knowledge_passes_gate = self._knowledge_passes_quality_gate(best_knowledge, question_analysis)
             
+            # Simple timestamp validation (restored to basic version)
+            video_timestamp_valid = True
+            
             print(f"🔍 Video passes gate: {video_passes_gate}")
             print(f"🔍 Knowledge passes gate: {knowledge_passes_gate}")
             
-            # Decision logic with strict quality control
+            # NEW STRATEGY: Choose the SINGLE BEST chunk, don't combine
+            # Priority: Video > Knowledge (if both pass gates)
+            # But only if video is significantly better or question is video-specific
+            
+            # Check if question is video-specific
+            is_video_specific = self._detect_video_intent(question)
+            print(f"🔍 Video-specific question: {is_video_specific}")
+            
+            # Decision logic with BEST CHUNK ONLY strategy (restored to simple version)
+            if video_passes_gate and is_video_specific:
+                # Video-specific question and video passes gate
+                return {
+                    'decision': 'video_only',
+                    'candidate': best_video,
+                    'reason': 'video_specific_question'
+                }
+            
             if knowledge_passes_gate and not video_passes_gate:
+                # Only knowledge passes gate
                 return {
                     'decision': 'knowledge_only',
                     'candidate': best_knowledge,
@@ -500,6 +760,7 @@ class EnhancedSemanticQA:
                 }
             
             if video_passes_gate and not knowledge_passes_gate:
+                # Only video passes gate
                 return {
                     'decision': 'video_only',
                     'candidate': best_video,
@@ -507,36 +768,45 @@ class EnhancedSemanticQA:
                 }
             
             if not knowledge_passes_gate and not video_passes_gate:
+                # Neither passes gate - use fallback
                 return {
                     'decision': 'fallback',
                     'candidate': best_knowledge or best_video,
                     'reason': 'both_failed_quality_gates'
                 }
             
-            # Both pass gates - check dominance
-            video_score = best_video['enhanced_score']
-            knowledge_score = best_knowledge['enhanced_score']
+            # Both pass gates - choose the SINGLE BEST one (use final_score from temporal re-ranking)
+            video_score = best_video.get('final_score', best_video.get('enhanced_score', 0)) if best_video else 0
+            knowledge_score = best_knowledge.get('final_score', best_knowledge.get('enhanced_score', 0)) if best_knowledge else 0
             
-            if video_score >= knowledge_score + 0.1:  # Video significantly better
+            # Choose the significantly better one (minimum 0.15 difference)
+            if video_score >= knowledge_score + 0.15:
                 return {
                     'decision': 'video_only',
                     'candidate': best_video,
-                    'reason': 'video_dominates'
+                    'reason': 'video_significantly_better'
                 }
             
-            if knowledge_score >= video_score + 0.1:  # Knowledge significantly better
+            if knowledge_score >= video_score + 0.15:
                 return {
                     'decision': 'knowledge_only',
                     'candidate': best_knowledge,
-                    'reason': 'knowledge_dominates'
+                    'reason': 'knowledge_significantly_better'
                 }
             
-            # Close scores - prefer knowledge for better answer quality
-            return {
-                'decision': 'knowledge_only',
-                'candidate': best_knowledge,
-                'reason': 'knowledge_preferred_for_quality'
-            }
+            # Close scores - prefer knowledge for better answer quality (unless video-specific)
+            if is_video_specific:
+                return {
+                    'decision': 'video_only',
+                    'candidate': best_video,
+                    'reason': 'video_specific_close_scores'
+                }
+            else:
+                return {
+                    'decision': 'knowledge_only',
+                    'candidate': best_knowledge,
+                    'reason': 'knowledge_preferred_close_scores'
+                }
             
         except Exception as e:
             print(f"❌ Intelligent selection error: {e}")
@@ -547,7 +817,7 @@ class EnhancedSemanticQA:
             }
     
     def _video_passes_quality_gate(self, candidate: Optional[Dict], question_analysis: Dict) -> bool:
-        """Strict quality gate for video candidates"""
+        """Enhanced quality gate for video candidates with improved validation"""
         if not candidate:
             return False
         
@@ -561,30 +831,47 @@ class EnhancedSemanticQA:
             print(f"❌ Video failed: semantic score {candidate['semantic_score']:.3f} < {self.SEMANTIC_SIMILARITY_THRESHOLD}")
             return False
         
-        # Intent alignment threshold
-        if candidate['intent_score'] < 0.6:
-            print(f"❌ Video failed: intent score {candidate['intent_score']:.3f} < 0.6")
+        # Intent alignment threshold (very low to allow more candidates)
+        if candidate['intent_score'] < 0.0:
+            print(f"❌ Video failed: intent score {candidate['intent_score']:.3f} < 0.0")
             return False
         
-        # Video-specific requirements
-        if not candidate.get('seekable', False) or not candidate.get('has_timestamps', False):
-            print(f"❌ Video failed: not seekable or no timestamps")
+        # Video-specific requirements (relaxed - we have timestamps)
+        if not candidate.get('start', 0) and not candidate.get('end', 0):
+            print(f"❌ Video failed: no timestamps")
             return False
         
-        # Validate timestamps
+        # Enhanced timestamp validation
         start = candidate.get('start', 0)
         end = candidate.get('end', 0)
         duration = candidate.get('duration', 0)
         
-        if not (0 <= start < end <= duration):
-            print(f"❌ Video failed: invalid timestamps")
+        # Validate timestamp ranges (relaxed - duration can be 0)
+        if not (0 <= start < end):
+            print(f"❌ Video failed: invalid timestamps (start={start}, end={end})")
             return False
         
-        print(f"✅ Video passes all quality gates")
+        # Validate timestamp duration (not too short, not too long)
+        timestamp_duration = end - start
+        if timestamp_duration < 5:  # At least 5 seconds
+            print(f"❌ Video failed: timestamp too short ({timestamp_duration}s)")
+            return False
+        
+        if timestamp_duration > 300:  # Not more than 5 minutes
+            print(f"❌ Video failed: timestamp too long ({timestamp_duration}s)")
+            return False
+        
+        # Check for meaningful content
+        text_content = candidate.get('text', '')
+        if len(text_content) < 50:
+            print(f"❌ Video failed: insufficient content ({len(text_content)} chars)")
+            return False
+        
+        print(f"✅ Video passes all enhanced quality gates")
         return True
     
     def _knowledge_passes_quality_gate(self, candidate: Optional[Dict], question_analysis: Dict) -> bool:
-        """Strict quality gate for knowledge candidates"""
+        """Enhanced quality gate for knowledge candidates with improved validation"""
         if not candidate:
             return False
         
@@ -608,12 +895,30 @@ class EnhancedSemanticQA:
             print(f"❌ Knowledge failed: no text content")
             return False
         
-        # Text length requirement
-        if len(candidate['text']) < 100:
-            print(f"❌ Knowledge failed: text too short")
+        # Enhanced text length and quality requirements
+        text_content = candidate['text']
+        if len(text_content) < 100:
+            print(f"❌ Knowledge failed: text too short ({len(text_content)} chars)")
             return False
         
-        print(f"✅ Knowledge passes all quality gates")
+        # Check for meaningful content (not just metadata or timestamps)
+        meaningful_words = [word for word in text_content.split() if len(word) > 3]
+        if len(meaningful_words) < 10:
+            print(f"❌ Knowledge failed: insufficient meaningful content ({len(meaningful_words)} words)")
+            return False
+        
+        # Check for content structure (not just a list of timestamps)
+        if text_content.count('[') > len(text_content) / 20:  # Too many timestamp-like brackets
+            print(f"❌ Knowledge failed: too many timestamp-like brackets")
+            return False
+        
+        # Check for title quality
+        title = candidate.get('title', '')
+        if not title or len(title) < 5:
+            print(f"❌ Knowledge failed: poor title quality")
+            return False
+        
+        print(f"✅ Knowledge passes all enhanced quality gates")
         return True
     
     def _quality_assurance_formatting(self, decision: Dict, question: str, question_analysis: Dict) -> Dict:
@@ -639,6 +944,9 @@ class EnhancedSemanticQA:
             # Enhanced LLM formatting with intent awareness
             formatted_answer = self._format_with_intent_awareness(question, context, answer_type, question_analysis)
             
+            # Calculate enhanced confidence score
+            confidence_score = self._calculate_enhanced_confidence_score(candidate, question)
+            
             # Build response payload
             response = {
                 'success': True,
@@ -646,6 +954,7 @@ class EnhancedSemanticQA:
                 'sources': self._build_sources(decision),
                 'total_sources': len(self._build_sources(decision)),
                 'search_score': candidate['enhanced_score'],
+                'confidence_score': confidence_score,
                 'content_types_found': [answer_type],
                 'difficulty_level': candidate.get('difficulty_level', 'intermediate'),
                 'estimated_time': '2-3 minutes'
@@ -657,7 +966,7 @@ class EnhancedSemanticQA:
                 response.update({
                     'start': video_candidate.get('start', 0),
                     'end': video_candidate.get('end', 0),
-                    'video_url': video_candidate.get('video_url', ''),
+                    'video_url': video_candidate.get('video_url', '') or video_candidate.get('url', ''),
                     'formatted_timestamp': self._format_timestamp(video_candidate.get('start', 0), video_candidate.get('end', 0))
                 })
             else:
@@ -674,89 +983,215 @@ class EnhancedSemanticQA:
             return self._safe_fallback()
     
     def _prepare_knowledge_context(self, candidate: Dict) -> str:
-        """Prepare knowledge context for LLM"""
-        return f"""
-Title: {candidate['title']}
-Content: {candidate['text']}
-URL: {candidate.get('url', '')}
-"""
+        """Prepare knowledge context for LLM with better structure"""
+        try:
+            # Clean and structure the content
+            title = candidate.get('title', 'Untitled')
+            content = candidate.get('text', '')
+            url = candidate.get('url', '')
+            
+            # Clean up the content
+            content = self._clean_content(content)
+            
+            # Structure the context
+            context = f"""Title: {title}
+
+Content: {content}"""
+            
+            if url:
+                context += f"\n\nSource URL: {url}"
+            
+            return context
+            
+        except Exception as e:
+            print(f"❌ Error preparing knowledge context: {e}")
+            return f"Title: {candidate.get('title', 'Untitled')}\nContent: {candidate.get('text', '')}"
     
     def _prepare_video_context(self, candidate: Dict) -> str:
-        """Prepare video context for LLM"""
-        timestamp_info = f" (Video timestamp: {self._format_timestamp(candidate.get('start', 0), candidate.get('end', 0))})"
-        return f"""
-Title: {candidate['title']}
-Content: {candidate['text']}{timestamp_info}
-Video URL: {candidate.get('video_url', '')}
-"""
+        """Prepare video context for LLM with better structure"""
+        try:
+            # Clean and structure the content
+            title = candidate.get('title', 'Untitled')
+            content = candidate.get('text', '')
+            video_url = candidate.get('video_url', '') or candidate.get('url', '')
+            start = candidate.get('start', 0)
+            end = candidate.get('end', 0)
+            
+            # Clean up the content
+            content = self._clean_content(content)
+            
+            # Format timestamp info
+            timestamp_info = self._format_timestamp(start, end)
+            
+            # Structure the context
+            context = f"""Title: {title}
+
+Content: {content}
+
+Video Information:
+- Timestamp: {timestamp_info}
+- Duration: {end - start:.1f} seconds"""
+            
+            if video_url:
+                context += f"\n- Video URL: {video_url}"
+            
+            return context
+            
+        except Exception as e:
+            print(f"❌ Error preparing video context: {e}")
+            return f"Title: {candidate.get('title', 'Untitled')}\nContent: {candidate.get('text', '')}"
+    
+    def _clean_content(self, content: str) -> str:
+        """Clean and structure content for better LLM processing"""
+        try:
+            if not content:
+                return ""
+            
+            # Remove excessive whitespace
+            content = ' '.join(content.split())
+            
+            # Remove timestamp-like patterns that are just noise
+            import re
+            # Remove patterns like [00:01] or [1:23] that appear frequently
+            content = re.sub(r'\[\d{1,2}:\d{2}\]', '', content)
+            
+            # Remove excessive punctuation
+            content = re.sub(r'[.]{3,}', '...', content)
+            
+            # Clean up sentence boundaries
+            content = re.sub(r'([.!?])\s*([a-z])', r'\1 \2', content)
+            
+            # Limit length to prevent overwhelming the LLM
+            if len(content) > 2000:
+                content = content[:2000] + "..."
+            
+            return content.strip()
+            
+        except Exception as e:
+            print(f"❌ Error cleaning content: {e}")
+            return content
     
     def _format_with_intent_awareness(self, question: str, context: str, answer_type: str, question_analysis: Dict) -> str:
-        """Format answer with intent awareness"""
+        """Format answer with intent awareness and conversational tone"""
         try:
             intent_type = question_analysis.get('intent_type', '')
             main_action = question_analysis.get('main_action', '')
             
+            # Enhanced prompt for better formatting
             if answer_type == 'knowledge':
                 if intent_type == 'create':
-                    prompt = f"""The user wants to CREATE something. Based on the following knowledge base content, provide clear, step-by-step instructions for creating what they asked for.
+                    prompt = f"""You are a helpful AI assistant. The user wants to CREATE something. Based on the following knowledge base content, provide a clear, conversational, and well-formatted response.
 
 Question: {question}
 Main Action: {main_action}
 
-Content:
+Knowledge Base Content:
 {context}
 
-Provide a direct, actionable answer with numbered steps for creating what they need:"""
+Instructions:
+1. Write in a conversational, helpful tone
+2. Structure your response with clear sections
+3. Use bullet points or numbered steps where appropriate
+4. Make it easy to read and follow
+5. Don't just copy the content - synthesize and explain it clearly
+6. Start with a brief introduction, then provide the steps/instructions
+7. End with a helpful tip or summary
+
+Format your response like a helpful bot would:"""
                 elif intent_type == 'how_to':
-                    prompt = f"""The user is asking HOW TO do something. Based on the following knowledge base content, provide clear, step-by-step instructions.
+                    prompt = f"""You are a helpful AI assistant. The user is asking HOW TO do something. Based on the following knowledge base content, provide a clear, step-by-step guide.
 
 Question: {question}
 Main Action: {main_action}
 
-Content:
+Knowledge Base Content:
 {context}
 
-Provide a direct, actionable answer with numbered steps:"""
+Instructions:
+1. Write in a conversational, helpful tone
+2. Structure your response with clear sections
+3. Use numbered steps for procedures
+4. Make it easy to read and follow
+5. Don't just copy the content - synthesize and explain it clearly
+6. Start with a brief introduction, then provide the steps
+7. End with a helpful tip or summary
+
+Format your response like a helpful bot would:"""
                 else:
-                    prompt = f"""Based on the following knowledge base content, provide a clear, helpful answer to the user's question.
+                    prompt = f"""You are a helpful AI assistant. Based on the following knowledge base content, provide a clear, conversational answer to the user's question.
 
 Question: {question}
 
-Content:
+Knowledge Base Content:
 {context}
 
-Provide a direct, actionable answer:"""
+Instructions:
+1. Write in a conversational, helpful tone
+2. Structure your response with clear sections
+3. Use bullet points or formatting where appropriate
+4. Make it easy to read and follow
+5. Don't just copy the content - synthesize and explain it clearly
+6. Start with a brief introduction, then provide the main information
+7. End with a helpful summary or next steps
+
+Format your response like a helpful bot would:"""
             
             elif answer_type == 'video':
                 if intent_type == 'create':
-                    prompt = f"""The user wants to CREATE something. Based on the following video transcript, provide clear, step-by-step instructions for creating what they asked for.
+                    prompt = f"""You are a knowledgeable sales manager. The user wants to CREATE something. Give them a short, actionable response under 700 characters.
 
 Question: {question}
 Main Action: {main_action}
 
-Content:
+Information:
 {context}
 
-Provide a direct, actionable answer with numbered steps for creating what they need:"""
+Instructions:
+1. Keep your answer UNDER 700 CHARACTERS
+2. Focus on the key steps they need to take
+3. Write in a confident, professional tone
+4. Don't reference "video" or "transcript" - just explain directly
+5. Be concise and actionable
+6. One or two sentences maximum
+
+Answer:"""
                 elif intent_type == 'how_to':
-                    prompt = f"""The user is asking HOW TO do something. Based on the following video transcript, provide clear, step-by-step instructions.
+                    prompt = f"""You are a helpful AI assistant. The user is asking HOW TO do something. Based on the following video transcript, provide a clear, step-by-step guide.
 
 Question: {question}
 Main Action: {main_action}
 
-Content:
+Video Transcript:
 {context}
 
-Provide a direct, actionable answer with numbered steps:"""
+Instructions:
+1. Write in a conversational, helpful tone
+2. Structure your response with clear sections
+3. Use numbered steps for procedures
+4. Make it easy to read and follow
+5. Don't just copy the transcript - synthesize and explain it clearly
+6. Start with a brief introduction, then provide the steps
+7. End with a helpful tip or summary
+8. Mention that this information comes from a video
+
+Format your response like a helpful bot would:"""
                 else:
-                    prompt = f"""Based on the following video transcript, provide a clear, helpful answer to the user's question.
+                    prompt = f"""You are a knowledgeable sales manager. Answer the user's question with a well-structured, detailed response.
 
 Question: {question}
 
-Content:
+Information:
 {context}
 
-Provide a direct, actionable answer:"""
+Instructions:
+1. Write a comprehensive answer (3-5 sentences)
+2. Write in a confident, professional tone
+3. Don't reference "video" or "transcript" - just explain directly
+4. Structure your answer with clear points
+5. Be conversational and informative
+6. Provide actionable insights
+
+Answer:"""
             
             else:
                 return context  # Fallback to raw content
@@ -765,14 +1200,79 @@ Provide a direct, actionable answer:"""
                 model="gpt-3.5-turbo",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
-                max_tokens=600
+                max_tokens=800  # Increased for better formatting
             )
             
-            return response.choices[0].message.content.strip()
+            formatted_answer = response.choices[0].message.content.strip()
+            
+            # Post-process to ensure good formatting
+            formatted_answer = self._post_process_answer(formatted_answer, answer_type)
+            
+            return formatted_answer
             
         except Exception as e:
             print(f"❌ Intent-aware formatting error: {e}")
-            return context  # Fallback to raw content
+            return self._create_fallback_formatted_answer(context, answer_type)
+    
+    def _post_process_answer(self, answer: str, answer_type: str) -> str:
+        """Post-process the answer to ensure good formatting"""
+        try:
+            # Clean up the answer
+            answer = answer.strip()
+            
+            # Ensure it starts with a proper introduction
+            if not answer.startswith(('I', 'Based on', 'Here', 'To', 'You', 'An', 'A', 'The')):
+                if answer_type == 'video':
+                    answer = "Let me explain: " + answer.lower()
+                else:
+                    answer = "Here's what I can tell you: " + answer.lower()
+            
+            # Ensure proper capitalization
+            answer = answer[0].upper() + answer[1:] if len(answer) > 1 else answer
+            
+            # Add source attribution if not present (removed video references)
+            if answer_type == 'knowledge' and 'knowledge' not in answer.lower():
+                answer += "\n\n*This information comes from your knowledge base.*"
+            
+            return answer
+            
+        except Exception as e:
+            print(f"❌ Post-processing error: {e}")
+            return answer
+    
+    def _create_fallback_formatted_answer(self, context: str, answer_type: str) -> str:
+        """Create a fallback formatted answer when LLM processing fails"""
+        try:
+            # Extract key information from context
+            lines = context.split('\n')
+            title = ""
+            content = ""
+            
+            for line in lines:
+                if line.startswith('Title:'):
+                    title = line.replace('Title:', '').strip()
+                elif line.startswith('Content:'):
+                    content = line.replace('Content:', '').strip()
+            
+            # Create a basic formatted response
+            if answer_type == 'video':
+                response = f"Based on the video content about '{title}', here's what I found:\n\n"
+            else:
+                response = f"Based on the knowledge base content about '{title}', here's what I found:\n\n"
+            
+            # Add the content with basic formatting
+            if content:
+                # Limit content length and add basic structure
+                if len(content) > 500:
+                    content = content[:500] + "..."
+                
+                response += content
+            
+            return response
+            
+        except Exception as e:
+            print(f"❌ Fallback formatting error: {e}")
+            return "I found some relevant information, but I'm having trouble formatting it properly. Please try rephrasing your question."
     
     def _build_sources(self, decision: Dict) -> List[Dict]:
         """Build sources list for response"""
@@ -813,7 +1313,7 @@ Provide a direct, actionable answer:"""
             secs = int(seconds % 60)
             return f"{hours}:{minutes:02d}:{secs:02d}"
     
-    def _get_embedding(self, text: str, model: str = "text-embedding-3-small") -> List[float]:
+    def _get_embedding(self, text: str, model: str = "text-embedding-3-large") -> List[float]:
         """Get embedding with caching"""
         # Normalize text for caching
         cache_key = f"{model}:{text.lower().strip()}"
@@ -866,14 +1366,14 @@ Provide a direct, actionable answer:"""
             kn_hits = len(candidates['knowledge'])
             vid_hits = len(candidates['video'])
             
-            kn_score = best_knowledge['enhanced_score'] if best_knowledge else 0
-            vid_score = best_video['enhanced_score'] if best_video else 0
+            kn_score = best_knowledge.get('enhanced_score', 0) if best_knowledge else 0
+            vid_score = best_video.get('enhanced_score', 0) if best_video else 0
             
-            kn_semantic = best_knowledge['semantic_score'] if best_knowledge else 0
-            vid_semantic = best_video['semantic_score'] if best_video else 0
+            kn_semantic = best_knowledge.get('semantic_score', 0) if best_knowledge else 0
+            vid_semantic = best_video.get('semantic_score', 0) if best_video else 0
             
-            kn_intent = best_knowledge['intent_score'] if best_knowledge else 0
-            vid_intent = best_video['intent_score'] if best_video else 0
+            kn_intent = best_knowledge.get('intent_score', 0) if best_knowledge else 0
+            vid_intent = best_video.get('intent_score', 0) if best_video else 0
             
             # Log comprehensive observability
             print(f"📊 [Enhanced QA] q_ms={latency}")
@@ -885,8 +1385,127 @@ Provide a direct, actionable answer:"""
         except Exception as e:
             print(f"❌ Enhanced observability logging error: {e}")
     
+    def _calculate_enhanced_confidence_score(self, candidate: Dict, question: str) -> float:
+        """Calculate enhanced confidence score for a candidate"""
+        try:
+            # Base confidence from enhanced score
+            base_confidence = candidate.get('enhanced_score', 0)
+            
+            # Content quality boost
+            content_length = len(candidate.get('text', ''))
+            if content_length > 100:
+                base_confidence += 0.1
+            if content_length > 200:
+                base_confidence += 0.1
+            if content_length > 500:
+                base_confidence += 0.05
+            
+            # Metadata completeness boost
+            metadata_score = 0
+            if candidate.get('title'): metadata_score += 0.05
+            if candidate.get('summary'): metadata_score += 0.05
+            if candidate.get('url') or candidate.get('video_url'): metadata_score += 0.05
+            if candidate.get('created_at'): metadata_score += 0.05
+            
+            base_confidence += metadata_score
+            
+            # Video content boost
+            if candidate.get('index_type') == 'video' and candidate.get('has_timestamps', False):
+                base_confidence += 0.1
+                # Additional boost for good timestamp range
+                start = candidate.get('start', 0)
+                end = candidate.get('end', 0)
+                if 5 <= (end - start) <= 300:  # Good timestamp duration
+                    base_confidence += 0.05
+            
+            # Knowledge content boost
+            if candidate.get('index_type') == 'knowledge':
+                if candidate.get('has_steps', False):
+                    base_confidence += 0.1
+                if candidate.get('content_has_text', True):
+                    base_confidence += 0.05
+            
+            # Question relevance boost
+            question_words = set(question.lower().split())
+            candidate_text = f"{candidate.get('title', '')} {candidate.get('text', '')}".lower()
+            candidate_words = set(candidate_text.split())
+            common_words = question_words.intersection(candidate_words)
+            if len(common_words) > 0:
+                base_confidence += min(len(common_words) * 0.02, 0.1)
+            
+            return min(base_confidence, 1.0)
+            
+        except Exception as e:
+            print(f"❌ Error calculating enhanced confidence score: {e}")
+            return 0.5
+    
+    def _detect_video_intent(self, question: str) -> bool:
+        """Detect if question is video-specific"""
+        video_keywords = ['video', 'show me', 'watch', 'play', 'timestamp', 'demo', 'recording']
+        return any(keyword in question.lower() for keyword in video_keywords)
+    
+    def _filter_similar_chunks(self, chunks: List[Dict], question: str) -> List[Dict]:
+        """Filter out similar chunks to avoid repetitive content"""
+        try:
+            if len(chunks) <= 1:
+                return chunks
+            
+            # Keep only the best chunk (highest enhanced score)
+            # This ensures we don't combine similar chunks
+            best_chunk = max(chunks, key=lambda x: x.get('enhanced_score', 0))
+            
+            # Additional filtering: remove chunks that are too similar to the best one
+            filtered_chunks = [best_chunk]
+            
+            for chunk in chunks:
+                if chunk == best_chunk:
+                    continue
+                
+                # Check similarity with best chunk
+                similarity = self._calculate_chunk_similarity(best_chunk, chunk)
+                
+                # Only keep if significantly different (less than 80% similar)
+                if similarity < 0.8:
+                    filtered_chunks.append(chunk)
+                    break  # Only keep one additional chunk max
+            
+            print(f"🔍 Filtered {len(chunks)} chunks down to {len(filtered_chunks)} unique chunks")
+            return filtered_chunks[:1]  # Return only the best chunk
+            
+        except Exception as e:
+            print(f"❌ Error filtering similar chunks: {e}")
+            return chunks[:1] if chunks else []  # Return only first chunk as fallback
+    
+    def _calculate_chunk_similarity(self, chunk1: Dict, chunk2: Dict) -> float:
+        """Calculate similarity between two chunks"""
+        try:
+            # Simple similarity based on text content
+            text1 = chunk1.get('text', '').lower()
+            text2 = chunk2.get('text', '').lower()
+            
+            if not text1 or not text2:
+                return 0.0
+            
+            # Calculate word overlap
+            words1 = set(text1.split())
+            words2 = set(text2.split())
+            
+            if not words1 or not words2:
+                return 0.0
+            
+            intersection = words1.intersection(words2)
+            union = words1.union(words2)
+            
+            similarity = len(intersection) / len(union) if union else 0.0
+            
+            return similarity
+            
+        except Exception as e:
+            print(f"❌ Error calculating chunk similarity: {e}")
+            return 0.0
+    
     def _safe_fallback(self) -> Dict:
-        """Safe fallback response"""
+        """Enhanced safe fallback response"""
         return {
             'success': False,
             'answer': "I couldn't find relevant information to answer your question. Please try rephrasing or ask about a different topic.",
@@ -898,7 +1517,9 @@ Provide a direct, actionable answer:"""
             'search_score': 0,
             'content_types_found': [],
             'difficulty_level': 'unknown',
-            'estimated_time': 'unknown'
+            'estimated_time': 'unknown',
+            'confidence_score': 0.0,
+            'fallback_reason': 'no_relevant_content_found'
         }
 
 

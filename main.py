@@ -239,15 +239,15 @@ async def health_check():
 
 @app.post("/ask/{company_name}/{qudemo_id}")
 async def ask_question(company_name: str, qudemo_id: str, request: QuestionRequest):
-    """Ask a question and get context-aware answer using enhanced Q&A system"""
+    """Ask a question and get context-aware answer using enhanced semantic Q&A system"""
     try:
-        if not enhanced_qa_system:
-            raise HTTPException(status_code=500, detail="Enhanced Q&A System not initialized")
+        if not enhanced_semantic_qa_system:
+            raise HTTPException(status_code=500, detail="Enhanced Semantic Q&A System not initialized")
         
         logger.info(f"❓ Processing question for {company_name} qudemo {qudemo_id}")
         
-        # Use enhanced Q&A system to get answer
-        answer_result = enhanced_qa_system.ask_question(
+        # Use enhanced semantic Q&A system to get answer (BEST CHUNK ONLY strategy)
+        answer_result = enhanced_semantic_qa_system.ask_question(
             question=request.question,
             company_name=company_name,
             qudemo_id=qudemo_id
@@ -257,23 +257,36 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
             return {
                 'success': True,
                 'answer': answer_result['answer'],
-                'sources': answer_result['sources'],
-                'total_sources': answer_result['total_sources'],
-                'search_score': answer_result['search_score'],
-                'content_types_found': answer_result['content_types_found'],
-                'difficulty_level': answer_result['difficulty_level'],
-                'estimated_time': answer_result['estimated_time'],
+                'sources': answer_result.get('sources', []),
+                'total_sources': answer_result.get('total_sources', 0),
+                'search_score': answer_result.get('search_score', 0),
+                'confidence_score': answer_result.get('confidence_score', 0),
+                'content_types_found': answer_result.get('content_types_found', []),
+                'difficulty_level': answer_result.get('difficulty_level', 'intermediate'),
+                'estimated_time': answer_result.get('estimated_time', '2-3 minutes'),
                 'start': answer_result.get('start', 0),
                 'end': answer_result.get('end', 0),
                 'video_url': answer_result.get('video_url'),
-                'answer_source': answer_result.get('source', 'combined')
+                'formatted_timestamp': answer_result.get('formatted_timestamp', ''),
+                'answer_source': 'enhanced_semantic_qa'
             }
         else:
             return {
                 'success': False,
                 'error': answer_result.get('error', 'Unknown error'),
                 'answer': answer_result.get('answer', ''),
-                'sources': []
+                'start': 0,
+                'end': 0,
+                'video_url': None,
+                'sources': [],
+                'total_sources': 0,
+                'search_score': 0,
+                'confidence_score': 0,
+                'content_types_found': [],
+                'difficulty_level': 'unknown',
+                'estimated_time': 'unknown',
+                'formatted_timestamp': '',
+                'answer_source': 'enhanced_semantic_qa'
             }
             
     except Exception as e:

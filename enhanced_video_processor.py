@@ -37,41 +37,28 @@ class EnhancedVideoProcessor:
         return self.knowledge_integration
     
     async def process_youtube_video(self, video_url: str, company_name: str, qudemo_id: str) -> Dict:
-        """Process YouTube video with enhanced transcript extraction using Gemini"""
+        """Process YouTube video with unified chunking system"""
         try:
-            logger.info(f"🎥 Processing YouTube video for {company_name} qudemo {qudemo_id}")
+            logger.info(f"🎥 Processing YouTube video with unified chunking for {company_name} qudemo {qudemo_id}")
             
-            # Use the new Gemini Transcription Processor
-            from gemini_transcription import GeminiTranscriptionProcessor
+            # Use the unified chunking system through video_processing
+            from video_processing import process_video_with_semantic_chunking
             
-            # Initialize the processor
-            gemini_api_key = os.getenv('GEMINI_API_KEY')
-            pinecone_api_key = os.getenv('PINECONE_API_KEY')
-            openai_api_key = os.getenv('OPENAI_API_KEY')
-            
-            if not all([gemini_api_key, pinecone_api_key, openai_api_key]):
-                raise Exception("Missing required API keys: GEMINI_API_KEY, PINECONE_API_KEY, OPENAI_API_KEY")
-            
-            processor = GeminiTranscriptionProcessor(
-                gemini_api_key=gemini_api_key,
-                pinecone_api_key=pinecone_api_key,
-                openai_api_key=openai_api_key
-            )
-            
-            # Process the video with qudemo_id for proper namespace
-            result = await processor.process_video_with_qudemo(video_url, company_name, qudemo_id)
+            # Process video with unified chunking
+            result = await process_video_with_semantic_chunking(video_url, company_name, qudemo_id)
             
             if result and result.get('success'):
-                logger.info(f"✅ Successfully processed YouTube video using Gemini")
+                chunks_created = result.get('chunks_created', 0)
+                logger.info(f"✅ Successfully processed YouTube video with unified chunking: {chunks_created} chunks")
                 return {
                     'success': True,
-                    'chunks_stored': result.get('chunks_stored', result.get('chunks_created', 0)),
+                    'chunks_stored': chunks_created,
                     'video_type': 'youtube',
                     'company_name': company_name,
                     'qudemo_id': qudemo_id,
-                    'video_title': result.get('title', ''),
-                    'video_duration': result.get('duration', ''),
-                    'total_segments': result.get('chunks_stored', result.get('chunks_created', 0)),
+                    'video_title': 'YouTube Video',
+                    'video_duration': '',
+                    'total_segments': chunks_created,
                     'storage_details': result
                 }
             else:
@@ -91,39 +78,28 @@ class EnhancedVideoProcessor:
             }
     
     async def process_loom_video(self, video_url: str, company_name: str, qudemo_id: str, media_file_path: str = None) -> Dict:
-        """Process Loom video with Whisper transcription using loom_processor"""
+        """Process Loom video with unified chunking system"""
         try:
-            logger.info(f"🎥 Processing Loom video for {company_name} qudemo {qudemo_id}")
+            logger.info(f"🎥 Processing Loom video with unified chunking for {company_name} qudemo {qudemo_id}")
             
-            # Use the Loom Video Processor with Whisper
-            from loom_processor import LoomVideoProcessor
+            # Use the unified chunking system through video_processing
+            from video_processing import process_video_with_semantic_chunking
             
-            # Initialize the processor
-            openai_api_key = os.getenv('OPENAI_API_KEY')
-            pinecone_api_key = os.getenv('PINECONE_API_KEY')
-            
-            if not all([openai_api_key, pinecone_api_key]):
-                raise Exception("Missing required API keys: OPENAI_API_KEY, PINECONE_API_KEY")
-            
-            processor = LoomVideoProcessor(
-                openai_api_key=openai_api_key,
-                pinecone_api_key=pinecone_api_key
-            )
-            
-            # Process the video with qudemo_id for proper namespace
-            result = processor.process_loom_video(video_url, company_name, qudemo_id, media_file_path)
+            # Process video with unified chunking
+            result = await process_video_with_semantic_chunking(video_url, company_name, qudemo_id)
             
             if result and result.get('success'):
-                logger.info(f"✅ Successfully processed Loom video using Whisper")
+                chunks_created = result.get('chunks_created', 0)
+                logger.info(f"✅ Successfully processed Loom video with unified chunking: {chunks_created} chunks")
                 return {
                     'success': True,
-                    'chunks_stored': result.get('chunks_stored', 0),
+                    'chunks_stored': chunks_created,
                     'video_type': 'loom',
                     'company_name': company_name,
                     'qudemo_id': qudemo_id,
-                    'video_title': result.get('title', ''),
-                    'video_duration': result.get('duration', ''),
-                    'total_segments': result.get('chunks_stored', 0),
+                    'video_title': 'Loom Video',
+                    'video_duration': '',
+                    'total_segments': chunks_created,
                     'storage_details': result
                 }
             else:

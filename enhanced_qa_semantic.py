@@ -18,16 +18,16 @@ from sklearn.metrics.pairwise import cosine_similarity
 class EnhancedSemanticQA:
     """Enhanced Q&A system with semantic understanding and context-aware relevance"""
     
-    # Enhanced thresholds for better quality control (restored to original)
-    KNOWLEDGE_MIN_RELEVANCE = 0.65  # Higher threshold for knowledge
-    VIDEO_MIN_RELEVANCE = 0.4       # Lowered threshold for videos
-    SEMANTIC_SIMILARITY_THRESHOLD = 0.2  # Very low threshold to allow more content
-    CONTEXT_UNDERSTANDING_THRESHOLD = 0.7  # Context understanding threshold
+    # Enhanced thresholds for better quality control (relaxed for better coverage)
+    KNOWLEDGE_MIN_RELEVANCE = 0.3   # Lowered threshold for knowledge
+    VIDEO_MIN_RELEVANCE = 0.2       # Much lower threshold for videos
+    SEMANTIC_SIMILARITY_THRESHOLD = 0.1  # Very low threshold to allow more content
+    CONTEXT_UNDERSTANDING_THRESHOLD = 0.3  # Lowered context understanding threshold
     
     # Retrieval parameters
     TOP_K_RECALL = 25
     TOP_K_RERANK = 10
-    SCORE_THRESHOLD = 0.15  # Higher initial threshold
+    SCORE_THRESHOLD = 0.05  # Much lower initial threshold
     
     def __init__(self):
         """Initialize enhanced semantic QA system"""
@@ -44,11 +44,13 @@ class EnhancedSemanticQA:
         # Pinecone client
         self.pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
         
-        # Embedding cache
+        # Enhanced embedding cache
         self._embedding_cache = OrderedDict()
         self._cache_timestamps = {}
-        self.CACHE_SIZE = 100
+        self.CACHE_SIZE = 200  # Increased cache size
         self.CACHE_TTL = 24 * 60 * 60  # 24 hours
+        self._cache_hits = 0
+        self._cache_misses = 0
     
     def ask_question(self, question: str, company_name: str, qudemo_id: str) -> Dict:
         """Main QA entry point with enhanced semantic understanding"""
@@ -291,11 +293,11 @@ class EnhancedSemanticQA:
             # Add index-specific fields
             if index_type == 'video':
                 candidate.update({
-                    'seekable': metadata.get('seekable', False),
-                    'has_timestamps': metadata.get('has_timestamps', False),
-                    'start': metadata.get('start_timestamp', 0),
-                    'end': metadata.get('end_timestamp', 0),
-                    'duration': metadata.get('duration', 0),
+                    'seekable': metadata.get('seekable', True),  # Default to True for video content
+                    'has_timestamps': metadata.get('has_timestamps', True),  # Default to True for video content
+                    'start': metadata.get('start_timestamp', metadata.get('start', 0)),
+                    'end': metadata.get('end_timestamp', metadata.get('end', 0)),
+                    'duration': metadata.get('duration', metadata.get('chunk_duration', 0)),
                     'video_url': metadata.get('video_url', '') or metadata.get('url', '')
                 })
             elif index_type == 'knowledge':
@@ -359,12 +361,11 @@ class EnhancedSemanticQA:
             # Sort by enhanced score
             all_candidates.sort(key=lambda x: x['enhanced_score'], reverse=True)
             
-            # Apply quality thresholds (restored to simple version)
-            filtered_candidates = [c for c in all_candidates if c['enhanced_score'] >= 0.3]
+            # Apply quality thresholds (relaxed for better coverage)
+            filtered_candidates = [c for c in all_candidates if c['enhanced_score'] >= 0.1]
             
-            # NEW: Apply temporal prior re-ranking for better topic positioning
-            if filtered_candidates:
-                filtered_candidates = self._rerank_with_time_bias(filtered_candidates, question)
+            # No temporal re-ranking - use enhanced scores directly
+            # This ensures only the most relevant content is selected regardless of timestamp
             
             # Separate back into video/knowledge
             video_candidates = [c for c in filtered_candidates if c['index_type'] == 'video']
@@ -538,7 +539,7 @@ class EnhancedSemanticQA:
             return 0.5
     
     def _rerank_with_time_bias(self, candidates: list, query: str) -> list:
-        """Re-rank candidates with temporal bias to prefer earlier timestamps for topic-based queries"""
+        """Re-rank candidates with smart temporal bias - only apply when relevance scores are close"""
         try:
             import math
             
@@ -552,17 +553,23 @@ class EnhancedSemanticQA:
             for r, c in enumerate(ranked, start=1):
                 c['ranknorm'] = (K - r + 1) / K
             
-            # 2) Intent-aware time prior
-            intent = self._classify_temporal_intent(query)
+            # 2) Check if temporal bias should be applied
+            # Only apply temporal bias if top candidates have similar relevance scores
+            if len(ranked) >= 2:
+                top_score = ranked[0]['enhanced_score']
+                second_score = ranked[1]['enhanced_score']
+                score_diff = top_score - second_score
+                
+                # Only apply temporal bias if scores are close (within 0.1)
+                apply_temporal_bias = score_diff < 0.1
+            else:
+                apply_temporal_bias = False
             
-            if intent == 'early':
-                lam, gamma, reverse = 2.0, 2.0, False  # Stronger bias for early content
-            elif intent == 'late':
-                lam, gamma, reverse = 0.8, 1.2, True
-            else:  # neutral
-                lam, gamma, reverse = 0.4, 1.0, False
+            # 3) No temporal bias - only use relevance scores
+            # Completely remove early timestamp selection logic
+            lam, gamma, reverse = 0.0, 1.0, False  # No temporal bias at all
             
-            # 3) Apply temporal prior to each candidate
+            # 4) Apply temporal prior to each candidate
             for c in ranked:
                 if c.get('index_type') == 'video' and c.get('start', 0) > 0:
                     # Get video duration (estimate from max timestamp or use default)
@@ -574,9 +581,26 @@ class EnhancedSemanticQA:
                     prior_arg = (1 - p) if reverse else p
                     time_prior = math.exp(-lam * (prior_arg ** gamma))
                     
-                    # Combine enhanced score with rank normalization and time prior
+                    # Get unified chunking metadata for quality boost
+                    metadata = c.get('metadata', {})
+                    content_quality = metadata.get('content_quality', 0.5)
+                    is_complete_sentence = metadata.get('is_complete_sentence', False)
+                    
+                    # Enhanced quality boost for high-quality, complete chunks
+                    quality_boost = 1.0
+                    if content_quality > 0.8:
+                        quality_boost = 1.15  # 15% boost for high quality
+                    elif content_quality > 0.6:
+                        quality_boost = 1.10  # 10% boost for good quality
+                    elif content_quality > 0.4:
+                        quality_boost = 1.05  # 5% boost for decent quality
+                    
+                    if is_complete_sentence:
+                        quality_boost *= 1.08  # 8% boost for complete sentences
+                    
+                    # Combine enhanced score with rank normalization, time prior, and quality boost
                     base = c['enhanced_score'] * 0.9 + c['ranknorm'] * 0.1
-                    c['final_score'] = base * time_prior
+                    c['final_score'] = base * time_prior * quality_boost
                 else:
                     # For knowledge candidates or video without timestamps, use original score
                     c['final_score'] = c['enhanced_score']
@@ -589,10 +613,13 @@ class EnhancedSemanticQA:
                 best = ranked[0]
                 print(f"🕒 Best chunk: {best.get('start', 0)}s (enhanced: {best.get('enhanced_score', 0):.3f}, final: {best['final_score']:.3f})")
                 
-                # Show top 3 for debugging
+                # Show top 3 for debugging with unified metadata
                 print(f"🕒 Top 3 candidates:")
                 for i, c in enumerate(ranked[:3]):
-                    print(f"   {i+1}. {c.get('start', 0)}s (enhanced: {c.get('enhanced_score', 0):.3f}, final: {c.get('final_score', 0):.3f})")
+                    metadata = c.get('metadata', {})
+                    quality = metadata.get('content_quality', 0)
+                    complete = metadata.get('is_complete_sentence', False)
+                    print(f"   {i+1}. {c.get('start', 0)}s (enhanced: {c.get('enhanced_score', 0):.3f}, final: {c.get('final_score', 0):.3f}, quality: {quality:.2f}, complete: {complete})")
             
             return ranked
             
@@ -715,9 +742,9 @@ class EnhancedSemanticQA:
             best_video = video_candidates[0] if video_candidates and len(video_candidates) > 0 else None
             best_knowledge = knowledge_candidates[0] if knowledge_candidates and len(knowledge_candidates) > 0 else None
             
-            # Use final_score if available (from temporal re-ranking), otherwise enhanced_score
-            video_score = best_video.get('final_score', best_video.get('enhanced_score', 0)) if best_video else 0
-            knowledge_score = best_knowledge.get('final_score', best_knowledge.get('enhanced_score', 0)) if best_knowledge else 0
+            # Use enhanced_score directly (no temporal re-ranking)
+            video_score = best_video.get('enhanced_score', 0) if best_video else 0
+            knowledge_score = best_knowledge.get('enhanced_score', 0) if best_knowledge else 0
             print(f"🔍 Best video score: {video_score:.3f}")
             print(f"🔍 Best knowledge score: {knowledge_score:.3f}")
             if best_video:
@@ -775,9 +802,9 @@ class EnhancedSemanticQA:
                     'reason': 'both_failed_quality_gates'
                 }
             
-            # Both pass gates - choose the SINGLE BEST one (use final_score from temporal re-ranking)
-            video_score = best_video.get('final_score', best_video.get('enhanced_score', 0)) if best_video else 0
-            knowledge_score = best_knowledge.get('final_score', best_knowledge.get('enhanced_score', 0)) if best_knowledge else 0
+            # Both pass gates - choose the SINGLE BEST one (use enhanced_score directly)
+            video_score = best_video.get('enhanced_score', 0) if best_video else 0
+            knowledge_score = best_knowledge.get('enhanced_score', 0) if best_knowledge else 0
             
             # Choose the significantly better one (minimum 0.15 difference)
             if video_score >= knowledge_score + 0.15:
@@ -954,6 +981,7 @@ class EnhancedSemanticQA:
                 'sources': self._build_sources(decision),
                 'total_sources': len(self._build_sources(decision)),
                 'search_score': candidate['enhanced_score'],
+                'confidence': confidence_score,
                 'confidence_score': confidence_score,
                 'content_types_found': [answer_type],
                 'difficulty_level': candidate.get('difficulty_level', 'intermediate'),
@@ -967,6 +995,7 @@ class EnhancedSemanticQA:
                     'start': video_candidate.get('start', 0),
                     'end': video_candidate.get('end', 0),
                     'video_url': video_candidate.get('video_url', '') or video_candidate.get('url', ''),
+                    'timestamp': self._format_timestamp(video_candidate.get('start', 0), video_candidate.get('end', 0)),
                     'formatted_timestamp': self._format_timestamp(video_candidate.get('start', 0), video_candidate.get('end', 0))
                 })
             else:
@@ -1008,7 +1037,7 @@ Content: {content}"""
             return f"Title: {candidate.get('title', 'Untitled')}\nContent: {candidate.get('text', '')}"
     
     def _prepare_video_context(self, candidate: Dict) -> str:
-        """Prepare video context for LLM with better structure"""
+        """Prepare video context for LLM with unified chunking metadata"""
         try:
             # Clean and structure the content
             title = candidate.get('title', 'Untitled')
@@ -1017,20 +1046,55 @@ Content: {content}"""
             start = candidate.get('start', 0)
             end = candidate.get('end', 0)
             
+            # Get unified chunking metadata
+            metadata = candidate.get('metadata', {})
+            content_quality = metadata.get('content_quality', 0)
+            is_complete_sentence = metadata.get('is_complete_sentence', False)
+            word_count = metadata.get('word_count', 0)
+            topic_keywords = metadata.get('topic_keywords', [])
+            has_question = metadata.get('has_question', False)
+            has_instruction = metadata.get('has_instruction', False)
+            has_explanation = metadata.get('has_explanation', False)
+            
             # Clean up the content
             content = self._clean_content(content)
             
             # Format timestamp info
             timestamp_info = self._format_timestamp(start, end)
             
-            # Structure the context
+            # Structure the context with enhanced metadata
             context = f"""Title: {title}
 
 Content: {content}
 
 Video Information:
 - Timestamp: {timestamp_info}
-- Duration: {end - start:.1f} seconds"""
+- Duration: {end - start:.1f} seconds
+- Word Count: {word_count} words"""
+            
+            # Add quality indicators
+            if content_quality > 0.7:
+                context += "\n- Quality: High-quality content"
+            elif content_quality > 0.4:
+                context += "\n- Quality: Good content"
+            
+            if is_complete_sentence:
+                context += "\n- Structure: Complete sentences"
+            
+            if topic_keywords:
+                context += f"\n- Keywords: {', '.join(topic_keywords[:3])}"
+            
+            # Add content type indicators
+            content_types = []
+            if has_question:
+                content_types.append("question")
+            if has_instruction:
+                content_types.append("instruction")
+            if has_explanation:
+                content_types.append("explanation")
+            
+            if content_types:
+                context += f"\n- Content Type: {', '.join(content_types)}"
             
             if video_url:
                 context += f"\n- Video URL: {video_url}"
@@ -1184,12 +1248,13 @@ Information:
 {context}
 
 Instructions:
-1. Write a comprehensive answer (3-5 sentences)
+1. Write a comprehensive answer (3-5 sentences, 600-800 characters)
 2. Write in a confident, professional tone
 3. Don't reference "video" or "transcript" - just explain directly
 4. Structure your answer with clear points
 5. Be conversational and informative
 6. Provide actionable insights
+7. Keep your answer between 600-800 characters for optimal readability
 
 Answer:"""
             
@@ -1323,6 +1388,7 @@ Answer:"""
             # Check TTL
             if time.time() - self._cache_timestamps[cache_key] < self.CACHE_TTL:
                 self._embedding_cache.move_to_end(cache_key)
+                self._cache_hits += 1
                 return self._embedding_cache[cache_key]
             else:
                 # Expired, remove from cache
@@ -1331,6 +1397,7 @@ Answer:"""
         
         # Generate new embedding
         try:
+            self._cache_misses += 1
             response = self.openai_client.embeddings.create(
                 model=model,
                 input=text
@@ -1376,29 +1443,70 @@ Answer:"""
             vid_intent = best_video.get('intent_score', 0) if best_video else 0
             
             # Log comprehensive observability
+            cache_hit_rate = (self._cache_hits / (self._cache_hits + self._cache_misses)) * 100 if (self._cache_hits + self._cache_misses) > 0 else 0
             print(f"📊 [Enhanced QA] q_ms={latency}")
             print(f"    intent={question_analysis.get('intent_type', 'unknown')}")
             print(f"    kn: hits={kn_hits} S={kn_score:.3f} sem={kn_semantic:.3f} intent={kn_intent:.3f}")
             print(f"    vid: hits={vid_hits} S={vid_score:.3f} sem={vid_semantic:.3f} intent={vid_intent:.3f}")
             print(f"    decision={decision['decision']} reason={decision['reason']}")
+            print(f"    cache: hit_rate={cache_hit_rate:.1f}% hits={self._cache_hits} misses={self._cache_misses}")
             
         except Exception as e:
             print(f"❌ Enhanced observability logging error: {e}")
     
     def _calculate_enhanced_confidence_score(self, candidate: Dict, question: str) -> float:
-        """Calculate enhanced confidence score for a candidate"""
+        """Calculate enhanced confidence score with unified chunking metadata integration"""
         try:
             # Base confidence from enhanced score
             base_confidence = candidate.get('enhanced_score', 0)
             
-            # Content quality boost
-            content_length = len(candidate.get('text', ''))
-            if content_length > 100:
-                base_confidence += 0.1
-            if content_length > 200:
-                base_confidence += 0.1
-            if content_length > 500:
+            # Get unified chunking metadata for enhanced scoring
+            metadata = candidate.get('metadata', {})
+            content_quality = metadata.get('content_quality', 0.5)
+            is_complete_sentence = metadata.get('is_complete_sentence', False)
+            word_count = metadata.get('word_count', 0)
+            topic_keywords = metadata.get('topic_keywords', [])
+            has_question = metadata.get('has_question', False)
+            has_instruction = metadata.get('has_instruction', False)
+            has_explanation = metadata.get('has_explanation', False)
+            
+            # Enhanced content quality boost using unified metadata
+            if content_quality > 0.8:
+                base_confidence += 0.15  # 15% boost for high quality
+            elif content_quality > 0.6:
+                base_confidence += 0.10  # 10% boost for good quality
+            elif content_quality > 0.4:
+                base_confidence += 0.05  # 5% boost for decent quality
+            
+            # Complete sentence boost
+            if is_complete_sentence:
+                base_confidence += 0.08  # 8% boost for complete sentences
+            
+            # Word count quality boost
+            if word_count > 50:
                 base_confidence += 0.05
+            if word_count > 100:
+                base_confidence += 0.05
+            if word_count > 200:
+                base_confidence += 0.03
+            
+            # Content type boost
+            content_type_score = 0
+            if has_question:
+                content_type_score += 0.03
+            if has_instruction:
+                content_type_score += 0.05
+            if has_explanation:
+                content_type_score += 0.05
+            
+            base_confidence += content_type_score
+            
+            # Topic keywords relevance boost
+            if topic_keywords:
+                question_lower = question.lower()
+                keyword_matches = sum(1 for keyword in topic_keywords if keyword.lower() in question_lower)
+                if keyword_matches > 0:
+                    base_confidence += min(keyword_matches * 0.02, 0.08)
             
             # Metadata completeness boost
             metadata_score = 0

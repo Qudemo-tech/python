@@ -22,15 +22,18 @@ from enhanced_pinecone_manager import initialize_enhanced_pinecone_manager, get_
 from enhanced_knowledge_integration import initialize_enhanced_knowledge_integration, get_enhanced_knowledge_integration
 from enhanced_qa_simple import initialize_simple_enhanced_qa, get_simple_enhanced_qa
 from enhanced_qa_semantic import initialize_enhanced_semantic_qa, get_enhanced_semantic_qa
+from enhanced_qa_topic_wise import initialize_enhanced_topic_wise_qa, get_enhanced_topic_wise_qa
 from context_first_qa import initialize_context_first_qa, get_context_first_qa
 from final_gemini_scraper import FinalGeminiScraper
-from enhanced_scraper_with_failure_handling import initialize_enhanced_scraper, get_enhanced_scraper
+# from enhanced_scraper_with_failure_handling import initialize_enhanced_scraper, get_enhanced_scraper
 
 # New universal scraper system
-from universal_help_scraper import UniversalScraperIntegration
+# from universal_help_scraper import UniversalScraperIntegration
 
 # Video processing imports
 from enhanced_video_processor import initialize_enhanced_video_processor, get_enhanced_video_processor
+from enhanced_video_chunking_processor import initialize_enhanced_chunking_processor, get_enhanced_chunking_processor
+from delete_reprocess_utils import initialize_delete_reprocess_manager, get_delete_reprocess_manager
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -45,15 +48,18 @@ enhanced_pinecone_manager = None
 enhanced_knowledge_integration = None
 enhanced_qa_system = None
 enhanced_semantic_qa_system = None
+enhanced_topic_wise_qa_system = None
 context_first_qa_system = None
 enhanced_video_processor = None
+enhanced_chunking_processor = None
+delete_reprocess_manager = None
 universal_scraper_integration = None
 enhanced_scraper = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for FastAPI"""
-    global enhanced_pinecone_manager, enhanced_knowledge_integration, enhanced_qa_system, enhanced_semantic_qa_system, context_first_qa_system, enhanced_video_processor, universal_scraper_integration, enhanced_scraper
+    global enhanced_pinecone_manager, enhanced_knowledge_integration, enhanced_qa_system, enhanced_semantic_qa_system, enhanced_topic_wise_qa_system, context_first_qa_system, enhanced_video_processor, enhanced_chunking_processor, delete_reprocess_manager, universal_scraper_integration, enhanced_scraper
     
     try:
         logger.info("🚀 Starting Enhanced QuDemo Python Backend...")
@@ -90,6 +96,18 @@ async def lifespan(app: FastAPI):
             logger.error("❌ Failed to initialize Enhanced Semantic Q&A System")
             return
         
+        # Initialize Enhanced Topic-Wise Q&A System (NEW - Primary for topic-wise chunks)
+        try:
+            if initialize_enhanced_topic_wise_qa():
+                enhanced_topic_wise_qa_system = get_enhanced_topic_wise_qa()
+                logger.info("✅ Enhanced Topic-Wise Q&A System initialized (Primary for topic-wise chunks)")
+            else:
+                logger.warning("⚠️ Enhanced Topic-Wise Q&A System initialization failed, will use fallback")
+                enhanced_topic_wise_qa_system = None
+        except Exception as e:
+            logger.warning(f"⚠️ Enhanced Topic-Wise Q&A System initialization failed: {e}, will use fallback")
+            enhanced_topic_wise_qa_system = None
+        
         # Initialize Context-First Q&A System
         if initialize_context_first_qa():
             context_first_qa_system = get_context_first_qa()
@@ -110,6 +128,30 @@ async def lifespan(app: FastAPI):
             logger.warning(f"⚠️ Enhanced Video Processor initialization failed: {e}, will use direct processor")
             enhanced_video_processor = None
         
+        # Initialize Enhanced Chunking Processor (NEW - Primary for YouTube videos)
+        try:
+            if initialize_enhanced_chunking_processor():
+                enhanced_chunking_processor = get_enhanced_chunking_processor()
+                logger.info("✅ Enhanced Chunking Processor initialized (Primary for YouTube)")
+            else:
+                logger.warning("⚠️ Enhanced Chunking Processor initialization failed, will use fallback")
+                enhanced_chunking_processor = None
+        except Exception as e:
+            logger.warning(f"⚠️ Enhanced Chunking Processor initialization failed: {e}, will use fallback")
+            enhanced_chunking_processor = None
+        
+        # Initialize Delete/Reprocess Manager
+        try:
+            if initialize_delete_reprocess_manager():
+                delete_reprocess_manager = get_delete_reprocess_manager()
+                logger.info("✅ Delete/Reprocess Manager initialized")
+            else:
+                logger.warning("⚠️ Delete/Reprocess Manager initialization failed")
+                delete_reprocess_manager = None
+        except Exception as e:
+            logger.warning(f"⚠️ Delete/Reprocess Manager initialization failed: {e}")
+            delete_reprocess_manager = None
+        
         # Initialize existing video processing system as fallback
         try:
             from video_processing import initialize_processors
@@ -120,25 +162,13 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"⚠️ Could not initialize existing video processing system: {e}")
         
-        # Initialize Universal Scraper Integration
-        try:
-            universal_scraper_integration = UniversalScraperIntegration()
-            logger.info("✅ Universal Scraper Integration initialized")
-        except Exception as e:
-            logger.warning(f"⚠️ Universal Scraper Integration initialization failed: {e}")
-            universal_scraper_integration = None
+        # Initialize Universal Scraper Integration (disabled - module deleted)
+        universal_scraper_integration = None
+        logger.info("ℹ️ Universal Scraper Integration disabled (module deleted)")
         
-        # Initialize Enhanced Scraper with Failure Handling
-        try:
-            if initialize_enhanced_scraper():
-                enhanced_scraper = get_enhanced_scraper()
-                logger.info("✅ Enhanced Scraper with Failure Handling initialized")
-            else:
-                logger.warning("⚠️ Enhanced Scraper initialization failed")
-                enhanced_scraper = None
-        except Exception as e:
-            logger.warning(f"⚠️ Enhanced Scraper initialization failed: {e}")
-            enhanced_scraper = None
+        # Initialize Enhanced Scraper with Failure Handling (disabled - module deleted)
+        enhanced_scraper = None
+        logger.info("ℹ️ Enhanced Scraper disabled (module deleted)")
         
         logger.info("🎉 All enhanced components initialized successfully!")
         
@@ -217,8 +247,10 @@ async def health_check():
             "knowledge_integration": enhanced_knowledge_integration is not None,
             "qa_system": enhanced_qa_system is not None,
             "semantic_qa_system": enhanced_semantic_qa_system is not None,
+            "topic_wise_qa_system": enhanced_topic_wise_qa_system is not None,
             "video_processor": enhanced_video_processor is not None,
-            "enhanced_scraper": enhanced_scraper is not None
+            "chunking_processor": enhanced_chunking_processor is not None,
+            "enhanced_scraper": False  # Disabled - module deleted
         }
         
         all_healthy = all(components_status.values())
@@ -239,36 +271,44 @@ async def health_check():
 
 @app.post("/ask/{company_name}/{qudemo_id}")
 async def ask_question(company_name: str, qudemo_id: str, request: QuestionRequest):
-    """Ask a question and get context-aware answer using enhanced semantic Q&A system"""
+    """Ask a question and get context-aware answer using enhanced topic-wise Q&A system"""
     try:
-        if not enhanced_semantic_qa_system:
-            raise HTTPException(status_code=500, detail="Enhanced Semantic Q&A System not initialized")
-        
-        logger.info(f"❓ Processing question for {company_name} qudemo {qudemo_id}")
-        
-        # Use enhanced semantic Q&A system to get answer (BEST CHUNK ONLY strategy)
-        answer_result = enhanced_semantic_qa_system.ask_question(
-            question=request.question,
-            company_name=company_name,
-            qudemo_id=qudemo_id
-        )
+        # Try topic-wise QA system first (primary for topic-wise chunks)
+        if enhanced_topic_wise_qa_system:
+            logger.info(f"❓ Processing question for {company_name} qudemo {qudemo_id} using TOPIC-WISE QA")
+            
+            answer_result = enhanced_topic_wise_qa_system.ask_question(
+                question=request.question,
+                company_name=company_name,
+                qudemo_id=qudemo_id
+            )
+        elif enhanced_semantic_qa_system:
+            logger.info(f"❓ Processing question for {company_name} qudemo {qudemo_id} using SEMANTIC QA (fallback)")
+            
+            answer_result = enhanced_semantic_qa_system.ask_question(
+                question=request.question,
+                company_name=company_name,
+                qudemo_id=qudemo_id
+            )
+        else:
+            raise HTTPException(status_code=500, detail="No Q&A system available")
         
         if answer_result['success']:
             return {
                 'success': True,
                 'answer': answer_result['answer'],
                 'sources': answer_result.get('sources', []),
-                'total_sources': answer_result.get('total_sources', 0),
+                'total_sources': len(answer_result.get('sources', [])) if answer_result.get('sources') else answer_result.get('total_sources', 0),
                 'search_score': answer_result.get('search_score', 0),
-                'confidence_score': answer_result.get('confidence_score', 0),
+                'confidence_score': answer_result.get('confidence', answer_result.get('confidence_score', 0)),
                 'content_types_found': answer_result.get('content_types_found', []),
                 'difficulty_level': answer_result.get('difficulty_level', 'intermediate'),
                 'estimated_time': answer_result.get('estimated_time', '2-3 minutes'),
-                'start': answer_result.get('start', 0),
-                'end': answer_result.get('end', 0),
-                'video_url': answer_result.get('video_url'),
-                'formatted_timestamp': answer_result.get('formatted_timestamp', ''),
-                'answer_source': 'enhanced_semantic_qa'
+                'start': answer_result.get('timestamp', {}).get('start_time', 0) if answer_result.get('timestamp') else (answer_result.get('sources', [{}])[0].get('start_timestamp', 0) if answer_result.get('sources') else 0),
+                'end': answer_result.get('timestamp', {}).get('end_time', 0) if answer_result.get('timestamp') else (answer_result.get('sources', [{}])[0].get('end_timestamp', 0) if answer_result.get('sources') else 0),
+                'video_url': answer_result.get('sources', [{}])[0].get('video_url', '') if answer_result.get('sources') else '',
+                'formatted_timestamp': answer_result.get('timestamp', {}).get('formatted_start', '') if answer_result.get('timestamp') else '',
+                'answer_source': 'enhanced_topic_wise' if enhanced_topic_wise_qa_system else 'enhanced_semantic'
             }
         else:
             return {
@@ -323,7 +363,7 @@ async def ask_question_semantic(company_name: str, qudemo_id: str, request: Ques
                 'end': answer_result.get('end', 0),
                 'video_url': answer_result.get('video_url'),
                 'formatted_timestamp': answer_result.get('formatted_timestamp'),
-                'answer_source': 'enhanced_semantic'
+                'answer_source': 'enhanced_topic_wise' if enhanced_topic_wise_qa_system else 'enhanced_semantic'
             }
         else:
             return {
@@ -335,6 +375,49 @@ async def ask_question_semantic(company_name: str, qudemo_id: str, request: Ques
             
     except Exception as e:
         logger.error(f"❌ Error processing question: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ask-topic-wise/{company_name}/{qudemo_id}")
+async def ask_question_topic_wise(company_name: str, qudemo_id: str, request: QuestionRequest):
+    """Ask a question using enhanced topic-wise QA system (Primary for topic-wise chunks)"""
+    try:
+        if not enhanced_topic_wise_qa_system:
+            raise HTTPException(status_code=500, detail="Enhanced Topic-Wise Q&A System not initialized")
+        
+        logger.info(f"🧠 Enhanced Topic-Wise QA: {request.question} for {company_name} qudemo {qudemo_id}")
+        
+        # Use enhanced topic-wise Q&A system to get answer
+        answer_result = enhanced_topic_wise_qa_system.ask_question(
+            question=request.question,
+            company_name=company_name,
+            qudemo_id=qudemo_id
+        )
+        
+        if answer_result.get('confidence', 0) > 0.3:  # Confidence threshold
+            return {
+                'success': True,
+                'answer': answer_result['answer'],
+                'confidence': answer_result['confidence'],
+                'sources': answer_result.get('sources', []),
+                'timestamp': answer_result.get('timestamp'),
+                'topic_context': answer_result.get('topic_context', {}),
+                'metadata': answer_result.get('metadata', {}),
+                'method': 'enhanced_topic_wise_qa'
+            }
+        else:
+            return {
+                'success': False,
+                'answer': answer_result.get('answer', 'I couldn\'t find a confident answer to your question.'),
+                'confidence': answer_result.get('confidence', 0),
+                'sources': answer_result.get('sources', []),
+                'timestamp': answer_result.get('timestamp'),
+                'topic_context': answer_result.get('topic_context', {}),
+                'metadata': answer_result.get('metadata', {}),
+                'method': 'enhanced_topic_wise_qa'
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Error processing topic-wise question: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/ask-context/{company_name}/{qudemo_id}")
@@ -477,6 +560,53 @@ async def upload_loom_media(
         logger.error(f"❌ Error uploading Loom media: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/process-video-enhanced/{company_name}/{qudemo_id}")
+async def process_video_enhanced(company_name: str, qudemo_id: str, request: QuDemoContentRequest):
+    """Process video using enhanced chunking and topic analysis strategy"""
+    try:
+        if not enhanced_chunking_processor:
+            raise HTTPException(status_code=500, detail="Enhanced Chunking Processor not initialized")
+        
+        if not request.video_urls or len(request.video_urls) == 0:
+            raise HTTPException(status_code=400, detail="No video URLs provided")
+        
+        results = []
+        
+        for video_url in request.video_urls:
+            try:
+                logger.info(f"🎥 Processing video with enhanced chunking: {video_url}")
+                
+                result = await enhanced_chunking_processor.process_video_with_topic_analysis(
+                    video_url, company_name, qudemo_id
+                )
+                
+                results.append({
+                    'video_url': video_url,
+                    'result': result
+                })
+                
+            except Exception as e:
+                logger.error(f"❌ Error processing video {video_url}: {e}")
+                results.append({
+                    'video_url': video_url,
+                    'result': {
+                        'success': False,
+                        'error': str(e)
+                    }
+                })
+        
+        return {
+            "success": True,
+            "message": "Enhanced video processing completed",
+            "results": results,
+            "total_videos": len(request.video_urls),
+            "method": "enhanced_chunking_topic_analysis"
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Enhanced video processing failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/process-qudemo-content/{company_name}/{qudemo_id}")
 async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuDemoContentRequest):
     """Process qudemo content with optimized processing order: Videos first, then website"""
@@ -522,9 +652,34 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                     logger.info(f"🔍 Processing YouTube video {i+1}/{len(youtube_videos)}: {video_url}")
                     logger.info(f"🎬 Detected video type: youtube")
                     
-                    # Process video using enhanced video processor or fallback
-                    if enhanced_video_processor:
-                        logger.info(f"🎥 Processing YouTube video: {video_url}")
+                    # Process video using NEW enhanced chunking processor (PRIMARY)
+                    if enhanced_chunking_processor:
+                        logger.info(f"🎥 Processing YouTube video with ENHANCED CHUNKING: {video_url}")
+                        result = await enhanced_chunking_processor.process_video_with_topic_analysis(
+                            video_url, company_name, qudemo_id
+                        )
+                        
+                        # Convert result format to match expected structure
+                        if result and result.get('success'):
+                            result = {
+                                'success': True,
+                                'chunks_stored': result.get('chunks_created', 0),
+                                'video_type': 'youtube',
+                                'company_name': company_name,
+                                'qudemo_id': qudemo_id,
+                                'method': 'enhanced_chunking_topic_analysis',
+                                'segments_processed': result.get('segments_extracted', 0),
+                                'topics_extracted': result.get('segments_extracted', 0)
+                            }
+                        else:
+                            result = {
+                                'success': False,
+                                'error': result.get('error', 'Unknown error') if result else 'No result returned',
+                                'chunks_stored': 0
+                            }
+                    elif enhanced_video_processor:
+                        # Fallback to enhanced video processor
+                        logger.info(f"🎥 Using enhanced video processor for YouTube video: {video_url}")
                         result = await enhanced_video_processor.process_youtube_video(
                             video_url, company_name, qudemo_id
                         )
@@ -532,7 +687,7 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                         # Fallback to direct processor
                         logger.info(f"🎥 Using direct processor for YouTube video: {video_url}")
                         from video_processing import process_video
-                        result = process_video(video_url, company_name, qudemo_id)
+                        result = await process_video(video_url, company_name, qudemo_id)
                         
                         # Convert result format to match enhanced processor
                         if result and result.get('success'):
@@ -596,7 +751,7 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                         # Fallback to direct processor
                         logger.info(f"🎥 Using direct processor for Loom video: {video_url}")
                         from video_processing import process_video
-                        result = process_video(video_url, company_name, qudemo_id)
+                        result = await process_video(video_url, company_name, qudemo_id)
                         
                         # Convert result format to match enhanced processor
                         if result and result.get('success'):
@@ -654,118 +809,48 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
             
             website_success = False
             
-            # Try new universal scraper system first
-            if universal_scraper_integration:
-                try:
-                    logger.info("🚀 Using new universal scraper system...")
-                    website_results = await universal_scraper_integration.scrape_website_universal(
-                        website_url=request.website_url,
+            # Use legacy scraper (enhanced scrapers deleted)
+            try:
+                logger.info("🔄 Using legacy Gemini scraper...")
+                logger.info("⏱️ Legacy scraping with Gemini...")
+                
+                gemini_api_key = os.getenv('GEMINI_API_KEY')
+                if not gemini_api_key:
+                    raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable not set")
+                
+                scraper = FinalGeminiScraper(gemini_api_key=gemini_api_key)
+                website_results = await scraper.scrape_website_comprehensive(request.website_url)
+                
+                if website_results and len(website_results) > 0:
+                    # Store website results
+                    store_result = await enhanced_knowledge_integration.store_semantic_chunks(
+                        chunks=website_results,
                         company_name=company_name,
                         qudemo_id=qudemo_id
                     )
                     
-                    if website_results and len(website_results) > 0:
-                        # Store website results
-                        store_result = await enhanced_knowledge_integration.store_semantic_chunks(
-                            chunks=website_results,
-                            company_name=company_name,
-                            qudemo_id=qudemo_id
-                        )
-                        
-                        if store_result['success']:
-                            total_chunks += store_result['chunks_stored']
-                            logger.info(f"✅ Universal scraper successful: {store_result['chunks_stored']} chunks stored")
-                            logger.info(f"📊 Extracted {len(website_results)} content chunks")
-                            website_success = True
-                        else:
-                            logger.error(f"❌ Universal scraper storage failed: {store_result.get('error', 'Unknown error')}")
+                    if store_result['success']:
+                        total_chunks += store_result['chunks_stored']
+                        successful_content["websites"].append({
+                            "url": request.website_url,
+                            "chunks_stored": store_result['chunks_stored']
+                        })
+                        logger.info(f"✅ Legacy scraper successful: {store_result['chunks_stored']} chunks stored")
+                        website_success = True
                     else:
-                        logger.warning("⚠️ Universal scraper returned no results")
-                        logger.info("🔄 Falling back to legacy scraper...")
-                        
-                except Exception as e:
-                    logger.error(f"❌ Universal scraper error: {e}")
-                    logger.info("🔄 Falling back to legacy scraper...")
-            
-            # Use enhanced scraper with failure handling if universal system failed or not available
-            if not website_success:
-                try:
-                    logger.info("🔄 Using enhanced scraper with failure handling...")
-                    logger.info("⏱️ Enhanced scraping with anti-bot detection...")
+                        logger.error(f"❌ Legacy scraper storage failed: {store_result.get('error', 'Unknown error')}")
+                else:
+                    logger.error("❌ Legacy scraper returned no results")
                     
-                    if enhanced_scraper:
-                        # Use enhanced scraper with failure handling
-                        website_result = await enhanced_scraper.scrape_website_with_failure_handling(request.website_url)
-                        
-                        if website_result['success'] and website_result['content']:
-                            # Store website results
-                            store_result = await enhanced_knowledge_integration.store_semantic_chunks(
-                                chunks=website_result['content'],
-                                company_name=company_name,
-                                qudemo_id=qudemo_id
-                            )
-                            
-                            if store_result['success']:
-                                total_chunks += store_result['chunks_stored']
-                                successful_content["websites"].append({
-                                    "url": request.website_url,
-                                    "chunks_stored": store_result['chunks_stored']
-                                })
-                                logger.info(f"✅ Enhanced scraper successful: {store_result['chunks_stored']} chunks stored")
-                                website_success = True
-                            else:
-                                logger.error(f"❌ Enhanced scraper storage failed: {store_result.get('error', 'Unknown error')}")
-                        else:
-                            # Website scraping failed - add to errors
-                            processing_errors.append({
-                                "type": "website",
-                                "url": request.website_url,
-                                "error": website_result.get('error_message', 'Unknown error'),
-                                "error_type": website_result.get('error_type', 'unknown'),
-                                "protection_detected": website_result.get('protection_detected', False)
-                            })
-                            logger.error(f"❌ Enhanced scraper failed: {website_result.get('error_message', 'Unknown error')}")
-                    else:
-                        # Fallback to legacy scraper if enhanced scraper not available
-                        logger.info("🔄 Enhanced scraper not available, using legacy scraper...")
-                        
-                        gemini_api_key = os.getenv('GEMINI_API_KEY')
-                        if not gemini_api_key:
-                            raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable not set")
-                        
-                        scraper = FinalGeminiScraper(gemini_api_key=gemini_api_key)
-                        website_results = await scraper.scrape_website_comprehensive(request.website_url)
-                        
-                        if website_results and len(website_results) > 0:
-                            # Store website results
-                            store_result = await enhanced_knowledge_integration.store_semantic_chunks(
-                                chunks=website_results,
-                                company_name=company_name,
-                                qudemo_id=qudemo_id
-                            )
-                            
-                            if store_result['success']:
-                                total_chunks += store_result['chunks_stored']
-                                successful_content["websites"].append({
-                                    "url": request.website_url,
-                                    "chunks_stored": store_result['chunks_stored']
-                                })
-                                logger.info(f"✅ Legacy scraper successful: {store_result['chunks_stored']} chunks stored")
-                                website_success = True
-                            else:
-                                logger.error(f"❌ Legacy scraper storage failed: {store_result.get('error', 'Unknown error')}")
-                        else:
-                            logger.error("❌ Legacy scraper returned no results")
-                            
-                except Exception as e:
-                    logger.error(f"❌ Website scraping error: {e}")
-                    processing_errors.append({
-                        "type": "website",
-                        "url": request.website_url,
-                        "error": str(e),
-                        "error_type": "scraping_error",
-                        "protection_detected": False
-                    })
+            except Exception as e:
+                logger.error(f"❌ Website scraping error: {e}")
+                processing_errors.append({
+                    "type": "website",
+                    "url": request.website_url,
+                    "error": str(e),
+                    "error_type": "scraping_error",
+                    "protection_detected": False
+                })
             
             if not website_success:
                 logger.error("❌ Both universal and legacy scraping failed")
@@ -962,9 +1047,15 @@ async def cleanup_qudemo_data(company_name: str, qudemo_id: str):
                 
                 # Delete all vectors in the namespace
                 try:
+                    # Determine the correct vector dimension based on index type
+                    if index_name == 'video':
+                        vector_dim = 3072  # Video index uses text-embedding-3-large
+                    else:
+                        vector_dim = 1536  # Other indexes use text-embedding-3-small
+                    
                     # Query to get all vectors in the namespace
                     query_result = index.query(
-                        vector=[0.0] * 1536,  # Dummy vector for query
+                        vector=[0.0] * vector_dim,  # Correct dimension for each index
                         top_k=10000,  # Large number to get all vectors
                         include_metadata=True,
                         namespace=namespace
@@ -1064,9 +1155,15 @@ async def delete_company_data(company_name: str):
                     index_vectors_deleted = 0
                     for namespace in company_namespaces:
                         try:
+                            # Determine the correct vector dimension based on index type
+                            if index_name == 'video':
+                                vector_dim = 3072  # Video index uses text-embedding-3-large
+                            else:
+                                vector_dim = 1536  # Other indexes use text-embedding-3-small
+                            
                             # Query to get all vectors in this namespace
                             query_result = index.query(
-                                vector=[0.0] * 1536,  # Dummy vector for query
+                                vector=[0.0] * vector_dim,  # Correct dimension for each index
                                 top_k=10000,  # Large number to get all vectors
                                 include_metadata=True,
                                 namespace=namespace
@@ -1131,59 +1228,72 @@ async def delete_company_data(company_name: str):
         logger.error(f"❌ Error in company data deletion: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# New Universal Scraper Endpoints
-
-@app.post("/process-url-universal/{company_name}/{qudemo_id}")
-async def process_url_universal(company_name: str, qudemo_id: str, request: UrlRequest):
-    """Process a single URL using the new universal scraper system"""
+@app.delete("/delete-reprocess/{company_name}/{qudemo_id}")
+async def delete_reprocess_content(
+    company_name: str, 
+    qudemo_id: str,
+    transcript_version: str = "v1",
+    chunking_version: str = "v2-seg-safe"
+):
+    """Delete content by namespace and version for reprocessing"""
     try:
-        if not universal_scraper_integration:
-            raise HTTPException(status_code=500, detail="Universal Scraper Integration not initialized")
+        if not delete_reprocess_manager:
+            raise HTTPException(status_code=500, detail="Delete/Reprocess Manager not initialized")
         
-        logger.info(f"🚀 Processing URL with universal scraper: {request.url}")
+        logger.info(f"🗑️ Deleting content for {company_name} qudemo {qudemo_id} (versions: {transcript_version}/{chunking_version})")
         
-        website_results = await universal_scraper_integration.scrape_website_universal(
-            website_url=request.url,
+        result = delete_reprocess_manager.delete_by_namespace_and_version(
+            company_name=company_name,
+            qudemo_id=qudemo_id,
+            transcript_version=transcript_version,
+            chunking_version=chunking_version
+        )
+        
+        if result['success']:
+            return {
+                'success': True,
+                'message': f"Successfully deleted {result['deleted_count']} vectors",
+                'deleted_count': result['deleted_count'],
+                'namespace': result['namespace'],
+                'transcript_version': transcript_version,
+                'chunking_version': chunking_version
+            }
+        else:
+            raise HTTPException(status_code=500, detail=f"Delete failed: {result.get('error', 'Unknown error')}")
+            
+    except Exception as e:
+        logger.error(f"❌ Error deleting content: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/namespace-stats/{company_name}/{qudemo_id}")
+async def get_namespace_stats(company_name: str, qudemo_id: str):
+    """Get statistics for a namespace"""
+    try:
+        if not delete_reprocess_manager:
+            raise HTTPException(status_code=500, detail="Delete/Reprocess Manager not initialized")
+        
+        logger.info(f"📊 Getting namespace stats for {company_name} qudemo {qudemo_id}")
+        
+        stats = delete_reprocess_manager.get_namespace_stats(
             company_name=company_name,
             qudemo_id=qudemo_id
         )
         
-        if website_results and len(website_results) > 0:
-            # Store website results
-            store_result = await enhanced_knowledge_integration.store_semantic_chunks(
-                chunks=website_results,
-                company_name=company_name,
-                qudemo_id=qudemo_id
-            )
-            
-            if store_result['success']:
-                return {
-                    'success': True,
-                    'url': request.url,
-                    'company_name': company_name,
-                    'qudemo_id': qudemo_id,
-                    'content_chunks': len(website_results),
-                    'stored_chunks': store_result['chunks_stored'],
-                    'timestamp': datetime.now().isoformat()
-                }
-            else:
-                return {
-                    'success': False,
-                    'url': request.url,
-                    'error': f"Storage failed: {store_result.get('error', 'Unknown error')}",
-                    'timestamp': datetime.now().isoformat()
-                }
-        else:
+        if stats['success']:
             return {
-                'success': False,
-                'url': request.url,
-                'error': 'No content extracted from URL',
-                'timestamp': datetime.now().isoformat()
+                'success': True,
+                'data': stats,
+                'company_name': company_name,
+                'qudemo_id': qudemo_id
             }
-        
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed to get stats: {stats.get('error', 'Unknown error')}")
+            
     except Exception as e:
-        logger.error(f"❌ Error processing URL: {e}")
+        logger.error(f"❌ Error getting namespace stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# Universal Scraper Endpoints (disabled - module deleted)
 
 # Request models moved to top of file
 

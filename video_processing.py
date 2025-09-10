@@ -82,7 +82,7 @@ def initialize_processors():
         logger.error(f"Failed to initialize processors: {e}")
         return False
 
-def process_video(video_url: str, company_name: str, qudemo_id: str = None, bucket_name: Optional[str] = None, 
+async def process_video(video_url: str, company_name: str, qudemo_id: str = None, bucket_name: Optional[str] = None, 
                  source: Optional[str] = None, meeting_link: Optional[str] = None):
     """Process a video URL and store in Pinecone with semantic chunking for specific qudemo"""
     try:
@@ -136,7 +136,9 @@ def process_video(video_url: str, company_name: str, qudemo_id: str = None, buck
                 raise Exception("Gemini processor not initialized")
             
             logger.info(f"🎯 Using Gemini processor for: {video_url}")
-            result = process_video_with_semantic_chunking(video_url, company_name, qudemo_id)
+            
+            # Use Gemini processor directly to avoid unified chunking issues
+            result = await gemini_processor.process_video_with_qudemo(video_url, company_name, qudemo_id)
             
             if result and result.get('success'):
                 logger.info(f"✅ Gemini video processed successfully")
@@ -272,7 +274,7 @@ def get_processors_status() -> Dict[str, str]:
         "loom": "Available" if loom_processor else "Not available"
     }
 
-def process_video_with_semantic_chunking(video_url: str, company_name: str, qudemo_id: str = None) -> Dict:
+async def process_video_with_semantic_chunking(video_url: str, company_name: str, qudemo_id: str = None) -> Dict:
     """Process video with semantic chunking for enhanced retrieval with qudemo isolation"""
     try:
         logger.info(f"Processing video with semantic chunking: {video_url}")
@@ -289,12 +291,8 @@ def process_video_with_semantic_chunking(video_url: str, company_name: str, qude
             
             # Check if video was already processed by looking for existing data
             try:
-                from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
-                integrator = EnhancedKnowledgeIntegrator(
-                    openai_api_key=os.getenv('OPENAI_API_KEY'),
-                    pinecone_api_key=os.getenv('PINECONE_API_KEY'),
-                    pinecone_index=os.getenv('PINECONE_INDEX')
-                )
+                from enhanced_knowledge_integration import get_enhanced_knowledge_integration
+                integrator = get_enhanced_knowledge_integration()
                 
                 # Check if we already have data for this video
                 existing_data = integrator.get_knowledge_summary(company_name, qudemo_id)
@@ -334,13 +332,27 @@ def process_video_with_semantic_chunking(video_url: str, company_name: str, qude
                 raise Exception("Gemini processor not initialized")
             
             logger.info(f"Using Gemini processor for: {video_url}")
-            # Use the correct method for Gemini processor
-            transcription_data = gemini_processor.extract_transcription_with_gemini(video_url)
+            # Use the correct async method for Gemini processor
+            transcription_data = await gemini_processor.process_video_with_qudemo(video_url, company_name, qudemo_id)
+            
             if not transcription_data:
                 raise Exception("Failed to transcribe video with Gemini processor")
             
+            # Check if Gemini processor already successfully processed and stored chunks
+            chunks_stored = transcription_data.get('chunks_stored', 0) or transcription_data.get('chunks_created', 0)
+            if transcription_data.get('success') and chunks_stored > 0:
+                logger.info(f"✅ Gemini processor already successfully processed video: {chunks_stored} chunks stored")
+                return {
+                    'success': True,
+                    'message': f'Successfully processed video with {chunks_stored} chunks',
+                    'chunks_created': chunks_stored,
+                    'company_name': company_name,
+                    'qudemo_id': qudemo_id,
+                    'video_url': video_url
+                }
+            
+            # If Gemini processor didn't store chunks, try to process transcription data
             transcription = transcription_data.get('transcription', '')
-            # For Gemini, segments might be in a different format or not available
             segments = transcription_data.get('segments', [])
             
             # If no segments, create a basic segment structure
@@ -372,18 +384,28 @@ def process_video_with_semantic_chunking(video_url: str, company_name: str, qude
 
 def _create_semantic_chunks_from_transcription(transcription: str, segments: list, 
                                              company_name: str, qudemo_id: str = None, video_url: str = None) -> Dict:
-    """Create semantic chunks from video transcription and store in Pinecone with qudemo isolation"""
+    """Create semantic chunks from video transcription using unified chunking strategy"""
     try:
         logger.info(f"🔧 Creating semantic chunks from transcription for {company_name} qudemo {qudemo_id}")
         
-        # Initialize knowledge integrator for semantic chunking
-        from enhanced_knowledge_integration import EnhancedKnowledgeIntegrator
+        # Initialize unified chunking processor
+        from unified_chunking_utils import UnifiedChunkingProcessor
+        chunking_processor = UnifiedChunkingProcessor()
         
-        integrator = EnhancedKnowledgeIntegrator(
-            openai_api_key=os.getenv('OPENAI_API_KEY'),
-            pinecone_api_key=os.getenv('PINECONE_API_KEY'),
-            pinecone_index=os.getenv('PINECONE_INDEX')
+        # Create chunks using unified strategy
+        chunks = chunking_processor.create_timestamped_chunks(
+            transcription, video_url, company_name, qudemo_id
         )
+        
+        # Apply semantic boundary detection
+        chunks = chunking_processor.detect_semantic_boundaries(chunks)
+        
+        logger.info(f"🔧 Created {len(chunks)} unified chunks")
+        
+        # Initialize knowledge integrator for storage
+        from enhanced_knowledge_integration import get_enhanced_knowledge_integration
+        
+        integrator = get_enhanced_knowledge_integration()
         
         # Prepare source information for video data
         source_info = {
@@ -396,198 +418,63 @@ def _create_semantic_chunks_from_transcription(transcription: str, segments: lis
             'processed_at': datetime.now().isoformat()
         }
         
-        # Create timestamped chunks from transcription
-        chunks = []
-        
-        logger.info(f"🔧 Creating timestamped chunks from transcription")
-        
-        # Try to extract timestamps from transcription
-        import re
-        # Updated pattern to handle various timestamp formats
-        timestamp_pattern = r'\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]'
-        timestamp_matches = list(re.finditer(timestamp_pattern, transcription))
-        
-        # Debug: Show the actual transcription format
-        logger.info(f"🔧 Transcription preview (first 500 chars): {transcription[:500]}")
-        
-        if timestamp_matches:
-            logger.info(f"🔧 Found {len(timestamp_matches)} timestamps in transcription")
+        # Store chunks in Pinecone
+        if chunks:
+            logger.info(f"🔧 Storing {len(chunks)} unified chunks in Pinecone")
             
-            # Debug: Show first few timestamps
-            for i, match in enumerate(timestamp_matches[:3]):
-                logger.info(f"🔧 Sample timestamp {i+1}: {match.group(0)}")
-            
-            # Filter out invalid timestamps first
-            valid_timestamps = []
-            for match in timestamp_matches:
-                minutes = int(match.group(1))
-                seconds = int(match.group(2))
-                hours = int(match.group(3)) if match.group(3) else 0
+            # Store chunks using knowledge integrator
+            try:
+                result = integrator.store_knowledge_data(
+                    company_name=company_name,
+                    qudemo_id=qudemo_id,
+                    chunks=chunks,
+                    source_info=source_info
+                )
                 
-                # Convert to seconds
-                start_time = hours * 3600 + minutes * 60 + seconds
-                
-                # More intelligent validation for a 16-minute video
-                if start_time > 1200:  # More than 20 minutes, likely wrong
-                    logger.warning(f"🔧 Skipping timestamp {hours:02d}:{minutes:02d}:{seconds:02d} - too large ({start_time}s)")
-                    continue
-                
-                # Check if minutes > 20 (unlikely for a 16-min video)
-                if minutes > 20:
-                    logger.warning(f"🔧 Skipping timestamp {hours:02d}:{minutes:02d}:{seconds:02d} - minutes too high ({minutes})")
-                    continue
-                
-                # Check if this looks like a reasonable timestamp for a 16-min video
-                if start_time <= 1200:  # 20 minutes or less
-                    valid_timestamps.append((match, start_time, hours, minutes, seconds))
-                    logger.info(f"🔧 Valid timestamp: {hours:02d}:{minutes:02d}:{seconds:02d} ({start_time}s)")
-            
-            logger.info(f"🔧 Filtered to {len(valid_timestamps)} valid timestamps out of {len(timestamp_matches)}")
-            
-            # Create chunks based on valid timestamps
-            for i, (match, start_time, hours, minutes, seconds) in enumerate(valid_timestamps):
-                
-                # Find the end time (next timestamp or end of transcription)
-                if i + 1 < len(valid_timestamps):
-                    next_match, next_start_time, next_hours, next_minutes, next_seconds = valid_timestamps[i + 1]
-                    end_time = next_start_time
-                else:
-                    # For the last chunk, estimate end time
-                    end_time = start_time + 30  # 30 seconds default
-                
-                # Extract text for this timestamp segment
-                text_start = match.end()
-                if i + 1 < len(valid_timestamps):
-                    next_match, _, _, _, _ = valid_timestamps[i + 1]
-                    text_end = next_match.start()
-                else:
-                    text_end = len(transcription)
-                
-                chunk_text = transcription[text_start:text_end].strip()
-                
-                # Clean up the text (remove extra whitespace, newlines)
-                chunk_text = re.sub(r'\s+', ' ', chunk_text).strip()
-                
-                # Ensure each chunk has meaningful content
-                if chunk_text and len(chunk_text) > 10:
-                    chunk_data = {
-                        'text': chunk_text,
-                        'full_context': chunk_text,
-                        'source': source_info.get('source', 'video'),
-                        'title': source_info.get('title', f'Video Transcription - {company_name}'),
-                        'url': source_info.get('url', video_url),
-                        'processed_at': source_info.get('processed_at', ''),
-                        'start_timestamp': start_time,
-                        'end_timestamp': end_time,
-                        'chunk_index': i,
-                        'total_chunks': len(timestamp_matches),
-                        'precise_timestamp': f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                if result.get('success'):
+                    logger.info(f"✅ Successfully stored {len(chunks)} chunks in Pinecone")
+                    return {
+                        'success': True,
+                        'message': f'Successfully processed video with {len(chunks)} chunks',
+                        'chunks_created': len(chunks),
+                        'company_name': company_name,
+                        'qudemo_id': qudemo_id,
+                        'video_url': video_url
                     }
-                    chunks.append(chunk_data)
-                    logger.info(f"🔧 Created timestamped chunk {i+1}/{len(timestamp_matches)}: {hours:02d}:{minutes:02d}:{seconds:02d} ({len(chunk_text)} chars)")
                 else:
-                    logger.info(f"🔧 Skipping timestamped chunk {i+1}: insufficient content")
-        else:
-            logger.info(f"🔧 No timestamps found, using fallback chunking method")
-            
-            # Fallback: Create time-based chunks
-            chunk_duration = 30  # 30 seconds per chunk
-            transcription_length = len(transcription)
-            
-            # Estimate total video duration
-            if 'loom.com' in video_url:
-                words_per_second = 2.5
-                estimated_duration = max(60, len(transcription.split()) / words_per_second)
-            else:
-                estimated_duration = max(60, transcription_length / 2.5)
-            
-            # Create chunks
-            min_chunks = 4
-            max_chunks = 60
-            num_chunks = max(min_chunks, min(max_chunks, int(estimated_duration / chunk_duration)))
-            
-            logger.info(f"🔧 Fallback: Estimated duration: {estimated_duration:.1f}s, creating {num_chunks} chunks")
-            
-            for i in range(num_chunks):
-                start_time = i * chunk_duration
-                end_time = min((i + 1) * chunk_duration, estimated_duration)
-                
-                # Extract text for this time segment
-                text_start = int((start_time / estimated_duration) * transcription_length)
-                text_end = int((end_time / estimated_duration) * transcription_length)
-                chunk_text = transcription[text_start:text_end].strip()
-                
-                # Ensure each chunk has meaningful content
-                if chunk_text and len(chunk_text) > 30:
-                    chunk_data = {
-                        'text': chunk_text,
-                        'full_context': chunk_text,
-                        'source': source_info.get('source', 'video'),
-                        'title': source_info.get('title', f'Video Transcription - {company_name}'),
-                        'url': source_info.get('url', video_url),
-                        'processed_at': source_info.get('processed_at', ''),
-                        'start_timestamp': start_time,
-                        'end_timestamp': end_time,
-                        'chunk_index': i,
-                        'total_chunks': num_chunks
+                    logger.error(f"❌ Failed to store chunks: {result.get('error', 'Unknown error')}")
+                    return {
+                        'success': False,
+                        'error': f"Failed to store chunks: {result.get('error', 'Unknown error')}",
+                        'company_name': company_name,
+                        'qudemo_id': qudemo_id,
+                        'video_url': video_url
                     }
-                    chunks.append(chunk_data)
-                    logger.info(f"🔧 Created fallback chunk {i+1}/{num_chunks}: {start_time}s → {end_time}s ({len(chunk_text)} chars)")
-                else:
-                    logger.info(f"🔧 Skipping fallback chunk {i+1}: insufficient content")
-        
-        # If we still don't have enough chunks, create at least one
-        if len(chunks) == 0:
-            logger.warning("🔧 No chunks created, creating fallback chunk")
-            chunk_data = {
-                'text': transcription,
-                'full_context': transcription,
-                'source': source_info.get('source', 'video'),
-                'title': source_info.get('title', f'Video Transcription - {company_name}'),
-                'url': source_info.get('url', video_url),
-                'processed_at': source_info.get('processed_at', ''),
-                'start_timestamp': 0,
-                'end_timestamp': estimated_duration,
-                'chunk_index': 0,
-                'total_chunks': 1
-            }
-            chunks.append(chunk_data)
-        
-        logger.info(f"🔧 Created {len(chunks)} chunks with timestamps")
-        
-        stored_result = integrator.store_semantic_chunks(
-            chunks=chunks,
-            company_name=company_name,
-            qudemo_id=qudemo_id
-        )
-        
-        if stored_result.get('success', False):
-            chunks_stored = stored_result.get('chunks_stored', 0)
-            logger.info(f"✅ Successfully stored {chunks_stored} semantic chunks for video")
+            except Exception as e:
+                logger.error(f"❌ Error storing chunks: {e}")
+                return {
+                    'success': False,
+                    'error': f"Error storing chunks: {str(e)}",
+                    'company_name': company_name,
+                    'qudemo_id': qudemo_id,
+                    'video_url': video_url
+                }
         else:
-            chunks_stored = 0
-            logger.error(f"❌ Failed to store semantic chunks: {stored_result.get('error', 'Unknown error')}")
-        
-        return {
-            "success": True,
-            "message": "Video processed with semantic chunking",
-            "company_name": company_name,
-            "qudemo_id": qudemo_id,
-            "video_url": video_url,
-            "result": {
-                "chunks_stored": chunks_stored,
-                "transcription_length": len(transcription),
-                "segment_count": len(segments),
-                "processing_method": "semantic_chunking"
+            logger.warning("🔧 No chunks created from transcription")
+            return {
+                'success': False,
+                'error': 'No chunks created from transcription',
+                'company_name': company_name,
+                'qudemo_id': qudemo_id,
+                'video_url': video_url
             }
-        }
-        
+            
     except Exception as e:
-        logger.error(f"❌ Error creating semantic chunks: {e}")
+        logger.error(f"❌ Error in semantic chunking: {e}")
         return {
-            "success": False,
-            "error": str(e),
-            "company_name": company_name,
-            "qudemo_id": qudemo_id,
-            "video_url": video_url
+            'success': False,
+            'error': f"Error in semantic chunking: {str(e)}",
+            'company_name': company_name,
+            'qudemo_id': qudemo_id,
+            'video_url': video_url
         }

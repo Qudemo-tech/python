@@ -211,7 +211,7 @@ class GeminiTranscriptionProcessor:
         
         # Initialize Pinecone
         self.pc = Pinecone(api_key=pinecone_api_key)
-        self.default_index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
+        self.default_index_name = os.getenv("PINECONE_INDEX", "qudemo-video-index")
         
         # Overload tracking
         self.gemini_failures = 0
@@ -225,11 +225,11 @@ class GeminiTranscriptionProcessor:
         self.max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "3"))  # Reduced retries to prevent API overload
         self.overload_threshold = int(os.getenv("GEMINI_OVERLOAD_THRESHOLD", "2"))  # Configurable overload threshold
         
-        # Circuit breaker for API overload
+        # Circuit breaker for API overload (disabled for now)
         self.consecutive_overloads = 0
-        self.circuit_breaker_threshold = 3  # After 3 consecutive overloads, use fallback
+        self.circuit_breaker_threshold = 10  # Increased threshold to prevent false triggers
         self.circuit_breaker_reset_time = 0
-        self.circuit_breaker_timeout = 1800  # 30 minutes
+        self.circuit_breaker_timeout = 300  # Reduced to 5 minutes
         
         logger.info("Initializing Gemini Transcription Processor...")
 
@@ -663,8 +663,8 @@ class GeminiTranscriptionProcessor:
                 if response.status_code == 503:
                     # 503 is overload - use much longer delays with exponential backoff for large videos
                     if attempt < max_retries - 1:
-                        # Ultra-aggressive exponential backoff with jitter: 120s, 240s, 480s, 960s, 1920s, 3840s, 7680s, 15360s
-                        delay = 120 * (2 ** attempt) + (hash(str(attempt)) % 120)
+                        # Reduced delays for faster retries: 5s, 10s, 20s
+                        delay = 5 * (2 ** attempt) + (hash(str(attempt)) % 5)
                         logger.warning(f"⚠️ Gemini API overloaded (503), retrying in {delay} seconds... (attempt {attempt + 1}/{max_retries})")
                         logger.info(f"💡 Tip: Large video processing requires patience. API is experiencing high load.")
                         logger.info(f"💡 Consider processing during off-peak hours for better success rates.")
@@ -676,8 +676,8 @@ class GeminiTranscriptionProcessor:
                         logger.error(f"💡 Recommendation: Wait 5-10 minutes before retrying, or try a different video")
                         return None
                 elif response.status_code in [429, 500, 502] and attempt < max_retries - 1:
-                    # Use shorter delays for non-overload errors
-                    delay = 10 * (2 ** attempt)
+                    # Use much shorter delays for non-overload errors
+                    delay = 3 * (2 ** attempt)
                     logger.warning(f"⚠️ Gemini API error ({response.status_code}), retrying in {delay} seconds...")
                     time.sleep(delay)
                     return None
@@ -698,9 +698,9 @@ class GeminiTranscriptionProcessor:
         except requests.exceptions.Timeout:
             self._record_gemini_failure()
             if attempt < max_retries - 1:
-                # Use progressive delays for timeouts with jitter
-                base_delay = 20
-                delay = base_delay + (attempt * 15) + (hash(str(attempt)) % 20)
+                # Use much shorter delays for timeouts
+                base_delay = 5
+                delay = base_delay + (attempt * 3) + (hash(str(attempt)) % 5)
                 logger.warning(f"⚠️ Gemini API timeout, retrying in {delay} seconds...")
                 time.sleep(delay)
             return None
@@ -1048,15 +1048,15 @@ class GeminiTranscriptionProcessor:
         self,
         transcription: str,
         segments: Optional[List[Dict]] = None,
-        chunk_size: int = 400,   # Reduced for very focused chunks
+        chunk_size: int = 300,   # Unified chunk size for Q&A optimization
         overlap: int = 50,       # Minimal overlap for cleaner boundaries
-        max_chunk_duration: int = 10,  # Maximum 10 seconds per chunk for precision
+        max_chunk_duration: int = 10,  # Unified max duration for optimal timestamp precision
     ) -> List[Dict]:
         """
-        Create timestamped chunks from transcription with maximum 10-second precision.
+        Create timestamped chunks from transcription with configurable precision.
 
         If timestamped segments are available (Gemini may not provide them), build
-        chunks by aggregating segments until reaching target size or max duration (10s).
+        chunks by aggregating segments until reaching target size or max duration.
         Otherwise fall back to character-based chunking without timestamps.
 
         Returns list of dicts: { text: str, start: float, end: float }
@@ -1104,9 +1104,9 @@ class GeminiTranscriptionProcessor:
                 current_text_len = sum(len(p) for p in current_text_parts) + (len(current_text_parts) - 1)
                 current_duration = current_end - (current_start or current_end)
                 
-                # Ensure chunks are very focused - maximum 10 seconds per chunk
+                # Ensure chunks are focused - respect max duration per chunk
                 if current_text_len >= chunk_size or current_duration >= max_chunk_duration:
-                    # Add small buffer (1-2 seconds) to complete the current word if we're at 10-second limit
+                    # Add small buffer (1-2 seconds) to complete the current word if we're at duration limit
                     if current_duration >= max_chunk_duration and current_duration < max_chunk_duration + 2:
                         # Check if we're in the middle of a word by looking at the combined text
                         combined_text = ' '.join(current_text_parts).strip()
@@ -1165,225 +1165,104 @@ class GeminiTranscriptionProcessor:
             logger.info(f"📄 Created {len(filtered_chunks)} substantial chunks from {len(chunks)} original chunks")
             return filtered_chunks
 
-        # Fallback: parse inline timestamps if present in the text
+        # Fallback: simple text chunking without timestamps
         import re
         
-        # Log the first few lines to debug timestamp format
-        first_lines = transcription[:500].split('\n')[:5]
-        logger.info(f"🔍 Debug: First 5 lines of transcription:")
-        for i, line in enumerate(first_lines):
-            logger.info(f"  Line {i+1}: {line}")
+        logger.info("🔍 No segments provided, using simple text chunking")
         
-        # Try different timestamp formats: [HH:MM:SS], [MM:SS], [SS]
-        patterns = [
-            r"\[(\d{2}):(\d{2}):(\d{2})\]\s*(.+)",  # [HH:MM:SS]
-            r"\[(\d{2}):(\d{2})\]\s*(.+)",           # [MM:SS]
-            r"\[(\d+)\]\s*(.+)"                       # [SS]
-        ]
+        # Simple text chunking without timestamps
+        sentences = re.split(r'[.!?]+', transcription)
+        sentences = [s.strip() for s in sentences if s.strip()]
         
-        for pattern_str in patterns:
-            pattern = re.compile(pattern_str)
-            matches = pattern.findall(transcription)
-            logger.info(f"🔍 Pattern '{pattern_str}' found {len(matches)} matches")
-            if matches:
-                parsed: List[Dict] = []
-                for idx, match in enumerate(matches):
-                    if len(match) == 4:  # [HH:MM:SS] format
-                        hh, mm, ss, sent = match
-                        start = int(hh) * 3600 + int(mm) * 60 + int(ss)
-                    elif len(match) == 3:  # [MM:SS] format
-                        mm, ss, sent = match
-                        start = int(mm) * 60 + int(ss)
-                    elif len(match) == 2:  # [SS] format
-                        ss, sent = match
-                        start = int(ss)
-                    else:
-                        continue
-                    
-                    # End at next start or start + heuristic duration
-                    if idx + 1 < len(matches):
-                        next_match = matches[idx + 1]
-                        if len(next_match) == 4:  # [HH:MM:SS] format
-                            nhh, nmm, nss, _ = next_match
-                            end = int(nhh) * 3600 + int(nmm) * 60 + int(nss)
-                        elif len(next_match) == 3:  # [MM:SS] format
-                            nmm, nss, _ = next_match
-                            end = int(nmm) * 60 + int(nss)
-                        elif len(next_match) == 2:  # [SS] format
-                            nss, _ = next_match
-                            end = int(nss)
-                        else:
-                            # Limit chunk duration to maximum 10 seconds
-                            end = start + min(max(len(sent) // 15, 3), 10)
-                    else:
-                        # Limit chunk duration to maximum 10 seconds
-                        end = start + min(max(len(sent) // 15, 3), 10)
-                    
-                    parsed.append({'text': sent.strip(), 'start': float(start), 'end': float(end)})
+        parsed: List[Dict] = []
+        current_chunk = ""
+        current_start = 0.0
+        
+        for sentence in sentences:
+            if not sentence:
+                continue
                 
-                # Apply 10-second limit by splitting large chunks
-                final_chunks = []
-                for chunk in parsed:
-                    start_time = chunk['start']
-                    end_time = chunk['end']
-                    text = chunk['text']
+            # Add sentence to current chunk
+            if current_chunk:
+                current_chunk += " " + sentence
+            else:
+                current_chunk = sentence
+            
+            # Estimate duration based on text length (roughly 3 words per second)
+            word_count = len(current_chunk.split())
+            estimated_duration = word_count / 3.0
+            
+            # Check if we should create a chunk
+            if len(current_chunk) >= chunk_size or estimated_duration >= max_chunk_duration:
+                if current_chunk.strip():
+                    # Create chunk with estimated timestamps
+                    end_time = current_start + estimated_duration
+                    parsed.append({
+                        'text': current_chunk.strip(),
+                        'start': float(current_start),
+                        'end': float(end_time)
+                    })
                     
-                    # If chunk is larger than 10 seconds, split it
-                    if end_time - start_time > 10:
-                        # Split into 10-second segments
-                        current_start = start_time
-                        while current_start < end_time:
-                            current_end = min(current_start + 10, end_time)
-                            
-                            # Estimate text portion for this segment
-                            duration_ratio = (current_end - current_start) / (end_time - start_time)
-                            text_length = len(text)
-                            start_char = int((current_start - start_time) / (end_time - start_time) * text_length)
-                            end_char = int((current_end - start_time) / (end_time - start_time) * text_length)
-                            
-                            # Find word boundaries to avoid splitting words
-                            # Adjust start_char to beginning of word
-                            while start_char > 0 and text[start_char] not in ' \t\n':
-                                start_char -= 1
-                            if start_char > 0:
-                                start_char += 1  # Move past the space
-                            
-                            # Adjust end_char to end of word
-                            while end_char < text_length and text[end_char] not in ' \t\n':
-                                end_char += 1
-                            
-                            # Always check for incomplete words and add buffer if needed
-                            segment_text = text[start_char:end_char].strip()
-                            if segment_text:
-                                # Check if the last word is incomplete
-                                last_space_index = segment_text.rfind(' ')
-                                if last_space_index > 0:
-                                    last_word = segment_text[last_space_index + 1:]
-                                    # If last word is likely incomplete, add buffer
-                                    # More aggressive detection: any word without proper punctuation is likely incomplete
-                                    if (len(last_word) < 8 or 
-                                        not last_word.endswith(('.', '!', '?', ',', ':', ';', ')', ']', '}')) or
-                                        last_word.lower() in ['whe', 'co', 'an', 'the', 'and', 'or', 'but', 'for', 'nor', 'yet', 'so']):
-                                        # Calculate how much extra time we need to complete the word
-                                        extra_chars = end_char - int((current_end - start_time) / (end_time - start_time) * text_length)
-                                        if extra_chars > 0:
-                                            # Estimate extra time needed (roughly 2-3 characters per second)
-                                            extra_time = min(3.0, extra_chars / 2.0)  # Max 3 seconds buffer for better completion
-                                            current_end = min(current_end + extra_time, end_time)
-                                            # Recalculate end_char with the extended time
-                                            end_char = int((current_end - start_time) / (end_time - start_time) * text_length)
-                                            # Find word boundary again
-                                            while end_char < text_length and text[end_char] not in ' \t\n':
-                                                end_char += 1
-                                
-                                # Additional check: if the segment doesn't end with proper sentence punctuation, extend it
-                                # Re-check segment_text after word completion
-                                segment_text = text[start_char:end_char].strip()
-                                if segment_text and not segment_text.endswith(('.', '!', '?', ':', ';')):
-                                    # Try to extend to the next sentence boundary
-                                    next_sentence_chars = 0
-                                    temp_end_char = end_char
-                                    while temp_end_char < text_length and next_sentence_chars < 100:  # Max 100 chars lookahead
-                                        if text[temp_end_char] in '.!?:;':
-                                            next_sentence_chars = temp_end_char - end_char + 1
-                                            break
-                                        temp_end_char += 1
-                                    
-                                    if next_sentence_chars > 0 and next_sentence_chars < 50:  # Only if reasonable distance
-                                        # Calculate extra time for sentence completion
-                                        extra_time = min(2.0, next_sentence_chars / 3.0)  # Max 2 seconds for sentence
-                                        current_end = min(current_end + extra_time, end_time)
-                                        end_char = int((current_end - start_time) / (end_time - start_time) * text_length)
-                            
-                            # Get the final segment text after word completion
-                            segment_text = text[start_char:end_char].strip()
-                            if segment_text:
-                                # Debug logging
-                                logger.info(f"🔍 Chunk text before word completion: '{segment_text}'")
-                                
-                                # Final check: if the segment still ends with an incomplete word, try to complete it
-                                if not segment_text.endswith(('.', '!', '?', ':', ';', ',', ')', ']', '}')):
-                                    logger.info(f"🔍 Incomplete word detected, attempting completion...")
-                                    # Look ahead to find the next complete word
-                                    temp_end_char = end_char
-                                    while temp_end_char < text_length and temp_end_char - end_char < 100:  # Max 100 chars lookahead
-                                        if text[temp_end_char] in ' \t\n':
-                                            # Found a space, check if this completes a word
-                                            temp_segment = text[start_char:temp_end_char].strip()
-                                            if temp_segment and temp_segment.endswith(('.', '!', '?', ':', ';', ',', ')', ']', '}')):
-                                                # This looks like a complete segment
-                                                end_char = temp_end_char
-                                                break
-                                        temp_end_char += 1
-                                    
-                                    # If still no complete word found, try to find the next sentence boundary
-                                    if temp_end_char >= text_length or temp_end_char - end_char >= 100:
-                                        temp_end_char = end_char
-                                        while temp_end_char < text_length and temp_end_char - end_char < 150:  # Max 150 chars lookahead
-                                            if text[temp_end_char] in '.!?:;':
-                                                # Found sentence boundary
-                                                end_char = temp_end_char + 1
-                                                break
-                                            temp_end_char += 1
-                                
-                                # Update segment_text with the final result
-                                segment_text = text[start_char:end_char].strip()
-                            
-                            # Final safety check: if the segment still ends with an incomplete word, extend it
-                            if segment_text and not segment_text.endswith(('.', '!', '?', ':', ';', ',', ')', ']', '}')):
-                                # Look for the next space or punctuation to complete the word
-                                temp_end_char = end_char
-                                while temp_end_char < text_length and temp_end_char - end_char < 200:  # Max 200 chars lookahead
-                                    if text[temp_end_char] in ' \t\n.!?:;,)]}':
-                                        # Found a word boundary
-                                        end_char = temp_end_char
-                                        break
-                                    temp_end_char += 1
-                                
-                                # Update segment_text with the final result
-                                segment_text = text[start_char:end_char].strip()
-                                logger.info(f"🔍 Chunk text after word completion: '{segment_text}'")
-                                
-                                # Update current_end to reflect the word completion
-                                # Calculate the new end time based on the extended text
-                                if end_char > int((current_end - start_time) / (end_time - start_time) * text_length):
-                                    # Text was extended, so we need to extend the time proportionally
-                                    text_extension_ratio = end_char / int((current_end - start_time) / (end_time - start_time) * text_length)
-                                    current_end = min(current_start + (current_end - current_start) * text_extension_ratio, end_time)
-                            
-                            if segment_text:
-                                final_chunks.append({
-                                    'text': segment_text,
-                                    'start': current_start,
-                                    'end': current_end
-                                })
-                            
-                            current_start = current_end
-                    else:
-                        # Chunk is already 10 seconds or less
-                        final_chunks.append(chunk)
-                
-                logger.info(f"📄 Created {len(final_chunks)} chunks from inline timestamps (10-second limit applied)")
-                return final_chunks
-
-        # Final fallback: character-based chunks without timestamps
-        fallback_chunks: List[Dict] = []
-        pos = 0
-        while pos < len(transcription):
-            end = pos + chunk_size
-            if end < len(transcription):
-                for i in range(end, max(pos + chunk_size - 100, pos), -1):
-                    if transcription[i] in '.!?':
-                        end = i + 1
-                        break
-            text_chunk = transcription[pos:end].strip()
-            if text_chunk:
-                fallback_chunks.append({'text': text_chunk, 'start': 0.0, 'end': 0.0})
-            pos = end - overlap
-            if pos >= len(transcription):
-                break
-        logger.info(f"📄 Created {len(fallback_chunks)} chunks from transcription (no timestamps)")
-        return fallback_chunks
+                    # Move to next chunk
+                    current_start = end_time
+                    current_chunk = ""
+        
+        # Add final chunk if there's remaining text
+        if current_chunk.strip():
+            word_count = len(current_chunk.split())
+            estimated_duration = word_count / 3.0
+            end_time = current_start + estimated_duration
+            parsed.append({
+                'text': current_chunk.strip(),
+                'start': float(current_start),
+                'end': float(end_time)
+            })
+        
+        # Apply duration limit by splitting large chunks
+        final_chunks = []
+        for chunk in parsed:
+            start_time = chunk['start']
+            end_time = chunk['end']
+            text = chunk['text']
+            
+            # If chunk is larger than max duration, split it
+            if end_time - start_time > max_chunk_duration:
+                # Split into max_duration segments
+                current_start = start_time
+                while current_start < end_time:
+                    current_end = min(current_start + max_chunk_duration, end_time)
+                    
+                    # Simple text splitting for large chunks
+                    text_length = len(text)
+                    duration_ratio = (current_end - current_start) / (end_time - start_time)
+                    start_char = int(duration_ratio * text_length)
+                    end_char = int((current_end - start_time) / (end_time - start_time) * text_length)
+                    
+                    # Find word boundaries
+                    while start_char > 0 and text[start_char] not in ' \t\n':
+                        start_char -= 1
+                    while end_char < text_length and text[end_char] not in ' \t\n':
+                        end_char += 1
+                    
+                    segment_text = text[start_char:end_char].strip()
+                    if segment_text:
+                        final_chunks.append({
+                            'text': segment_text,
+                            'start': float(current_start),
+                            'end': float(current_end)
+                        })
+                    
+                    current_start = current_end
+            else:
+                # Add chunk as-is
+                final_chunks.append({
+                    'text': text,
+                    'start': float(start_time),
+                    'end': float(end_time)
+                })
+        
+        logger.info(f"📄 Created {len(final_chunks)} chunks from transcription")
+        return final_chunks
     
     def create_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
@@ -1407,7 +1286,7 @@ class GeminiTranscriptionProcessor:
                 try:
                     response = openai.embeddings.create(
                         input=batch,
-                        model="text-embedding-3-small"
+                        model="text-embedding-3-large"
                     )
                     batch_embeddings = [e.embedding for e in response.data]
                     embeddings.extend(batch_embeddings)
@@ -1417,7 +1296,7 @@ class GeminiTranscriptionProcessor:
                 except Exception as e:
                     logger.error(f"❌ Batch embedding failed: {e}")
                     # Create zero embeddings for failed batch
-                    zero_embedding = [0.0] * 1536  # OpenAI embedding dimension
+                    zero_embedding = [0.0] * 3072  # OpenAI text-embedding-3-large dimension
                     embeddings.extend([zero_embedding] * len(batch))
             
             return embeddings
@@ -1426,7 +1305,7 @@ class GeminiTranscriptionProcessor:
             logger.error(f"❌ Embedding creation failed: {e}")
             return []
     
-    async def store_in_pinecone(self, company_name: str, video_url: str, transcription_data: Dict, 
+    def store_in_pinecone(self, company_name: str, video_url: str, transcription_data: Dict, 
                          chunks: List[Dict], embeddings: List[List[float]], qudemo_id: str = None) -> bool:
         """
         Store transcription chunks and embeddings in Pinecone using enhanced manager
@@ -1445,56 +1324,32 @@ class GeminiTranscriptionProcessor:
         try:
             logger.info(f"🗄️ Storing in Pinecone for company: {company_name} qudemo {qudemo_id}")
             
-            # Try to use enhanced Pinecone manager if available
-            try:
-                from enhanced_pinecone_manager import get_enhanced_pinecone_manager
-                enhanced_manager = get_enhanced_pinecone_manager()
+            # Use direct Pinecone storage for simplicity
+            logger.info("🗄️ Using direct Pinecone storage for simplicity")
+            return self._store_directly_in_pinecone(company_name, video_url, transcription_data, chunks, embeddings, qudemo_id)
                 
-                # Convert chunks to the format expected by enhanced manager
-                chunks_data = []
-                for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-                    chunk_data = {
-                        'text': chunk['text'] if isinstance(chunk, dict) else str(chunk),
-                        'source_url': video_url,
-                        'source_type': 'video_transcript',
-                        'title': transcription_data.get('title', 'Unknown'),
-                        'url': video_url,
-                        'company_name': company_name,
-                        'qudemo_id': qudemo_id,
-                        'chunk_index': i,
-                        'chunk_size': len(chunk['text'] if isinstance(chunk, dict) else str(chunk)),
-                        'quality_score': 85,
-                        'processed_at': datetime.now().isoformat(),
-                        'start_timestamp': float(chunk.get('start', 0.0)) if isinstance(chunk, dict) else 0.0,
-                        'end_timestamp': float(chunk.get('end', 0.0)) if isinstance(chunk, dict) else 0.0,
-                        'video_duration': transcription_data.get('duration', 'Unknown'),
-                        'language': transcription_data.get('language', 'Unknown'),
-                        'word_count': transcription_data.get('word_count', 0)
-                    }
-                    chunks_data.append(chunk_data)
-                
-                # Store using enhanced manager
-                store_result = await enhanced_manager.store_semantic_chunks(
-                    chunks=chunks_data,
-                    company_name=company_name,
-                    qudemo_id=qudemo_id,
-                    content_type='video_transcript'
-                )
-                
-                if store_result['success']:
-                    logger.info(f"✅ Successfully stored {store_result['chunks_stored']} chunks using enhanced manager")
-                    return True
-                else:
-                    logger.warning(f"⚠️ Enhanced manager storage failed: {store_result.get('error', 'Unknown error')}")
-                    # Fall back to direct storage
-                    
-            except Exception as e:
-                logger.warning(f"⚠️ Enhanced Pinecone manager not available: {e}")
-                # Fall back to direct storage
-                pass
+        except Exception as e:
+            logger.error(f"❌ Pinecone storage failed: {e}")
+            return False
+
+    def _store_directly_in_pinecone(self, company_name: str, video_url: str, transcription_data: Dict, 
+                                        chunks: List[Dict], embeddings: List[List[float]], qudemo_id: str = None) -> bool:
+        """
+        Fallback direct Pinecone storage when enhanced manager is not available
+        
+        Args:
+            company_name: Name of the company
+            video_url: Original video URL
+            transcription_data: Transcription metadata
+            chunks: Text chunks
+            embeddings: Embedding vectors
+            qudemo_id: QuDemo ID for namespace isolation
             
-            # Fallback: Direct Pinecone storage (original method)
-            logger.info("🔄 Using fallback direct Pinecone storage")
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            logger.info(f"🗄️ Using direct Pinecone storage for company: {company_name} qudemo {qudemo_id}")
             
             # Create or get single shared index
             index_name = self.default_index_name
@@ -1507,7 +1362,7 @@ class GeminiTranscriptionProcessor:
                     logger.info(f"📊 Creating new Pinecone index: {index_name}")
                     self.pc.create_index(
                         name=index_name,
-                        dimension=1536,  # OpenAI embedding dimension
+                        dimension=3072,  # OpenAI text-embedding-3-large dimension
                         metric='cosine',
                         spec=ServerlessSpec(
                             cloud='aws',
@@ -1569,508 +1424,21 @@ class GeminiTranscriptionProcessor:
             return True
             
         except Exception as e:
-            logger.error(f"❌ Pinecone storage failed: {e}")
+            logger.error(f"❌ Direct Pinecone storage failed: {e}")
             return False
     
-    async def process_video_with_qudemo(self, video_url: str, company_name: str, qudemo_id: str) -> Optional[Dict]:
+    def create_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
-        Production-ready video processing pipeline with intelligent fallback strategies
+        Create embeddings for text chunks using OpenAI
         
         Args:
-            video_url: YouTube or Loom video URL
-            company_name: Company name for organization
-            qudemo_id: Qudemo ID for proper namespace isolation
+            texts: List of text chunks
             
         Returns:
-            Dict with processing results and detailed status information
+            List of embedding vectors
         """
         try:
-            logger.info(f"🎯 Starting video processing pipeline for: {video_url}")
-            logger.info(f"🏢 Company: {company_name}, QuDemo ID: {qudemo_id}")
-            
-            # Check video type and route accordingly
-            if 'loom.com' in video_url:
-                logger.info("🎬 Detected Loom video - using Loom-specific processing")
-                return await self._process_loom_video(video_url, company_name, qudemo_id)
-            elif 'youtube.com' in video_url or 'youtu.be' in video_url:
-                logger.info("🎬 Detected YouTube video - using YouTube processing pipeline")
-                return await self._process_youtube_video(video_url, company_name, qudemo_id)
-            else:
-                logger.warning("⚠️ Unknown video type - attempting generic processing")
-                return await self._process_generic_video(video_url, company_name, qudemo_id)
-            
-        except Exception as e:
-            logger.error(f"❌ Video processing failed: {e}")
-            return {
-                'success': False,
-                'error': str(e),
-                'video_url': video_url,
-                'company_name': company_name
-            }
-    
-    async def _get_youtube_duration(self, video_url: str) -> float:
-        """
-        Get YouTube video duration using smart URL pattern detection (production-safe)
-        
-        Args:
-            video_url: YouTube video URL
-            
-        Returns:
-            Duration in seconds, or 0 if failed
-        """
-        logger.info(f"📊 Getting YouTube video duration (production-safe): {video_url}")
-        
-        # Smart URL pattern detection for production (no yt-dlp dependency)
-        if 'list=' in video_url or 'playlist' in video_url.lower():
-            logger.info("🔄 Detected playlist URL, assuming long video (>10 min) for chunking")
-            return 960  # 16 minutes - actual video duration
-        elif 'watch' in video_url:
-            # Check for specific video ID to return accurate duration
-            if 't0fon35CDm4' in video_url:
-                logger.info("🔄 Detected specific video t0fon35CDm4, using actual duration (16 minutes)")
-                return 960  # 16 minutes - actual video duration
-            # Check for common patterns that indicate long videos
-            elif any(keyword in video_url.lower() for keyword in ['tutorial', 'course', 'lecture', 'presentation', 'webinar', 'training', 'guide', 'how-to']):
-                logger.info("🔄 Detected educational content, assuming long video (>10 min) for chunking")
-                return 1200  # 20 minutes - trigger chunking
-            else:
-                logger.info("🔄 Standard video detected, assuming medium length (5-10 min)")
-                return 600  # 10 minutes - trigger chunking for safety
-        else:
-            logger.info("🔄 Unknown URL pattern, assuming standard video (<10 min)")
-            return 300  # 5 minutes - use standard processing
-
-    async def _process_youtube_video(self, video_url: str, company_name: str, qudemo_id: str) -> Dict:
-        """
-        Process YouTube video using Gemini API with automatic chunking for large videos
-        
-        Args:
-            video_url: YouTube video URL
-            company_name: Company name for storage
-            qudemo_id: QuDemo ID for storage
-            
-        Returns:
-            Dict with processing results
-        """
-        try:
-            logger.info(f"🎬 Processing YouTube video: {video_url}")
-            
-            # Check if video is large (>10 minutes)
-            duration = await self._get_youtube_duration(video_url)
-            
-            if duration > 600:  # 10 minutes
-                logger.info("🎬 Large YouTube video detected (>10 minutes), using chunked processing")
-                return await self._process_youtube_chunks(video_url, company_name, qudemo_id, duration)
-            else:
-                logger.info("🎬 Standard YouTube video processing")
-                # Use existing single-video processing
-                transcription_data = self.extract_transcription_with_whisper(video_url)
-                
-                if not transcription_data:
-                    logger.error("❌ Failed to extract transcription from YouTube video")
-                    return {
-                        'success': False,
-                        'error': 'Failed to extract transcription from YouTube video',
-                        'video_url': video_url,
-                        'company_name': company_name,
-                        'qudemo_id': qudemo_id
-                    }
-                
-                logger.info(f"✅ YouTube transcription extracted: {len(transcription_data.get('transcription', ''))} characters")
-                
-                # Process with full transcription data
-                return await self._process_full_transcription(video_url, company_name, qudemo_id, transcription_data)
-            
-        except Exception as e:
-            logger.error(f"❌ YouTube video processing failed: {e}")
-            return {
-                'success': False,
-                'error': str(e),
-                'video_url': video_url,
-                'company_name': company_name,
-                'qudemo_id': qudemo_id
-            }
-
-    async def _process_youtube_chunks(self, video_url: str, company_name: str, qudemo_id: str, duration: float) -> Dict:
-        """
-        Process large YouTube videos in chunks
-        
-        Args:
-            video_url: YouTube video URL
-            company_name: Company name for storage
-            qudemo_id: QuDemo ID for storage
-            duration: Video duration in seconds
-            
-        Returns:
-            Dict with processing results
-        """
-        try:
-            logger.info(f"🎬 Processing large YouTube video in chunks: {duration/60:.1f} minutes")
-            
-            # Calculate chunks based on actual video duration
-            # Use 8-10 minute chunks with 1 minute overlap for better accuracy
-            chunk_duration = 480  # 8 minutes (480 seconds)
-            overlap_duration = 60  # 1 minute overlap
-            
-            # Calculate number of chunks needed
-            if duration <= 600:  # ≤ 10 minutes - process as single chunk
-                num_chunks = 1
-                chunk_duration = duration
-                overlap_duration = 0
-            else:
-                # For longer videos, use overlapping chunks
-                num_chunks = int((duration - overlap_duration) / (chunk_duration - overlap_duration)) + 1
-            
-            logger.info(f"📊 Will process {num_chunks} chunks of {chunk_duration//60} minutes each")
-            
-            all_chunks = []
-            all_embeddings = []
-            
-            for i in range(num_chunks):
-                if num_chunks == 1:
-                    # Single chunk - use full duration
-                    start_time = 0
-                    end_time = duration
-                else:
-                    # Multiple chunks with overlap
-                    start_time = i * (chunk_duration - overlap_duration)
-                    end_time = min(start_time + chunk_duration, duration)
-                
-                logger.info(f"🎬 Processing YouTube chunk {i+1}/{num_chunks}: {start_time//60:.1f}-{end_time//60:.1f} min")
-                
-                # Process chunk with Whisper
-                chunk_result = await self._process_youtube_chunk(
-                    video_url, start_time, end_time, company_name, qudemo_id, i, duration
-                )
-                
-                if chunk_result and chunk_result.get('success'):
-                    chunk_data = chunk_result.get('chunks', [])
-                    embeddings = chunk_result.get('embeddings', [])
-                    
-                    # Clamp timestamps to video duration for safety
-                    for c in chunk_data:
-                        c['start_timestamp'] = max(0.0, min(c['start_timestamp'], duration))
-                        c['end_timestamp']   = max(0.0, min(c['end_timestamp'],   duration))
-                    
-                    all_chunks.extend(chunk_data)
-                    all_embeddings.extend(embeddings)
-                    
-                    logger.info(f"✅ YouTube chunk {i+1} processed: {len(chunk_data)} segments")
-                    
-                    # Sequential processing with delay to prevent API overload
-                    if i < num_chunks - 1:  # Don't delay after the last chunk
-                        delay_between_chunks = 10 + (i * 5)  # 10s, 15s, 20s, etc.
-                        logger.info(f"⏳ Waiting {delay_between_chunks}s before processing next chunk...")
-                        logger.info(f"💡 Extended delay to prevent API overload during large video processing")
-                        time.sleep(delay_between_chunks)
-                else:
-                    logger.error(f"❌ YouTube chunk {i+1} processing failed")
-                    continue
-            
-            if not all_chunks:
-                raise Exception("No YouTube chunks were processed successfully")
-            
-            # Store all chunks
-            storage_result = await self._store_youtube_chunks_in_pinecone(
-                all_chunks, all_embeddings, company_name, qudemo_id, video_url
-            )
-            
-            if storage_result:
-                logger.info(f"✅ Successfully stored {len(all_chunks)} chunks from {num_chunks} YouTube segments")
-                return {
-                    'success': True,
-                    'chunks_stored': len(all_chunks),
-                    'video_type': 'youtube_chunked',
-                    'storage_details': {
-                        'method': 'youtube_chunked_processing',
-                        'chunks_processed': num_chunks,
-                        'total_segments': len(all_chunks),
-                        'total_duration': duration
-                    },
-                    'video_url': video_url,
-                    'company_name': company_name,
-                    'qudemo_id': qudemo_id
-                }
-            else:
-                raise Exception("Failed to store YouTube chunks in Pinecone")
-                
-        except Exception as e:
-            logger.error(f"❌ YouTube chunking failed: {e}")
-            return {
-                'success': False,
-                'error': str(e),
-                'video_url': video_url,
-                'company_name': company_name,
-                'qudemo_id': qudemo_id
-            }
-
-    async def _process_youtube_chunk(self, video_url: str, start_time: float, end_time: float, 
-                                   company_name: str, qudemo_id: str, chunk_index: int, total_duration: float) -> Dict:
-        """
-        Process a single YouTube video chunk
-        
-        Args:
-            video_url: YouTube video URL
-            start_time: Start time of chunk in seconds
-            end_time: End time of chunk in seconds
-            company_name: Company name for storage
-            qudemo_id: QuDemo ID for storage
-            chunk_index: Index of this chunk
-            chunk_offset: Time offset for this chunk
-            
-        Returns:
-            Processing results for this chunk
-        """
-        try:
-            # Create chunked YouTube URL with time parameters
-            chunked_url = f"{video_url}&t={int(start_time)}s"
-            
-            logger.info(f"🎬 Processing YouTube chunk {chunk_index + 1}: {start_time//60:.1f}-{end_time//60:.1f} min")
-            
-            # Extract transcription for this chunk using Whisper
-            transcription_data = self.extract_transcription_with_whisper(chunked_url)
-            
-            if not transcription_data:
-                logger.error(f"❌ Transcription failed for YouTube chunk {chunk_index + 1}")
-                return None
-            
-            # Create chunks from transcription using the new method
-            full_transcription = transcription_data.get('transcription', '')
-            if full_transcription:
-                # Split text into evenly-sized chunks
-                texts = _split_text_evenly(full_transcription, target_items=15)
-                
-                # Create video chunk data structure
-                video_chunk = {
-                    "chunk_index": chunk_index,
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "texts": texts
-                }
-                
-                # Create timestamped chunks using total video duration
-                chunks = self._create_youtube_timestamped_chunks(total_duration, [video_chunk])
-                
-                # Add additional metadata for compatibility
-                for chunk in chunks:
-                    chunk.update({
-                        'full_context': chunk['text'],
-                        'source': 'youtube',
-                        'title': f'YouTube Video - Chunk {chunk_index + 1}',
-                        'url': '',  # Will be set by caller
-                        'processed_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-                        'chunk_index': chunk['local_index'],
-                        'total_chunks': len(chunks),
-                        'video_chunk_index': chunk_index,
-                        'youtube_chunk_start': start_time,
-                        'youtube_chunk_end': end_time
-                    })
-            else:
-                logger.error("❌ No transcription text found")
-                return None
-            
-            if not chunks:
-                logger.error(f"❌ No chunks created for YouTube chunk {chunk_index + 1}")
-                return None
-            
-            # Validate timestamps before proceeding
-            try:
-                _validate_timestamped_chunks(chunks, total_duration)
-                logger.info(f"✅ Timestamp validation passed for chunk {chunk_index + 1}")
-            except Exception as e:
-                logger.error(f"❌ Timestamp validation failed for chunk {chunk_index + 1}: {e}")
-                return None
-            
-            # Create embeddings
-            embeddings = await self._create_embeddings_async([c['text'] for c in chunks])
-            
-            if not embeddings:
-                logger.error(f"❌ Embeddings failed for YouTube chunk {chunk_index + 1}")
-                return None
-            
-            return {
-                'success': True,
-                'chunks': chunks,
-                'embeddings': embeddings,
-                'transcription': transcription_data.get('transcription', ''),
-                'chunk_index': chunk_index
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ YouTube chunk processing failed: {e}")
-            return None
-
-    def _create_youtube_timestamped_chunks(self, video_duration_sec: float, video_chunks: list[dict]) -> list[dict]:
-        """
-        Evenly distributes timestamps for each text item *within its own video chunk*.
-        Returns a flat list of dicts:
-          {
-            "text": str,
-            "start_timestamp": float,  # absolute seconds into full video
-            "end_timestamp": float,    # absolute seconds into full video
-            "video_chunk_index": int,
-            "local_index": int
-          }
-        
-        NOTE: This function returns ABSOLUTE timestamps into the full video timeline.
-        Do NOT add any external offsets to the returned start/end timestamps.
-        """
-        out: list[dict] = []
-
-        vd = float(video_duration_sec)
-        if vd <= 0:
-            return out
-
-        for vc_idx, vc in enumerate(video_chunks):
-            chunk_start_abs = float(vc["start_time"])
-            chunk_end_abs   = float(vc["end_time"])
-            chunk_start_abs = _clamp(chunk_start_abs, 0.0, vd)
-            chunk_end_abs   = _clamp(chunk_end_abs, 0.0, vd)
-            if chunk_end_abs <= chunk_start_abs:
-                # skip pathological window
-                continue
-
-            items = list(vc.get("texts") or [])
-            n = max(1, len(items))  # at least 1 slot
-            total_span = chunk_end_abs - chunk_start_abs
-            slot = total_span / n  # even spacing
-
-            for local_idx, text in enumerate(items or [""]):
-                # LOCAL position within THIS video chunk
-                local_start = chunk_start_abs + (local_idx * slot)
-                # last item ends exactly at chunk_end_abs to avoid gaps/drift
-                if local_idx == n - 1:
-                    local_end = chunk_end_abs
-                else:
-                    local_end = chunk_start_abs + ((local_idx + 1) * slot)
-
-                # clamp + monotonic + round for UI
-                s = _r2(_clamp(local_start, 0.0, vd))
-                e = _r2(_clamp(local_end,   0.0, vd))
-                s, e = _ensure_monotonic(s, e)
-
-                out.append({
-                    "text": text,
-                    "start_timestamp": s,
-                    "end_timestamp": e,
-                    "video_chunk_index": int(vc.get("chunk_index", vc_idx)),
-                    "local_index": local_idx,
-                })
-
-        return out
-
-    async def _store_youtube_chunks_in_pinecone(self, chunks: list, embeddings: list, company_name: str, 
-                                              qudemo_id: str, video_url: str) -> bool:
-        """
-        Store YouTube chunks and embeddings in Pinecone
-        
-        Args:
-            chunks: List of chunk data
-            embeddings: List of embeddings
-            company_name: Company name for storage
-            qudemo_id: QuDemo ID for storage
-            video_url: Original video URL
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            # Use Standard Plan - multiple indexes for better organization
-            index_name = "qudemo-video-index"  # Dedicated video index for Standard Plan
-            
-            # Check if index exists
-            existing_indexes = [index.name for index in self.pc.list_indexes()]
-            
-            if index_name not in existing_indexes:
-                try:
-                    logger.info(f"Creating new Pinecone video index: {index_name}")
-                    self.pc.create_index(
-                        name=index_name,
-                        dimension=3072,  # OpenAI embedding dimension
-                        metric='cosine',
-                        spec=ServerlessSpec(
-                            cloud='aws',
-                            region='us-east-1'
-                        )
-                    )
-                    # Wait for index to be ready
-                    time.sleep(10)
-                except Exception as ce:
-                    msg = str(ce)
-                    if 'max serverless indexes' in msg.lower() or 'forbidden' in msg.lower():
-                        # Fallback to default index if quota reached
-                        index_name = self.default_index_name
-                        logger.warning(f"Index quota reached; falling back to default index: {index_name}")
-                    else:
-                        raise
-            
-            # Get index and namespace per company and qudemo
-            index = self.pc.Index(index_name)
-            namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}" if qudemo_id else company_name.lower().replace(' ', '-')
-            logger.info(f"Storing YouTube data in namespace: '{namespace}' in index: '{index_name}'")
-            
-            # Prepare vectors for upsert
-            vectors = []
-            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-                vector_id = f"{company_name}_{qudemo_id}_{video_url}_{i}" if qudemo_id else f"{company_name}_{video_url}_{i}"
-                
-                # Extract and validate timestamps
-                chunk_start = float(chunk.get('start_timestamp', 0.0)) if isinstance(chunk, dict) else 0.0
-                chunk_end = float(chunk.get('end_timestamp', 0.0)) if isinstance(chunk, dict) else 0.0
-                
-                vector_data = {
-                    'id': vector_id,
-                    'values': embedding,
-                    'metadata': {
-                        'company': company_name,
-                        'qudemo_id': qudemo_id,
-                        'video_url': video_url,
-                        'chunk_index': i,
-                        'text': chunk['text'] if isinstance(chunk, dict) else str(chunk),
-                        'start': chunk_start,
-                        'end': chunk_end,
-                        'title': chunk.get('title', 'Unknown'),
-                        'language': 'en',  # Default language
-                        'word_count': len(chunk.get('text', '').split()) if isinstance(chunk, dict) else 0,
-                        'source_type': 'youtube',
-                        'video_chunk_index': chunk.get('video_chunk_index', 0),
-                        'youtube_chunk_start': chunk.get('youtube_chunk_start', 0),
-                        'youtube_chunk_end': chunk.get('youtube_chunk_end', 0)
-                    }
-                }
-                
-                # Debug timestamp storage
-                if chunk_start > 0.0 or chunk_end > 0.0:
-                    logger.info(f"Storing YouTube chunk {i+1}: start={chunk_start:.2f}s, end={chunk_end:.2f}s")
-                
-                vectors.append(vector_data)
-            
-            # Upsert vectors in batches
-            batch_size = 100
-            for i in range(0, len(vectors), batch_size):
-                batch = vectors[i:i + batch_size]
-                index.upsert(vectors=batch, namespace=namespace)
-                logger.info(f"Upserted YouTube batch {i//batch_size + 1}")
-            
-            logger.info(f"Successfully stored {len(vectors)} YouTube vectors in Pinecone for {company_name} qudemo {qudemo_id}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"YouTube Pinecone storage failed: {e}")
-            return False
-
-    async def _create_embeddings_async(self, texts: List[str]) -> List[List[float]]:
-        """
-        Create embeddings for text chunks using OpenAI (async version)
-        
-        Args:
-            texts: List of text chunks to embed
-            
-        Returns:
-            List of embeddings
-        """
-        try:
-            logger.info(f"Creating embeddings for {len(texts)} chunks...")
+            logger.info(f"🧠 Creating embeddings for {len(texts)} chunks...")
             
             embeddings = []
             batch_size = 100  # OpenAI batch size limit
@@ -2086,40 +1454,86 @@ class GeminiTranscriptionProcessor:
                     batch_embeddings = [e.embedding for e in response.data]
                     embeddings.extend(batch_embeddings)
                     
-                    logger.info(f"Created embeddings for batch {i//batch_size + 1}")
+                    logger.info(f"✅ Created embeddings for batch {i//batch_size + 1}")
                     
                 except Exception as e:
-                    logger.error(f"Batch embedding failed: {e}")
+                    logger.error(f"❌ Batch embedding failed: {e}")
                     # Create zero embeddings for failed batch
-                    zero_embedding = [0.0] * 3072  # OpenAI embedding dimension
+                    zero_embedding = [0.0] * 3072  # OpenAI text-embedding-3-large dimension
                     embeddings.extend([zero_embedding] * len(batch))
             
             return embeddings
             
         except Exception as e:
-            logger.error(f"Embedding creation failed: {e}")
+            logger.error(f"❌ Embedding creation failed: {e}")
             return []
     
-    async def _process_generic_video(self, video_url: str, company_name: str, qudemo_id: str) -> Dict:
+    def _create_youtube_timestamped_chunks(self, video_duration_sec: float, video_chunks: list[dict]) -> list[dict]:
         """
-        Process generic video (fallback for unknown video types)
+        Evenly distributes timestamps for each text item *within its own video chunk*.
+        Returns a flat list of dicts:
+          {
+            "text": str,
+            "start_timestamp": float,  # absolute seconds into full video
+            "end_timestamp": float,    # absolute seconds into full video
+            "video_chunk_index": int,
+            "local_index": int
+          }
+        
+        NOTE: This function returns ABSOLUTE timestamps into the full video timeline.
+        """
+        result = []
+        
+        for video_chunk_idx, video_chunk in enumerate(video_chunks):
+            start_time = video_chunk.get('start', 0.0)
+            end_time = video_chunk.get('end', video_duration_sec)
+            text_items = video_chunk.get('text_items', [])
+            
+            if not text_items:
+                continue
+                
+            # Calculate duration for this video chunk
+            chunk_duration = end_time - start_time
+            
+            # Distribute timestamps evenly within this chunk
+            for local_idx, text_item in enumerate(text_items):
+                # Calculate relative position within this chunk (0.0 to 1.0)
+                relative_position = local_idx / len(text_items)
+                
+                # Calculate absolute timestamps
+                item_start = start_time + (relative_position * chunk_duration)
+                item_end = start_time + ((relative_position + 1.0) * chunk_duration)
+                
+                result.append({
+                    'text': text_item,
+                    'start_timestamp': item_start,
+                    'end_timestamp': item_end,
+                    'video_chunk_index': video_chunk_idx,
+                    'local_index': local_idx
+                })
+        
+        return result
+    
+    async def process_video_with_qudemo(self, video_url: str, company_name: str, qudemo_id: str) -> Optional[Dict]:
+        """
+        Process video with QuDemo integration - main entry point for video processing
         
         Args:
-            video_url: Video URL
-            company_name: Company name for storage
-            qudemo_id: QuDemo ID for storage
+            video_url: YouTube or Loom video URL
+            company_name: Company name for organization
+            qudemo_id: QuDemo ID for proper namespace isolation
             
         Returns:
-            Dict with processing results
+            Dict with processing results and detailed status information
         """
         try:
-            logger.info(f"🎬 Processing generic video: {video_url}")
+            logger.info(f"🎯 Starting video processing for: {video_url}")
+            logger.info(f"🏢 Company: {company_name}, QuDemo ID: {qudemo_id}")
             
-            # Try to extract transcription using Gemini API
-            transcription_data = self.extract_transcription_with_gemini(video_url)
-            
+            # Extract transcription
+            transcription_data = self.extract_transcription_with_whisper(video_url)
             if not transcription_data:
-                logger.error("❌ Failed to extract transcription from generic video")
+                logger.error("❌ Failed to extract transcription from video")
                 return {
                     'success': False,
                     'error': 'Failed to extract transcription from video',
@@ -2128,13 +1542,81 @@ class GeminiTranscriptionProcessor:
                     'qudemo_id': qudemo_id
                 }
             
-            logger.info(f"✅ Generic video transcription extracted: {len(transcription_data.get('transcription', ''))} characters")
+            logger.info(f"✅ Transcription extracted: {len(transcription_data.get('transcription', ''))} characters")
             
-            # Process with full transcription data
-            return await self._process_full_transcription(video_url, company_name, qudemo_id, transcription_data)
+            # Create chunks from transcription
+            chunks = self.chunk_transcription(transcription_data.get('transcription', ''), segments=None)
+            if not chunks:
+                logger.error("❌ Failed to create chunks from transcription")
+                return {
+                    'success': False,
+                    'error': 'Failed to create chunks from transcription',
+                    'video_url': video_url,
+                    'company_name': company_name,
+                    'qudemo_id': qudemo_id
+                }
+            
+            logger.info(f"✅ Created {len(chunks)} chunks from transcription")
+            
+            # Create embeddings
+            embeddings = self.create_embeddings([c['text'] if isinstance(c, dict) else str(c) for c in chunks])
+            if not embeddings or len(embeddings) != len(chunks):
+                logger.error("❌ Failed to create embeddings")
+                return {
+                    'success': False,
+                    'error': 'Failed to create embeddings',
+                    'video_url': video_url,
+                    'company_name': company_name,
+                    'qudemo_id': qudemo_id
+                }
+            
+            logger.info(f"✅ Created {len(embeddings)} embeddings")
+            
+            # Log timestamp summary
+            self._log_chunk_summary(chunks, label=f"{company_name}")
+            
+            # Store in Pinecone
+            storage_success = self.store_in_pinecone(
+                company_name, video_url, transcription_data, chunks, embeddings, qudemo_id
+            )
+            
+            if not storage_success:
+                logger.error("❌ Failed to store in Pinecone")
+                return {
+                    'success': False,
+                    'error': 'Failed to store in Pinecone',
+                    'video_url': video_url,
+                    'company_name': company_name,
+                    'qudemo_id': qudemo_id
+                }
+            
+            # Return success result
+            result = {
+                'success': True,
+                'video_url': video_url,
+                'company_name': company_name,
+                'qudemo_id': qudemo_id,
+                'title': transcription_data.get('title', 'Unknown'),
+                'chunks_created': len(chunks),
+                'vectors_stored': len(embeddings),
+                'word_count': transcription_data.get('word_count', 'Unknown'),
+                'language': transcription_data.get('language', 'Unknown'),
+                'method': transcription_data.get('method', 'gemini_transcription'),
+                'processing_quality': 'full_transcription',
+                'status_message': 'Video processed successfully with complete transcription.',
+                'processing_details': {
+                    'method_used': 'gemini_transcription',
+                    'reason': 'API successful',
+                    'content_quality': 'excellent',
+                    'qa_readiness': 'excellent'
+                }
+            }
+            
+            logger.info(f"✅ Video processing completed successfully")
+            return result
             
         except Exception as e:
-            logger.error(f"❌ Generic video processing failed: {e}")
+            logger.error(f"❌ Video processing failed: {e}")
             return {
                 'success': False,
                 'error': str(e),
@@ -2142,206 +1624,7 @@ class GeminiTranscriptionProcessor:
                 'company_name': company_name,
                 'qudemo_id': qudemo_id
             }
-    
-    async def _process_full_transcription(self, video_url: str, company_name: str, qudemo_id: str, transcription_data: Dict) -> Dict:
-        """
-        Process video with full transcription data
-        
-        Args:
-            video_url: YouTube video URL
-            company_name: Company name for organization
-            qudemo_id: Qudemo ID for proper namespace isolation
-            transcription_data: Full transcription data from Gemini API
-            
-        Returns:
-            Dict with processing results
-        """
-        try:
-            logger.info(f"🎯 Processing full transcription for video: {video_url}")
-            
-            # Step 1: Chunk the transcription
-            transcription = transcription_data.get('transcription', '')
-            if not transcription:
-                raise Exception("Empty transcription")
-            
-            chunks = self.chunk_transcription(transcription, segments=None)
-            if not chunks:
-                raise Exception("Failed to create chunks")
-            
-            # Step 2: Create embeddings
-            embeddings = self.create_embeddings([c['text'] if isinstance(c, dict) else str(c) for c in chunks])
-            if not embeddings or len(embeddings) != len(chunks):
-                raise Exception("Failed to create embeddings")
-            
-            # Log timestamp summary after embedding creation
-            self._log_chunk_summary(chunks, label=f"{company_name}")
-            
-            # Step 3: Store in Pinecone
-            storage_success = await self.store_in_pinecone(
-                company_name, video_url, transcription_data, chunks, embeddings, qudemo_id
-            )
-            
-            if not storage_success:
-                raise Exception("Failed to store in Pinecone")
-            
-            # Return success result with comprehensive status information
-            result = {
-                'success': True,
-                'video_url': video_url,
-                'company_name': company_name,
-                'title': transcription_data.get('title', 'Unknown'),
-                'chunks_created': len(chunks),
-                'vectors_stored': len(embeddings),
-                'word_count': transcription_data.get('word_count', 'Unknown'),
-                'language': transcription_data.get('language', 'Unknown'),
-                'method': 'gemini_transcription_full',
-                'processing_quality': 'full_transcription',
-                'status_message': 'Video processed successfully with complete transcription using Gemini API.',
-                'processing_details': {
-                    'method_used': 'gemini_transcription_full',
-                    'reason': 'API successful',
-                    'content_quality': 'excellent',
-                    'qa_readiness': 'excellent',
-                    'transcription_completeness': '100%',
-                    'chunk_quality': 'high'
-                },
-                'performance_metrics': {
-                    'total_chunks': len(chunks),
-                    'total_words': transcription_data.get('word_count', 0),
-                    'processing_method': 'full_transcription',
-                    'storage_efficiency': 'optimized'
-                }
-            }
-            
-            logger.info(f"✅ Full transcription processing completed successfully")
-            return result
-            
-        except Exception as e:
-            logger.error(f"❌ Full transcription processing failed: {e}")
-            return {
-                'success': False,
-                'error': str(e),
-                'video_url': video_url,
-                'company_name': company_name
-            }
-    
-    async def _process_hybrid_long_video(self, video_url: str, company_name: str, qudemo_id: str) -> Dict:
-        """
-        Hybrid processing for long videos - try partial transcription before fallback
-        
-        Args:
-            video_url: YouTube video URL
-            company_name: Company name for organization
-            qudemo_id: Qudemo ID for proper namespace isolation
-            
-        Returns:
-            Dict with processing results
-        """
-        try:
-            logger.info(f"🔄 Attempting hybrid processing for long video: {video_url}")
-            
-            # Try to get partial transcription using a different approach
-            # This could involve trying to process the video in segments
-            # or using a different API endpoint
-            
-            # For now, we'll use the intelligent fallback but mark it as hybrid
-            fallback_content = await self._create_intelligent_fallback_content(video_url, "hybrid")
-            
-            if not fallback_content:
-                logger.error("❌ Failed to create hybrid fallback content")
-                return {
-                    'success': False,
-                    'error': 'Failed to create hybrid fallback content',
-                    'video_url': video_url,
-                    'company_name': company_name
-                }
-            
-            # Create chunks from fallback content
-            chunks = self.chunk_transcription(fallback_content, segments=None)
-            if not chunks:
-                logger.error("❌ Failed to create chunks from hybrid fallback content")
-                return {
-                    'success': False,
-                    'error': 'Failed to create chunks from hybrid fallback content',
-                    'video_url': video_url,
-                    'company_name': company_name
-                }
-            
-            # Create embeddings
-            embeddings = self.create_embeddings([c['text'] if isinstance(c, dict) else str(c) for c in chunks])
-            if not embeddings or len(embeddings) != len(chunks):
-                logger.error("❌ Failed to create embeddings for hybrid content")
-                return {
-                    'success': False,
-                    'error': 'Failed to create embeddings for hybrid content',
-                    'video_url': video_url,
-                    'company_name': company_name
-                }
-            
-            # Store in Pinecone
-            transcription_data = {
-                'title': f'Long YouTube Video (Hybrid Processing)',
-                'transcription': fallback_content,
-                'duration': 'Long video - hybrid processing',
-                'language': 'en',
-                'word_count': len(fallback_content.split()),
-                'method': 'hybrid_long_video'
-            }
-            
-            storage_success = await self.store_in_pinecone(
-                company_name, video_url, transcription_data, chunks, embeddings, qudemo_id
-            )
-            
-            if not storage_success:
-                logger.error("❌ Failed to store hybrid content in Pinecone")
-                return {
-                    'success': False,
-                    'error': 'Failed to store hybrid content in Pinecone',
-                    'video_url': video_url,
-                    'company_name': company_name
-                }
-            
-            # Return success result with hybrid processing details
-            result = {
-                'success': True,
-                'video_url': video_url,
-                'company_name': company_name,
-                'title': transcription_data.get('title', 'Unknown'),
-                'chunks_created': len(chunks),
-                'vectors_stored': len(embeddings),
-                'word_count': transcription_data.get('word_count', 'Unknown'),
-                'language': transcription_data.get('language', 'Unknown'),
-                'method': 'hybrid_long_video',
-                'processing_quality': 'hybrid_analysis',
-                'status_message': 'Video processed using hybrid approach combining partial transcription with intelligent analysis.',
-                'processing_details': {
-                    'method_used': 'hybrid_long_video',
-                    'reason': 'Long video with partial API success',
-                    'content_quality': 'high',
-                    'qa_readiness': 'excellent',
-                    'transcription_completeness': 'partial + enhanced',
-                    'chunk_quality': 'high'
-                },
-                'performance_metrics': {
-                    'total_chunks': len(chunks),
-                    'total_words': transcription_data.get('word_count', 0),
-                    'processing_method': 'hybrid_analysis',
-                    'storage_efficiency': 'optimized'
-                }
-            }
-            
-            logger.info(f"✅ Hybrid processing completed successfully")
-            return result
-            
-        except Exception as e:
-            logger.error(f"❌ Hybrid processing failed: {e}")
-            return {
-                'success': False,
-                'error': str(e),
-                'video_url': video_url,
-                'company_name': company_name
-            }
-    
+
     def search_similar_chunks(self, company_name: str, query: str, top_k: int = 5) -> List[Dict]:
         """
         Search for similar chunks in Pinecone
@@ -2355,38 +1638,36 @@ class GeminiTranscriptionProcessor:
             List of similar chunks with metadata
         """
         try:
-            # Create query embedding
-            query_embedding = self.create_embeddings([query])
-            if not query_embedding:
-                raise Exception("Failed to create query embedding")
+            import pinecone
+            from pinecone import Pinecone
+            import os
+            from dotenv import load_dotenv
             
-            # Get index
-            index_name = f"qudemo-{company_name.lower().replace(' ', '-')}"
-            index = self.pc.Index(index_name)
+            load_dotenv()
+            pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
+            index = pc.Index('qudemo-video-index')
             
-            # Search
+            # Get query embedding
+            query_embedding = self.create_embeddings([query])[0]
+            
+            # Search in Pinecone
             results = index.query(
-                vector=query_embedding[0],
+                vector=query_embedding,
                 top_k=top_k,
-                include_metadata=True
+                include_metadata=True,
+                namespace=f"{company_name.lower().replace(' ', '-')}-*"
             )
             
-            # Format results
-            formatted_results = []
+            chunks = []
             for match in results.matches:
-                formatted_results.append({
-                    'id': match.id,
-                    'score': match.score,
+                chunks.append({
                     'text': match.metadata.get('text', ''),
-                    'video_url': match.metadata.get('video_url', ''),
-                    'title': match.metadata.get('title', ''),
-                    'chunk_index': match.metadata.get('chunk_index', 0)
+                    'score': match.score,
+                    'metadata': match.metadata
                 })
             
-            return formatted_results
+            return chunks
             
         except Exception as e:
             logger.error(f"❌ Search failed: {e}")
             return []
-
-

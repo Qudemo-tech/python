@@ -82,13 +82,16 @@ class SimpleGeminiTranscriber:
             for attempt in range(max_retries):
                 try:
                     logger.info(f"🔄 Attempt {attempt + 1}/{max_retries} - Processing video (this may take 5-10 minutes)...")
+                    logger.info(f"📡 Making request to: {endpoint}?key={self.api_key[:10]}...")
+                    logger.info(f"📦 Payload structure: {list(payload.keys())}")
+                    
                     r = requests.post(
                         f"{endpoint}?key={self.api_key}",
                         headers={"Content-Type": "application/json"},
                         json=payload,
                         timeout=timeout,
                     )
-                    logger.info(f"✅ Request completed successfully on attempt {attempt + 1}")
+                    logger.info(f"✅ Request completed successfully on attempt {attempt + 1} - Status: {r.status_code}")
                     break  # Success, exit retry loop
                 except requests.exceptions.Timeout:
                     if attempt < max_retries - 1:
@@ -109,12 +112,22 @@ class SimpleGeminiTranscriber:
             
             if r is None or r.status_code != 200:
                 logger.error(f"❌ API request failed with status {r.status_code if r else 'No response'}")
+                if r:
+                    logger.error(f"Response content: {r.text[:500]}...")
                 return None
 
-            data = r.json()
+            try:
+                data = r.json()
+                logger.info(f"📊 Response keys: {list(data.keys())}")
+            except Exception as e:
+                logger.error(f"❌ Failed to parse JSON response: {e}")
+                logger.error(f"Raw response: {r.text[:500]}...")
+                return None
+                
             cands = data.get("candidates", [])
             if not cands:
                 logger.error("❌ No candidates in response")
+                logger.error(f"Full response: {data}")
                 return None
 
             parts = cands[0].get("content", {}).get("parts", [])

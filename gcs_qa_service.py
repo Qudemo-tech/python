@@ -38,8 +38,8 @@ class GCSQAService:
             logger.info(f"❓ Processing question: {question}")
             logger.info(f"🏢 Company: {company_name}, QuDemo: {qudemo_id}")
             
-            # Search for relevant content in the transcript
-            answer_data = self.gcs_service.search_transcript_for_question(
+            # Search for relevant content in the transcript using direct method
+            answer_data = self.gcs_service.search_transcript_directly(
                 company_name=company_name,
                 qudemo_id=qudemo_id,
                 question=question

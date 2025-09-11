@@ -118,8 +118,14 @@ async def lifespan(app: FastAPI):
         
         # Initialize GCS Q&A Service (NEW - Google Cloud Storage based)
         try:
-            gcs_qa_service = GCSQAService()
-            logger.info("✅ GCS Q&A Service initialized (Google Cloud Storage based)")
+            # Check if service account file exists
+            service_account_path = 'service-account-key.json'
+            if os.path.exists(service_account_path):
+                gcs_qa_service = GCSQAService()
+                logger.info("✅ GCS Q&A Service initialized (Google Cloud Storage based)")
+            else:
+                logger.warning("⚠️ Service account key not found, GCS Q&A Service disabled")
+                gcs_qa_service = None
         except Exception as e:
             logger.error(f"❌ GCS Q&A Service initialization error: {e}")
             gcs_qa_service = None
@@ -139,6 +145,11 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"❌ Simple Gemini Transcriber initialization error: {e}")
             simple_transcriber = None
+        
+        # Set GOOGLE_APPLICATION_CREDENTIALS if service account file exists
+        if os.path.exists('service-account-key.json'):
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = 'service-account-key.json'
+            logger.info("✅ Set GOOGLE_APPLICATION_CREDENTIALS to service-account-key.json")
         
         # Initialize Company Bucket Service (NEW - Immediate bucket creation)
         try:
@@ -519,6 +530,64 @@ async def ask_question_context_first(company_name: str, qudemo_id: str, request:
         logger.error(f"❌ Error processing question: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/knowledge/sources/{company_name}")
+async def get_knowledge_sources_company(company_name: str):
+    """Get knowledge sources for a company using GCS"""
+    try:
+        logger.info(f"📚 Getting knowledge sources for company {company_name}")
+        
+        # Use GCS service to get company data
+        if gcs_service:
+            # Get list of qudemos for the company
+            qudemos = gcs_service.list_qudemos(company_name)
+            
+            knowledge_sources = []
+            for qudemo_id in qudemos:
+                try:
+                    transcript_data = gcs_service.get_video_transcript(
+                        company_name=company_name,
+                        qudemo_id=qudemo_id
+                    )
+                    
+                    if transcript_data:
+                        video_url = transcript_data.get('video_url', '')
+                        video_title = transcript_data.get('video_title', 'Unknown')
+                        chunks = transcript_data.get('chunks', [])
+                        
+                        knowledge_sources.append({
+                            'type': 'video',
+                            'url': video_url,
+                            'title': video_title,
+                            'chunks_count': len(chunks),
+                            'qudemo_id': qudemo_id,
+                            'company_name': company_name
+                        })
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not get transcript for {qudemo_id}: {e}")
+                    continue
+            
+            return {
+                "success": True,
+                "data": {
+                    "sources": knowledge_sources,
+                    "total_sources": len(knowledge_sources)
+                }
+            }
+        else:
+            return {
+                "success": False,
+                "error": "GCS service not initialized",
+                "data": {"sources": [], "total_sources": 0}
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Error getting knowledge sources for company: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "data": {"sources": [], "total_sources": 0}
+        }
+
 @app.get("/knowledge/sources/{company_name}/{qudemo_id}")
 async def get_knowledge_sources_qudemo(company_name: str, qudemo_id: str):
     """Get knowledge sources for a specific qudemo using GCS"""
@@ -711,7 +780,9 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
     try:
         # Check if we have GCS services available
         if not gcs_qa_service and not simple_transcriber:
-            raise HTTPException(status_code=500, detail="GCS services not initialized")
+            error_msg = "GCS services not initialized. Please check: 1) GEMINI_API_KEY environment variable, 2) service-account-key.json file, 3) Google Cloud credentials"
+            logger.error(f"❌ {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
         
         logger.info(f"🔄 Processing qudemo content for {company_name} qudemo {qudemo_id}")
         

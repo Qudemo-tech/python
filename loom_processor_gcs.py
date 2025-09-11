@@ -325,7 +325,7 @@ class LoomVideoProcessorGCS:
                 return None
             
             # Step 4: Store in GCS
-            storage_result = self.gcs_service.store_transcript(
+            storage_result = self.gcs_service.store_video_transcript(
                 company_name=company_name,
                 qudemo_id=qudemo_id,
                 transcript_data=transcription_result,

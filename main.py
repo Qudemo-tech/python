@@ -480,6 +480,7 @@ async def get_knowledge_sources_company(company_name: str):
         logger.info(f"📚 Getting knowledge sources for company {company_name}")
         
         # Use GCS service to get company data
+        gcs_service = gcs_qa_service.gcs_service
         if gcs_service:
             # Get list of qudemos for the company
             qudemos = gcs_service.list_qudemos(company_name)

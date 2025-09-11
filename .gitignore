@@ -113,6 +113,8 @@ cookies.txt
 
 # Google Cloud credentials (keep key.json but ignore others)
 !key.json
+service-account-key.json
+*-service-account-key.json
 
 # ML models and weights
 Wav2Lip/

@@ -35,6 +35,12 @@ from enhanced_video_processor import initialize_enhanced_video_processor, get_en
 from enhanced_video_chunking_processor import initialize_enhanced_chunking_processor, get_enhanced_chunking_processor
 from delete_reprocess_utils import initialize_delete_reprocess_manager, get_delete_reprocess_manager
 
+# Hybrid processing imports
+from google_video_intelligence_processor import initialize_google_video_processor, get_google_video_processor
+from hybrid_chunking_processor import initialize_hybrid_chunking_processor, get_hybrid_chunking_processor
+from enhanced_qa_hybrid import initialize_hybrid_qa, get_hybrid_qa
+from hybrid_config import get_hybrid_config
+
 # Load environment variables
 from dotenv import load_dotenv
 load_dotenv()
@@ -56,10 +62,16 @@ delete_reprocess_manager = None
 universal_scraper_integration = None
 enhanced_scraper = None
 
+# Hybrid processing instances
+google_video_processor = None
+hybrid_chunking_processor = None
+hybrid_qa_system = None
+hybrid_config = None
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for FastAPI"""
-    global enhanced_pinecone_manager, enhanced_knowledge_integration, enhanced_qa_system, enhanced_semantic_qa_system, enhanced_topic_wise_qa_system, context_first_qa_system, enhanced_video_processor, enhanced_chunking_processor, delete_reprocess_manager, universal_scraper_integration, enhanced_scraper
+    global enhanced_pinecone_manager, enhanced_knowledge_integration, enhanced_qa_system, enhanced_semantic_qa_system, enhanced_topic_wise_qa_system, context_first_qa_system, enhanced_video_processor, enhanced_chunking_processor, delete_reprocess_manager, universal_scraper_integration, enhanced_scraper, google_video_processor, hybrid_chunking_processor, hybrid_qa_system, hybrid_config
     
     try:
         logger.info("🚀 Starting Enhanced QuDemo Python Backend...")
@@ -170,6 +182,46 @@ async def lifespan(app: FastAPI):
         enhanced_scraper = None
         logger.info("ℹ️ Enhanced Scraper disabled (module deleted)")
         
+        # Initialize Hybrid Processing System
+        try:
+            # Initialize hybrid configuration
+            hybrid_config = get_hybrid_config()
+            if hybrid_config.validate_config():
+                logger.info("✅ Hybrid configuration validated")
+            else:
+                logger.warning("⚠️ Hybrid configuration validation failed")
+            
+            # Initialize Google Video Intelligence Processor
+            service_account_path = "service-account-key.json"
+            if initialize_google_video_processor(service_account_path):
+                google_video_processor = get_google_video_processor()
+                logger.info("✅ Google Video Intelligence Processor initialized")
+            else:
+                logger.warning("⚠️ Google Video Intelligence Processor initialization failed")
+                google_video_processor = None
+            
+            # Initialize Hybrid Chunking Processor
+            if initialize_hybrid_chunking_processor():
+                hybrid_chunking_processor = get_hybrid_chunking_processor()
+                logger.info("✅ Hybrid Chunking Processor initialized")
+            else:
+                logger.warning("⚠️ Hybrid Chunking Processor initialization failed")
+                hybrid_chunking_processor = None
+            
+            # Initialize Hybrid Q&A System
+            if initialize_hybrid_qa():
+                hybrid_qa_system = get_hybrid_qa()
+                logger.info("✅ Hybrid Q&A System initialized")
+            else:
+                logger.warning("⚠️ Hybrid Q&A System initialization failed")
+                hybrid_qa_system = None
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Hybrid processing system initialization failed: {e}")
+            google_video_processor = None
+            hybrid_chunking_processor = None
+            hybrid_qa_system = None
+        
         logger.info("🎉 All enhanced components initialized successfully!")
         
     except Exception as e:
@@ -250,7 +302,10 @@ async def health_check():
             "topic_wise_qa_system": enhanced_topic_wise_qa_system is not None,
             "video_processor": enhanced_video_processor is not None,
             "chunking_processor": enhanced_chunking_processor is not None,
-            "enhanced_scraper": False  # Disabled - module deleted
+            "enhanced_scraper": False,  # Disabled - module deleted
+            "hybrid_qa_system": hybrid_qa_system is not None,
+            "hybrid_chunking_processor": hybrid_chunking_processor is not None,
+            "google_video_processor": google_video_processor is not None
         }
         
         all_healthy = all(components_status.values())
@@ -271,11 +326,19 @@ async def health_check():
 
 @app.post("/ask/{company_name}/{qudemo_id}")
 async def ask_question(company_name: str, qudemo_id: str, request: QuestionRequest):
-    """Ask a question and get context-aware answer using enhanced topic-wise Q&A system"""
+    """Ask a question and get context-aware answer using hybrid Q&A system (optimized for accuracy)"""
     try:
-        # Try topic-wise QA system first (primary for topic-wise chunks)
-        if enhanced_topic_wise_qa_system:
-            logger.info(f"❓ Processing question for {company_name} qudemo {qudemo_id} using TOPIC-WISE QA")
+        # Try hybrid QA system first (primary for best accuracy and timestamps)
+        if hybrid_qa_system:
+            logger.info(f"❓ Processing question for {company_name} qudemo {qudemo_id} using HYBRID QA (primary)")
+            
+            answer_result = hybrid_qa_system.ask_question(
+                question=request.question,
+                company_name=company_name,
+                qudemo_id=qudemo_id
+            )
+        elif enhanced_topic_wise_qa_system:
+            logger.info(f"❓ Processing question for {company_name} qudemo {qudemo_id} using TOPIC-WISE QA (fallback)")
             
             answer_result = enhanced_topic_wise_qa_system.ask_question(
                 question=request.question,
@@ -294,22 +357,41 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
             raise HTTPException(status_code=500, detail="No Q&A system available")
         
         if answer_result['success']:
-            return {
+            # Enhanced response formatting for hybrid Q&A with better timestamp handling
+            response_data = {
                 'success': True,
                 'answer': answer_result['answer'],
                 'sources': answer_result.get('sources', []),
-                'total_sources': len(answer_result.get('sources', [])) if answer_result.get('sources') else answer_result.get('total_sources', 0),
+                'total_sources': answer_result.get('total_sources', 0),
                 'search_score': answer_result.get('search_score', 0),
                 'confidence_score': answer_result.get('confidence', answer_result.get('confidence_score', 0)),
                 'content_types_found': answer_result.get('content_types_found', []),
                 'difficulty_level': answer_result.get('difficulty_level', 'intermediate'),
                 'estimated_time': answer_result.get('estimated_time', '2-3 minutes'),
-                'start': answer_result.get('timestamp', {}).get('start_time', 0) if answer_result.get('timestamp') else (answer_result.get('sources', [{}])[0].get('start_timestamp', 0) if answer_result.get('sources') else 0),
-                'end': answer_result.get('timestamp', {}).get('end_time', 0) if answer_result.get('timestamp') else (answer_result.get('sources', [{}])[0].get('end_timestamp', 0) if answer_result.get('sources') else 0),
-                'video_url': answer_result.get('sources', [{}])[0].get('video_url', '') if answer_result.get('sources') else '',
-                'formatted_timestamp': answer_result.get('timestamp', {}).get('formatted_start', '') if answer_result.get('timestamp') else '',
-                'answer_source': 'enhanced_topic_wise' if enhanced_topic_wise_qa_system else 'enhanced_semantic'
+                'answer_source': answer_result.get('answer_source', 'hybrid' if hybrid_qa_system else 'enhanced_topic_wise'),
+                'search_method': answer_result.get('search_method', 'hybrid' if hybrid_qa_system else 'topic_wise')
             }
+            
+            # Enhanced timestamp handling for hybrid Q&A
+            if hybrid_qa_system and answer_result.get('start') is not None and answer_result.get('end') is not None:
+                # Hybrid Q&A provides direct start/end timestamps
+                response_data.update({
+                    'start': answer_result.get('start', 0),
+                    'end': answer_result.get('end', 0),
+                    'video_url': answer_result.get('video_url', ''),
+                    'formatted_timestamp': f"{int(answer_result.get('start', 0) // 60)}:{int(answer_result.get('start', 0) % 60):02d}",
+                    'hybrid_scores': answer_result.get('hybrid_scores', [])
+                })
+            else:
+                # Fallback to existing timestamp extraction logic
+                response_data.update({
+                    'start': answer_result.get('timestamp', {}).get('start_time', 0) if answer_result.get('timestamp') else (answer_result.get('sources', [{}])[0].get('start_timestamp', 0) if answer_result.get('sources') else 0),
+                    'end': answer_result.get('timestamp', {}).get('end_time', 0) if answer_result.get('timestamp') else (answer_result.get('sources', [{}])[0].get('end_timestamp', 0) if answer_result.get('sources') else 0),
+                    'video_url': answer_result.get('sources', [{}])[0].get('video_url', '') if answer_result.get('sources') else '',
+                    'formatted_timestamp': answer_result.get('timestamp', {}).get('formatted_start', '') if answer_result.get('timestamp') else ''
+                })
+            
+            return response_data
         else:
             return {
                 'success': False,
@@ -462,6 +544,130 @@ async def ask_question_context_first(company_name: str, qudemo_id: str, request:
             
     except Exception as e:
         logger.error(f"❌ Error processing question: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ask-hybrid/{company_name}/{qudemo_id}")
+async def ask_question_hybrid(company_name: str, qudemo_id: str, request: QuestionRequest):
+    """Ask a question using hybrid Q&A system with deterministic signals + LLM refinement"""
+    try:
+        if not hybrid_qa_system:
+            # Fallback to existing Q&A system
+            logger.warning("⚠️ Hybrid Q&A system not available, falling back to topic-wise Q&A")
+            if enhanced_topic_wise_qa_system:
+                answer_result = enhanced_topic_wise_qa_system.ask_question(
+                    question=request.question,
+                    company_name=company_name,
+                    qudemo_id=qudemo_id
+                )
+            else:
+                raise HTTPException(status_code=500, detail="No Q&A system available")
+        else:
+            logger.info(f"❓ Processing question for {company_name} qudemo {qudemo_id} using HYBRID QA")
+            
+            answer_result = hybrid_qa_system.ask_question(
+                question=request.question,
+                company_name=company_name,
+                qudemo_id=qudemo_id
+            )
+        
+        if answer_result.get('success'):
+            return {
+                'success': True,
+                'answer': answer_result.get('answer', ''),
+                'start': answer_result.get('start', 0),
+                'end': answer_result.get('end', 0),
+                'video_url': answer_result.get('video_url'),
+                'sources': answer_result.get('sources', []),
+                'total_sources': answer_result.get('total_sources', 0),
+                'search_score': answer_result.get('search_score', 0),
+                'content_types_found': answer_result.get('content_types_found', []),
+                'difficulty_level': answer_result.get('difficulty_level', 'beginner'),
+                'estimated_time': answer_result.get('estimated_time', '1 minute'),
+                'answer_source': answer_result.get('answer_source', 'hybrid'),
+                'search_method': answer_result.get('search_method', 'hybrid'),
+                'hybrid_scores': answer_result.get('hybrid_scores', []),
+                'company_name': company_name,
+                'qudemo_id': qudemo_id
+            }
+        else:
+            raise HTTPException(status_code=500, detail=f"Q&A processing failed: {answer_result.get('error', 'Unknown error')}")
+            
+    except Exception as e:
+        logger.error(f"❌ Error in hybrid Q&A: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/process-video-hybrid/{company_name}/{qudemo_id}")
+async def process_video_hybrid(company_name: str, qudemo_id: str, request: QuDemoContentRequest):
+    """Process video using hybrid approach: Google Video Intelligence + Speech-to-Text + LLM refinement"""
+    try:
+        if not hybrid_chunking_processor:
+            # Fallback to existing video processing
+            logger.warning("⚠️ Hybrid chunking processor not available, falling back to existing method")
+            if enhanced_video_processor:
+                result = await enhanced_video_processor.process_video_with_qudemo(
+                    video_url=request.video_urls[0] if request.video_urls else "",
+                    company_name=company_name,
+                    qudemo_id=qudemo_id
+                )
+            else:
+                raise HTTPException(status_code=500, detail="No video processor available")
+        else:
+            logger.info(f"🎬 Processing video with hybrid approach for {company_name} qudemo {qudemo_id}")
+            
+            if not request.video_urls:
+                raise HTTPException(status_code=400, detail="No video URLs provided")
+            
+            # Process first video URL (can be extended to handle multiple)
+            video_url = request.video_urls[0]
+            
+            result = await hybrid_chunking_processor.process_video_hybrid(
+                video_url=video_url,
+                company_name=company_name,
+                qudemo_id=qudemo_id,
+                use_youtube_captions=True
+            )
+        
+        if result.get('success'):
+            return {
+                'success': True,
+                'message': f"Video processed successfully with {result.get('chunks_created', 0)} chunks",
+                'chunks_created': result.get('chunks_created', 0),
+                'chunks_stored': result.get('chunks_stored', 0),
+                'validation_metrics': result.get('validation_metrics', {}),
+                'time_source': result.get('time_source', 'hybrid'),
+                'processing_method': result.get('processing_method', 'hybrid_deterministic_llm'),
+                'video_url': result.get('video_url'),
+                'company_name': company_name,
+                'qudemo_id': qudemo_id
+            }
+        else:
+            raise HTTPException(status_code=500, detail=f"Video processing failed: {result.get('error', 'Unknown error')}")
+            
+    except Exception as e:
+        logger.error(f"❌ Error in hybrid video processing: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/hybrid-status")
+async def get_hybrid_status():
+    """Get status of hybrid processing system"""
+    try:
+        return {
+            'success': True,
+            'hybrid_system_status': {
+                'google_video_processor': google_video_processor is not None,
+                'hybrid_chunking_processor': hybrid_chunking_processor is not None,
+                'hybrid_qa_system': hybrid_qa_system is not None,
+                'hybrid_config': hybrid_config is not None
+            },
+            'configuration': {
+                'hybrid_enabled': hybrid_config.is_hybrid_enabled() if hybrid_config else False,
+                'debug_mode': hybrid_config.get_debug_mode() if hybrid_config else False,
+                'processing_timeout': hybrid_config.get_processing_timeout() if hybrid_config else 600
+            },
+            'timestamp': datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"❌ Error getting hybrid status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/knowledge/sources/{company_name}/{qudemo_id}")
@@ -652,25 +858,45 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                     logger.info(f"🔍 Processing YouTube video {i+1}/{len(youtube_videos)}: {video_url}")
                     logger.info(f"🎬 Detected video type: youtube")
                     
-                    # Process video using NEW enhanced chunking processor (PRIMARY)
-                    if enhanced_chunking_processor:
-                        logger.info(f"🎥 Processing YouTube video with ENHANCED CHUNKING: {video_url}")
+                    # Process video using HYBRID chunking processor with subtopic detection (PRIMARY)
+                    if hybrid_chunking_processor:
+                        logger.info(f"🎥 Processing YouTube video with HYBRID CHUNKING + SUBTOPICS: {video_url}")
+                        result = await hybrid_chunking_processor.process_video_hybrid(
+                            video_url, company_name, qudemo_id, use_youtube_captions=True
+                        )
+                    elif enhanced_chunking_processor:
+                        logger.info(f"🎥 Processing YouTube video with ENHANCED CHUNKING (fallback): {video_url}")
                         result = await enhanced_chunking_processor.process_video_with_topic_analysis(
                             video_url, company_name, qudemo_id
                         )
                         
                         # Convert result format to match expected structure
                         if result and result.get('success'):
-                            result = {
-                                'success': True,
-                                'chunks_stored': result.get('chunks_created', 0),
-                                'video_type': 'youtube',
-                                'company_name': company_name,
-                                'qudemo_id': qudemo_id,
-                                'method': 'enhanced_chunking_topic_analysis',
-                                'segments_processed': result.get('segments_extracted', 0),
-                                'topics_extracted': result.get('segments_extracted', 0)
-                            }
+                            if hybrid_chunking_processor:
+                                # Hybrid processor response format
+                                result = {
+                                    'success': True,
+                                    'chunks_stored': result.get('chunks_stored', 0),
+                                    'video_type': 'youtube',
+                                    'company_name': company_name,
+                                    'qudemo_id': qudemo_id,
+                                    'method': 'hybrid_chunking_with_subtopics',
+                                    'segments_processed': result.get('segments_processed', 0),
+                                    'topics_extracted': result.get('topics_extracted', 0),
+                                    'subtopics_detected': result.get('subtopics_detected', 0)
+                                }
+                            else:
+                                # Enhanced processor response format
+                                result = {
+                                    'success': True,
+                                    'chunks_stored': result.get('chunks_created', 0),
+                                    'video_type': 'youtube',
+                                    'company_name': company_name,
+                                    'qudemo_id': qudemo_id,
+                                    'method': 'enhanced_chunking_topic_analysis',
+                                    'segments_processed': result.get('segments_extracted', 0),
+                                    'topics_extracted': result.get('segments_extracted', 0)
+                                }
                         else:
                             result = {
                                 'success': False,
@@ -1053,6 +1279,8 @@ async def cleanup_qudemo_data(company_name: str, qudemo_id: str):
                     else:
                         vector_dim = 1536  # Other indexes use text-embedding-3-small
                     
+                    logger.info(f"🔍 Searching for vectors in namespace: {namespace}")
+                    
                     # Query to get all vectors in the namespace
                     query_result = index.query(
                         vector=[0.0] * vector_dim,  # Correct dimension for each index
@@ -1061,12 +1289,31 @@ async def cleanup_qudemo_data(company_name: str, qudemo_id: str):
                         namespace=namespace
                     )
                     
+                    logger.info(f"📊 Found {len(query_result.matches)} vectors in namespace {namespace}")
+                    
                     if query_result.matches:
                         # Extract vector IDs
                         vector_ids = [match.id for match in query_result.matches]
                         
                         # Delete the vectors
+                        logger.info(f"🗑️ Deleting {len(vector_ids)} vectors from {index_name} index")
                         index.delete(ids=vector_ids, namespace=namespace)
+                        
+                        # Wait a moment for deletion to propagate
+                        import time
+                        time.sleep(2)
+                        
+                        # Verify deletion
+                        verification_result = index.query(
+                            vector=[0.0] * vector_dim,
+                            top_k=100,
+                            namespace=namespace
+                        )
+                        
+                        if verification_result.matches:
+                            logger.warning(f"⚠️ Cleanup incomplete: {len(verification_result.matches)} vectors remain in {namespace}")
+                        else:
+                            logger.info(f"✅ Complete cleanup verified for {namespace}")
                         
                         vectors_deleted = len(vector_ids)
                         cleanup_results['total_vectors_deleted'] += vectors_deleted
@@ -1218,6 +1465,45 @@ async def delete_company_data(company_name: str):
         
         logger.info(f"🎉 Company deletion completed: {cleanup_results['total_vectors_deleted']} vectors deleted from {cleanup_results['total_namespaces_cleaned']} namespaces")
         
+        # Step 4: Verify deletion by checking if any company namespaces still exist
+        logger.info("🔍 Verifying complete deletion...")
+        verification_results = {
+            'remaining_namespaces': [],
+            'verification_passed': True
+        }
+        
+        for index_name, index_id in enhanced_pinecone_manager.indexes.items():
+            try:
+                index = enhanced_pinecone_manager.pc.Index(index_id)
+                stats = index.describe_index_stats()
+                namespaces = stats.get('namespaces', {})
+                
+                normalized_company_name = company_name.lower().replace(' ', '-')
+                remaining_namespaces = [
+                    ns for ns in namespaces.keys() 
+                    if ns.startswith(f"{normalized_company_name}-")
+                ]
+                
+                if remaining_namespaces:
+                    verification_results['remaining_namespaces'].extend([
+                        {'index': index_name, 'namespace': ns} for ns in remaining_namespaces
+                    ])
+                    verification_results['verification_passed'] = False
+                    logger.warning(f"⚠️ Found remaining namespaces in {index_name}: {remaining_namespaces}")
+                else:
+                    logger.info(f"✅ Verified: No remaining namespaces in {index_name}")
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Could not verify deletion for {index_name}: {e}")
+                verification_results['verification_passed'] = False
+        
+        cleanup_results['verification'] = verification_results
+        
+        if verification_results['verification_passed']:
+            logger.info("✅ Verification passed: All company data successfully deleted")
+        else:
+            logger.warning("⚠️ Verification failed: Some company data may still exist")
+        
         return {
             "success": True,
             "message": f"Company data deletion completed successfully",
@@ -1226,6 +1512,84 @@ async def delete_company_data(company_name: str):
         
     except Exception as e:
         logger.error(f"❌ Error in company data deletion: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/force-cleanup-qudemo/{company_name}/{qudemo_id}")
+async def force_cleanup_qudemo(company_name: str, qudemo_id: str):
+    """Force cleanup of specific QuDemo data from all indexes"""
+    try:
+        logger.info(f"🧹 FORCE CLEANUP: QuDemo {qudemo_id} in company {company_name}")
+        
+        if not enhanced_pinecone_manager:
+            raise HTTPException(status_code=500, detail="Enhanced Pinecone Manager not initialized")
+        
+        cleanup_results = {
+            'company_name': company_name,
+            'qudemo_id': qudemo_id,
+            'cleaned_indexes': [],
+            'total_vectors_deleted': 0,
+            'errors': []
+        }
+        
+        # Clean up each index
+        for index_name, index_id in enhanced_pinecone_manager.indexes.items():
+            try:
+                logger.info(f"🧹 Force cleaning {index_name} index: {index_id}")
+                
+                # Create namespace for this company and qudemo
+                namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
+                
+                # Get the index
+                index = enhanced_pinecone_manager.pc.Index(index_id)
+                
+                # Determine vector dimension
+                if index_name == 'video':
+                    vector_dim = 3072
+                else:
+                    vector_dim = 1536
+                
+                # Query for vectors
+                query_result = index.query(
+                    vector=[0.0] * vector_dim,
+                    top_k=10000,
+                    include_metadata=True,
+                    namespace=namespace
+                )
+                
+                logger.info(f"📊 Found {len(query_result.matches)} vectors in {namespace}")
+                
+                if query_result.matches:
+                    vector_ids = [match.id for match in query_result.matches]
+                    
+                    # Delete vectors
+                    index.delete(ids=vector_ids, namespace=namespace)
+                    logger.info(f"✅ Deleted {len(vector_ids)} vectors from {index_name}")
+                    
+                    cleanup_results['total_vectors_deleted'] += len(vector_ids)
+                    cleanup_results['cleaned_indexes'].append({
+                        'index_name': index_name,
+                        'vectors_deleted': len(vector_ids)
+                    })
+                else:
+                    logger.info(f"ℹ️ No vectors found in {namespace}")
+                    
+            except Exception as e:
+                logger.error(f"❌ Error force cleaning {index_name}: {e}")
+                cleanup_results['errors'].append({
+                    'index_name': index_name,
+                    'error': str(e)
+                })
+        
+        logger.info(f"🎉 Force cleanup completed: {cleanup_results['total_vectors_deleted']} vectors deleted")
+        
+        return {
+            "success": True,
+            "message": f"Force cleanup completed for QuDemo {qudemo_id}",
+            "data": cleanup_results
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error in force cleanup: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/delete-reprocess/{company_name}/{qudemo_id}")

@@ -43,6 +43,12 @@ class EnhancedPineconeManager:
         # Index status tracking
         self.index_status = {}
         
+        # Embedding cache for performance optimization
+        self.embedding_cache = {}
+        self.cache_hits = 0
+        self.cache_misses = 0
+        self.max_cache_size = 1000  # Maximum number of cached embeddings
+        
         # Index configurations for Standard Plan
         self.index_configs = {
             'knowledge': {
@@ -175,7 +181,16 @@ class EnhancedPineconeManager:
             return 'knowledge'
     
     async def generate_embedding(self, text: str, model: str = 'text-embedding-3-large') -> List[float]:
-        """Generate embedding with specified model and robust retry logic"""
+        """Generate embedding with caching and robust retry logic"""
+        # Check cache first
+        cache_key = self._generate_cache_key(text, model)
+        if cache_key in self.embedding_cache:
+            self.cache_hits += 1
+            logger.debug(f"✅ Cache hit for embedding: {cache_key[:20]}...")
+            return self.embedding_cache[cache_key]
+        
+        self.cache_misses += 1
+        
         max_retries = 3
         base_delay = 2
         
@@ -212,6 +227,9 @@ class EnhancedPineconeManager:
                     # Track performance
                     self.performance_metrics['query_times'].append(embedding_time)
                     
+                    # Cache the embedding
+                    self._cache_embedding(cache_key, embedding)
+                    
                     if model_to_try != model:
                         logger.info(f"✅ Embedding generated with fallback model {model_to_try}")
                     else:
@@ -233,6 +251,50 @@ class EnhancedPineconeManager:
         # If all models failed
         logger.error(f"❌ All embedding models failed: {models_to_try}")
         raise Exception(f"Failed to generate embedding with all models: {models_to_try}")
+    
+    def _generate_cache_key(self, text: str, model: str) -> str:
+        """Generate stable cache key for embedding"""
+        try:
+            import hashlib
+            
+            # Create stable hash using blake2b
+            text_hash = hashlib.blake2b(text.encode('utf-8'), digest_size=16).hexdigest()
+            return f"{model}:{text_hash}"
+            
+        except Exception as e:
+            logger.error(f"❌ Error generating cache key: {e}")
+            # Fallback to simple hash
+            return f"{model}:{hash(text)}"
+    
+    def _cache_embedding(self, cache_key: str, embedding: List[float]):
+        """Cache embedding with LRU eviction"""
+        try:
+            # Check cache size and evict if necessary
+            if len(self.embedding_cache) >= self.max_cache_size:
+                # Remove oldest entry (simple FIFO)
+                oldest_key = next(iter(self.embedding_cache))
+                del self.embedding_cache[oldest_key]
+                logger.debug(f"🗑️ Evicted embedding from cache: {oldest_key[:20]}...")
+            
+            # Add to cache
+            self.embedding_cache[cache_key] = embedding
+            logger.debug(f"💾 Cached embedding: {cache_key[:20]}...")
+            
+        except Exception as e:
+            logger.error(f"❌ Error caching embedding: {e}")
+    
+    def get_cache_stats(self) -> Dict:
+        """Get embedding cache statistics"""
+        total_requests = self.cache_hits + self.cache_misses
+        hit_rate = (self.cache_hits / total_requests * 100) if total_requests > 0 else 0
+        
+        return {
+            'cache_hits': self.cache_hits,
+            'cache_misses': self.cache_misses,
+            'hit_rate': hit_rate,
+            'cache_size': len(self.embedding_cache),
+            'max_cache_size': self.max_cache_size
+        }
     
     async def store_semantic_chunks(self, chunks: List[Dict], company_name: str, qudemo_id: str, 
                             content_type: str = 'web_scraping') -> Dict:

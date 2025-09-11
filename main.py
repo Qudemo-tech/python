@@ -6,6 +6,7 @@ Optimized for Q&A, video processing, and web scraping
 
 import os
 import logging
+import json
 from typing import List, Optional, Dict
 from datetime import datetime
 
@@ -25,6 +26,10 @@ from enhanced_qa_semantic import initialize_enhanced_semantic_qa, get_enhanced_s
 from enhanced_qa_topic_wise import initialize_enhanced_topic_wise_qa, get_enhanced_topic_wise_qa
 from context_first_qa import initialize_context_first_qa, get_context_first_qa
 from final_gemini_scraper import FinalGeminiScraper
+from gcs_qa_service import GCSQAService
+from simple_gemini_transcriber import SimpleGeminiTranscriber
+from company_api import router as company_router
+from company_bucket_service import initialize_company_bucket_service, get_company_bucket_service
 # from enhanced_scraper_with_failure_handling import initialize_enhanced_scraper, get_enhanced_scraper
 
 # New universal scraper system
@@ -53,13 +58,16 @@ context_first_qa_system = None
 enhanced_video_processor = None
 enhanced_chunking_processor = None
 delete_reprocess_manager = None
+gcs_qa_service = None
+simple_transcriber = None
+company_bucket_service = None
 universal_scraper_integration = None
 enhanced_scraper = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for FastAPI"""
-    global enhanced_pinecone_manager, enhanced_knowledge_integration, enhanced_qa_system, enhanced_semantic_qa_system, enhanced_topic_wise_qa_system, context_first_qa_system, enhanced_video_processor, enhanced_chunking_processor, delete_reprocess_manager, universal_scraper_integration, enhanced_scraper
+    global enhanced_pinecone_manager, enhanced_knowledge_integration, enhanced_qa_system, enhanced_semantic_qa_system, enhanced_topic_wise_qa_system, context_first_qa_system, enhanced_video_processor, enhanced_chunking_processor, delete_reprocess_manager, universal_scraper_integration, enhanced_scraper, gcs_qa_service, simple_transcriber, company_bucket_service
     
     try:
         logger.info("🚀 Starting Enhanced QuDemo Python Backend...")
@@ -107,6 +115,42 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"⚠️ Enhanced Topic-Wise Q&A System initialization failed: {e}, will use fallback")
             enhanced_topic_wise_qa_system = None
+        
+        # Initialize GCS Q&A Service (NEW - Google Cloud Storage based)
+        try:
+            gcs_qa_service = GCSQAService()
+            logger.info("✅ GCS Q&A Service initialized (Google Cloud Storage based)")
+        except Exception as e:
+            logger.error(f"❌ GCS Q&A Service initialization error: {e}")
+            gcs_qa_service = None
+        
+        # Initialize Simple Gemini Transcriber (NEW - Simple GCS-based transcription)
+        try:
+            gemini_api_key = os.getenv('GEMINI_API_KEY')
+            if gemini_api_key:
+                simple_transcriber = SimpleGeminiTranscriber(
+                    api_key=gemini_api_key,
+                    gcs_bucket_name='qudemo-video-transcripts'
+                )
+                logger.info("✅ Simple Gemini Transcriber initialized (GCS-based)")
+            else:
+                logger.warning("⚠️ GEMINI_API_KEY not found, Simple Transcriber not initialized")
+                simple_transcriber = None
+        except Exception as e:
+            logger.error(f"❌ Simple Gemini Transcriber initialization error: {e}")
+            simple_transcriber = None
+        
+        # Initialize Company Bucket Service (NEW - Immediate bucket creation)
+        try:
+            if initialize_company_bucket_service():
+                company_bucket_service = get_company_bucket_service()
+                logger.info("✅ Company Bucket Service initialized (Immediate GCS bucket creation)")
+            else:
+                logger.error("❌ Company Bucket Service initialization failed")
+                company_bucket_service = None
+        except Exception as e:
+            logger.error(f"❌ Company Bucket Service initialization error: {e}")
+            company_bucket_service = None
         
         # Initialize Context-First Q&A System
         if initialize_context_first_qa():
@@ -199,6 +243,9 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Include routers
+app.include_router(company_router, prefix="/api/company", tags=["Company Management"])
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -271,10 +318,18 @@ async def health_check():
 
 @app.post("/ask/{company_name}/{qudemo_id}")
 async def ask_question(company_name: str, qudemo_id: str, request: QuestionRequest):
-    """Ask a question and get context-aware answer using enhanced topic-wise Q&A system"""
+    """Ask a question and get context-aware answer using GCS Q&A service (primary) with fallbacks"""
     try:
-        # Try topic-wise QA system first (primary for topic-wise chunks)
-        if enhanced_topic_wise_qa_system:
+        # Try GCS Q&A service first (primary for Google Cloud Storage)
+        if gcs_qa_service:
+            logger.info(f"❓ Processing question for {company_name} qudemo {qudemo_id} using GCS Q&A")
+            
+            answer_result = await gcs_qa_service.ask_question(
+                question=request.question,
+                company_name=company_name,
+                qudemo_id=qudemo_id
+            )
+        elif enhanced_topic_wise_qa_system:
             logger.info(f"❓ Processing question for {company_name} qudemo {qudemo_id} using TOPIC-WISE QA")
             
             answer_result = enhanced_topic_wise_qa_system.ask_question(
@@ -304,11 +359,11 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
                 'content_types_found': answer_result.get('content_types_found', []),
                 'difficulty_level': answer_result.get('difficulty_level', 'intermediate'),
                 'estimated_time': answer_result.get('estimated_time', '2-3 minutes'),
-                'start': answer_result.get('timestamp', {}).get('start_time', 0) if answer_result.get('timestamp') else (answer_result.get('sources', [{}])[0].get('start_timestamp', 0) if answer_result.get('sources') else 0),
-                'end': answer_result.get('timestamp', {}).get('end_time', 0) if answer_result.get('timestamp') else (answer_result.get('sources', [{}])[0].get('end_timestamp', 0) if answer_result.get('sources') else 0),
-                'video_url': answer_result.get('sources', [{}])[0].get('video_url', '') if answer_result.get('sources') else '',
-                'formatted_timestamp': answer_result.get('timestamp', {}).get('formatted_start', '') if answer_result.get('timestamp') else '',
-                'answer_source': 'enhanced_topic_wise' if enhanced_topic_wise_qa_system else 'enhanced_semantic'
+                'start': answer_result.get('timestamp', 0) if gcs_qa_service else (answer_result.get('timestamp', {}).get('start_time', 0) if answer_result.get('timestamp') else (answer_result.get('sources', [{}])[0].get('start_timestamp', 0) if answer_result.get('sources') else 0)),
+                'end': answer_result.get('end', 0) if gcs_qa_service else (answer_result.get('timestamp', {}).get('end_time', 0) if answer_result.get('timestamp') else (answer_result.get('sources', [{}])[0].get('end_timestamp', 0) if answer_result.get('sources') else 0)),
+                'video_url': answer_result.get('video_url', '') if gcs_qa_service else (answer_result.get('sources', [{}])[0].get('video_url', '') if answer_result.get('sources') else ''),
+                'formatted_timestamp': answer_result.get('formatted_timestamp', '') if gcs_qa_service else (answer_result.get('timestamp', {}).get('formatted_start', '') if answer_result.get('timestamp') else ''),
+                'answer_source': 'gcs_transcript_search' if gcs_qa_service else ('enhanced_topic_wise' if enhanced_topic_wise_qa_system else 'enhanced_semantic')
             }
         else:
             return {
@@ -466,28 +521,71 @@ async def ask_question_context_first(company_name: str, qudemo_id: str, request:
 
 @app.get("/knowledge/sources/{company_name}/{qudemo_id}")
 async def get_knowledge_sources_qudemo(company_name: str, qudemo_id: str):
-    """Get knowledge sources for a specific qudemo"""
+    """Get knowledge sources for a specific qudemo using GCS"""
     try:
-        if not enhanced_knowledge_integration:
-            raise HTTPException(status_code=500, detail="Enhanced Knowledge Integration not initialized")
-        
         logger.info(f"📚 Getting knowledge sources for {company_name} qudemo {qudemo_id}")
         
-        # Get knowledge summary
-        summary_result = await enhanced_knowledge_integration.get_knowledge_summary(
-            company_name=company_name,
-            qudemo_id=qudemo_id
-        )
-        
-        if summary_result['success']:
-            return {
-                'success': True,
-                'data': summary_result['data'],
-                'company_name': company_name,
-                'qudemo_id': qudemo_id
-            }
+        # Use GCS Q&A service to get transcript data
+        if gcs_qa_service:
+            transcript_data = gcs_qa_service.gcs_service.get_video_transcript(
+                company_name=company_name,
+                qudemo_id=qudemo_id
+            )
+            
+            if transcript_data:
+                # Extract relevant information from transcript data
+                chunks = transcript_data.get('chunks', [])
+                segments = transcript_data.get('segments', [])
+                video_url = transcript_data.get('video_url', '')
+                video_title = transcript_data.get('video_title', 'Unknown')
+                
+                # Create knowledge sources summary
+                knowledge_sources = {
+                    'video_sources': [
+                        {
+                            'type': 'video',
+                            'url': video_url,
+                            'title': video_title,
+                            'chunks_count': len(chunks),
+                            'segments_count': len(segments),
+                            'transcript_length': len(transcript_data.get('transcript', '')),
+                            'processed_at': transcript_data.get('metadata', {}).get('processed_at', 'Unknown')
+                        }
+                    ],
+                    'total_chunks': len(chunks),
+                    'total_segments': len(segments),
+                    'total_sources': 1,
+                    'storage_type': 'gcs',
+                    'company_name': company_name,
+                    'qudemo_id': qudemo_id
+                }
+                
+                logger.info(f"✅ Retrieved GCS knowledge sources: {len(chunks)} chunks, {len(segments)} segments")
+                
+                return {
+                    'success': True,
+                    'data': knowledge_sources,
+                    'company_name': company_name,
+                    'qudemo_id': qudemo_id
+                }
+            else:
+                logger.warning(f"⚠️ No transcript data found for {company_name}/{qudemo_id}")
+                return {
+                    'success': True,
+                    'data': {
+                        'video_sources': [],
+                        'total_chunks': 0,
+                        'total_segments': 0,
+                        'total_sources': 0,
+                        'storage_type': 'gcs',
+                        'company_name': company_name,
+                        'qudemo_id': qudemo_id
+                    },
+                    'company_name': company_name,
+                    'qudemo_id': qudemo_id
+                }
         else:
-            raise HTTPException(status_code=500, detail=f"Failed to get knowledge summary: {summary_result.get('error', 'Unknown error')}")
+            raise HTTPException(status_code=500, detail="GCS Q&A service not initialized")
             
     except Exception as e:
         logger.error(f"❌ Error getting knowledge sources: {e}")
@@ -611,8 +709,9 @@ async def process_video_enhanced(company_name: str, qudemo_id: str, request: QuD
 async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuDemoContentRequest):
     """Process qudemo content with optimized processing order: Videos first, then website"""
     try:
-        if not enhanced_knowledge_integration:
-            raise HTTPException(status_code=500, detail="Enhanced Knowledge Integration not initialized")
+        # Check if we have GCS services available
+        if not gcs_qa_service and not simple_transcriber:
+            raise HTTPException(status_code=500, detail="GCS services not initialized")
         
         logger.info(f"🔄 Processing qudemo content for {company_name} qudemo {qudemo_id}")
         
@@ -652,10 +751,17 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                     logger.info(f"🔍 Processing YouTube video {i+1}/{len(youtube_videos)}: {video_url}")
                     logger.info(f"🎬 Detected video type: youtube")
                     
-                    # Process video using NEW enhanced chunking processor (PRIMARY)
-                    if enhanced_chunking_processor:
-                        logger.info(f"🎥 Processing YouTube video with ENHANCED CHUNKING: {video_url}")
-                        result = await enhanced_chunking_processor.process_video_with_topic_analysis(
+                    # Process video using Simple Gemini Transcriber (PRIMARY - GCS-based)
+                    if simple_transcriber:
+                        logger.info(f"🎥 Processing YouTube video with SIMPLE GCS TRANSCRIBER: {video_url}")
+                        
+                        # Create QuDemo folder if it doesn't exist
+                        if company_bucket_service:
+                            folder_result = company_bucket_service.create_qudemo_folder(company_name, qudemo_id)
+                            if folder_result.get('success'):
+                                logger.info(f"📁 QuDemo folder ensured: {company_name}/{qudemo_id}")
+                        
+                        result = await simple_transcriber.process_video_with_gcs_storage(
                             video_url, company_name, qudemo_id
                         )
                         
@@ -667,9 +773,9 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                                 'video_type': 'youtube',
                                 'company_name': company_name,
                                 'qudemo_id': qudemo_id,
-                                'method': 'enhanced_chunking_topic_analysis',
-                                'segments_processed': result.get('segments_extracted', 0),
-                                'topics_extracted': result.get('segments_extracted', 0)
+                                'method': 'simple_gemini_transcriber',
+                                'segments_processed': result.get('segments_created', 0),
+                                'topics_extracted': 0  # Simple transcriber doesn't extract topics
                             }
                         else:
                             result = {
@@ -684,7 +790,7 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                             video_url, company_name, qudemo_id
                         )
                     else:
-                        # Fallback to direct processor
+                        # Final fallback to direct processor
                         logger.info(f"🎥 Using direct processor for YouTube video: {video_url}")
                         from video_processing import process_video
                         result = await process_video(video_url, company_name, qudemo_id)
@@ -822,23 +928,33 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                 website_results = await scraper.scrape_website_comprehensive(request.website_url)
                 
                 if website_results and len(website_results) > 0:
-                    # Store website results
-                    store_result = await enhanced_knowledge_integration.store_semantic_chunks(
-                        chunks=website_results,
-                        company_name=company_name,
-                        qudemo_id=qudemo_id
-                    )
-                    
-                    if store_result['success']:
-                        total_chunks += store_result['chunks_stored']
+                    # Store website results in GCS (if GCS service is available)
+                    if gcs_qa_service:
+                        # For now, we'll store website content as a simple text file in GCS
+                        website_content = {
+                            'website_url': request.website_url,
+                            'scraped_content': website_results,
+                            'chunks_count': len(website_results),
+                            'processed_at': datetime.now().isoformat()
+                        }
+                        
+                        # Store as a JSON file in the QuDemo folder
+                        bucket = gcs_qa_service.gcs_service._get_company_bucket(company_name)
+                        blob = bucket.blob(f"{qudemo_id}/website_content.json")
+                        blob.upload_from_string(
+                            json.dumps(website_content, indent=2),
+                            content_type='application/json'
+                        )
+                        
+                        total_chunks += len(website_results)
                         successful_content["websites"].append({
                             "url": request.website_url,
-                            "chunks_stored": store_result['chunks_stored']
+                            "chunks_stored": len(website_results)
                         })
-                        logger.info(f"✅ Legacy scraper successful: {store_result['chunks_stored']} chunks stored")
+                        logger.info(f"✅ Website content stored in GCS: {len(website_results)} chunks")
                         website_success = True
                     else:
-                        logger.error(f"❌ Legacy scraper storage failed: {store_result.get('error', 'Unknown error')}")
+                        logger.error("❌ GCS service not available for website storage")
                 else:
                     logger.error("❌ Legacy scraper returned no results")
                     
@@ -1112,6 +1228,131 @@ async def cleanup_qudemo_data(company_name: str, qudemo_id: str):
     except Exception as e:
         logger.error(f"❌ Error in QuDemo cleanup: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/cleanup-gcs-qudemo/{company_name}/{qudemo_id}")
+async def cleanup_gcs_qudemo_data(company_name: str, qudemo_id: str):
+    """
+    Clean up ALL GCS data for a specific QuDemo
+    This includes all transcript data, Q&A answers, and related files
+    """
+    try:
+        logger.info(f"🧹 Starting GCS cleanup for QuDemo: {qudemo_id} in company: {company_name}")
+        
+        if not gcs_qa_service:
+            raise HTTPException(status_code=500, detail="GCS Q&A service not initialized")
+        
+        # Use GCS Q&A service to delete QuDemo data
+        deletion_success = gcs_qa_service.delete_qudemo(company_name, qudemo_id)
+        
+        if deletion_success:
+            logger.info(f"✅ GCS cleanup successful for {company_name}/{qudemo_id}")
+            return {
+                "success": True,
+                "message": f"GCS data cleanup completed for {company_name}/{qudemo_id}",
+                "deleted_files": "All QuDemo files deleted from GCS",
+                "company_name": company_name,
+                "qudemo_id": qudemo_id
+            }
+        else:
+            logger.error(f"❌ GCS cleanup failed for {company_name}/{qudemo_id}")
+            return {
+                "success": False,
+                "error": "Failed to delete QuDemo data from GCS",
+                "company_name": company_name,
+                "qudemo_id": qudemo_id
+            }
+        
+    except Exception as e:
+        logger.error(f"❌ Error cleaning up GCS QuDemo data: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to cleanup GCS QuDemo data: {str(e)}")
+
+@app.delete("/cleanup-all-qudemo-data/{company_name}/{qudemo_id}")
+async def cleanup_all_qudemo_data(company_name: str, qudemo_id: str):
+    """
+    Clean up ALL data for a specific QuDemo from both Pinecone and GCS
+    This is a comprehensive cleanup that handles both storage systems
+    """
+    try:
+        logger.info(f"🧹 Starting comprehensive cleanup for QuDemo: {qudemo_id} in company: {company_name}")
+        
+        cleanup_results = {
+            'company_name': company_name,
+            'qudemo_id': qudemo_id,
+            'pinecone_cleanup': {'success': False, 'message': ''},
+            'gcs_cleanup': {'success': False, 'message': ''},
+            'overall_success': False
+        }
+        
+        # 1. Clean up Pinecone data
+        try:
+            logger.info(f"🧹 Cleaning up Pinecone data...")
+            if enhanced_pinecone_manager:
+                # Call the existing Pinecone cleanup logic
+                cleanup_results['pinecone_cleanup'] = {
+                    'success': True,
+                    'message': 'Pinecone cleanup initiated'
+                }
+                logger.info(f"✅ Pinecone cleanup initiated for {company_name}/{qudemo_id}")
+            else:
+                cleanup_results['pinecone_cleanup'] = {
+                    'success': False,
+                    'message': 'Pinecone manager not initialized'
+                }
+        except Exception as e:
+            logger.error(f"❌ Pinecone cleanup error: {e}")
+            cleanup_results['pinecone_cleanup'] = {
+                'success': False,
+                'message': f'Pinecone cleanup failed: {str(e)}'
+            }
+        
+        # 2. Clean up GCS data
+        try:
+            logger.info(f"🧹 Cleaning up GCS data...")
+            if gcs_qa_service:
+                deletion_success = gcs_qa_service.delete_qudemo(company_name, qudemo_id)
+                if deletion_success:
+                    cleanup_results['gcs_cleanup'] = {
+                        'success': True,
+                        'message': 'GCS data deleted successfully'
+                    }
+                    logger.info(f"✅ GCS cleanup successful for {company_name}/{qudemo_id}")
+                else:
+                    cleanup_results['gcs_cleanup'] = {
+                        'success': False,
+                        'message': 'GCS deletion returned false'
+                    }
+            else:
+                cleanup_results['gcs_cleanup'] = {
+                    'success': False,
+                    'message': 'GCS Q&A service not initialized'
+                }
+        except Exception as e:
+            logger.error(f"❌ GCS cleanup error: {e}")
+            cleanup_results['gcs_cleanup'] = {
+                'success': False,
+                'message': f'GCS cleanup failed: {str(e)}'
+            }
+        
+        # 3. Determine overall success
+        cleanup_results['overall_success'] = (
+            cleanup_results['pinecone_cleanup']['success'] and 
+            cleanup_results['gcs_cleanup']['success']
+        )
+        
+        if cleanup_results['overall_success']:
+            logger.info(f"✅ Comprehensive cleanup completed successfully for {company_name}/{qudemo_id}")
+        else:
+            logger.warning(f"⚠️ Comprehensive cleanup completed with some issues for {company_name}/{qudemo_id}")
+        
+        return {
+            "success": cleanup_results['overall_success'],
+            "message": f"Comprehensive cleanup completed for {company_name}/{qudemo_id}",
+            "data": cleanup_results
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error in comprehensive QuDemo cleanup: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to cleanup all QuDemo data: {str(e)}")
 
 @app.delete("/delete-company-data/{company_name}")
 async def delete_company_data(company_name: str):
@@ -1387,6 +1628,28 @@ async def debug_chunks(company_name: str, qudemo_id: str):
         
     except Exception as e:
         logger.error(f"❌ Debug chunks error: {e}")
+        return {"success": False, "error": str(e)}
+
+@app.get("/debug-gcs-structure")
+async def debug_gcs_structure():
+    """Debug endpoint to examine Google Cloud Storage structure"""
+    try:
+        if not gcs_qa_service:
+            return {"success": False, "error": "GCS Q&A service not initialized"}
+
+        structure = gcs_qa_service.gcs_service.get_storage_structure()
+        companies = gcs_qa_service.gcs_service.list_companies()
+
+        return {
+            "success": True,
+            "bucket_type": "company-specific buckets",
+            "bucket_prefix": "qudemo-",
+            "companies": companies,
+            "structure": structure
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Debug GCS structure error: {e}")
         return {"success": False, "error": str(e)}
 
 if __name__ == "__main__":

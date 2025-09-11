@@ -57,8 +57,8 @@ def initialize_processors():
         try:
             gemini_processor = GeminiTranscriptionProcessor(
                 gemini_api_key=os.getenv('GEMINI_API_KEY'),
-                pinecone_api_key=os.getenv('PINECONE_API_KEY'),
-                openai_api_key=os.getenv('OPENAI_API_KEY')
+                openai_api_key=os.getenv('OPENAI_API_KEY'),
+                gcs_bucket_name='qudemo-video-transcripts'
             )
             logger.info("Gemini processor initialized")
         except Exception as e:

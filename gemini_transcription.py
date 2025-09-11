@@ -17,6 +17,7 @@ from typing import Dict, Optional, List
 from urllib.parse import urlparse
 import google.generativeai as genai
 import openai
+from google_cloud_storage_service import GoogleCloudStorageService
 # YouTube Transcript API removed for production safety
 # YouTube actively blocks automated requests and can blacklist server IPs
 
@@ -188,17 +189,16 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class GeminiTranscriptionProcessor:
-    def __init__(self, gemini_api_key: str, pinecone_api_key: str, openai_api_key: str):
+    def __init__(self, gemini_api_key: str, openai_api_key: str, gcs_bucket_name: str = None):
         """
         Initialize Gemini Transcription Processor
         
         Args:
             gemini_api_key: Google Gemini API key
-            pinecone_api_key: Pinecone API key
             openai_api_key: OpenAI API key for embeddings
+            gcs_bucket_name: Google Cloud Storage bucket name
         """
         self.gemini_api_key = gemini_api_key
-        self.pinecone_api_key = pinecone_api_key
         self.openai_api_key = openai_api_key
         
         # Configure Gemini
@@ -209,9 +209,11 @@ class GeminiTranscriptionProcessor:
         # Configure OpenAI for embeddings
         openai.api_key = openai_api_key
         
-        # Initialize Pinecone
-        self.pc = Pinecone(api_key=pinecone_api_key)
-        self.default_index_name = os.getenv("PINECONE_INDEX", "qudemo-video-index")
+        # Initialize Google Cloud Storage
+        self.gcs_service = GoogleCloudStorageService(
+            bucket_name=gcs_bucket_name,
+            service_account_path='service-account-key.json'
+        )
         
         # Overload tracking
         self.gemini_failures = 0
@@ -1459,31 +1461,57 @@ class GeminiTranscriptionProcessor:
             logger.error(f"❌ Embedding creation failed: {e}")
             return []
     
-    def store_in_pinecone(self, company_name: str, video_url: str, transcription_data: Dict, 
-                         chunks: List[Dict], embeddings: List[List[float]], qudemo_id: str = None) -> bool:
+    def store_in_gcs(self, company_name: str, video_url: str, transcription_data: Dict, 
+                    chunks: List[Dict], qudemo_id: str = None) -> bool:
         """
-        Store transcription chunks and embeddings in Pinecone using enhanced manager
+        Store transcription data in Google Cloud Storage
         
         Args:
             company_name: Name of the company
             video_url: Original video URL
             transcription_data: Transcription metadata
             chunks: Text chunks
-            embeddings: Embedding vectors
             qudemo_id: QuDemo ID for namespace isolation
             
         Returns:
             True if successful, False otherwise
         """
         try:
-            logger.info(f"🗄️ Storing in Pinecone for company: {company_name} qudemo {qudemo_id}")
+            logger.info(f"🗄️ Storing in Google Cloud Storage for company: {company_name} qudemo {qudemo_id}")
             
-            # Use direct Pinecone storage for simplicity
-            logger.info("🗄️ Using direct Pinecone storage for simplicity")
-            return self._store_directly_in_pinecone(company_name, video_url, transcription_data, chunks, embeddings, qudemo_id)
+            # Prepare transcript data for storage
+            transcript_data = {
+                'video_url': video_url,
+                'video_title': transcription_data.get('title', 'Unknown'),
+                'transcript': transcription_data.get('transcription', ''),
+                'timestamps': transcription_data.get('timestamps', []),
+                'segments': transcription_data.get('segments', []),
+                'topics': transcription_data.get('topics', []),
+                'chunks': chunks,
+                'metadata': {
+                    'word_count': transcription_data.get('word_count', 0),
+                    'language': transcription_data.get('language', 'en'),
+                    'method': transcription_data.get('method', 'gemini_transcription'),
+                    'processed_at': datetime.now().isoformat()
+                }
+            }
+            
+            # Store in Google Cloud Storage
+            success = self.gcs_service.store_video_transcript(
+                company_name=company_name,
+                qudemo_id=qudemo_id,
+                transcript_data=transcript_data
+            )
+            
+            if success:
+                logger.info(f"✅ Successfully stored transcript in Google Cloud Storage")
+                return True
+            else:
+                logger.error(f"❌ Failed to store transcript in Google Cloud Storage")
+                return False
                 
         except Exception as e:
-            logger.error(f"❌ Pinecone storage failed: {e}")
+            logger.error(f"❌ Google Cloud Storage failed: {e}")
             return False
 
     def _store_directly_in_pinecone(self, company_name: str, video_url: str, transcription_data: Dict, 
@@ -1729,16 +1757,16 @@ class GeminiTranscriptionProcessor:
             # Log timestamp summary
             self._log_chunk_summary(chunks, label=f"{company_name}")
             
-            # Store in Pinecone
-            storage_success = self.store_in_pinecone(
-                company_name, video_url, transcription_data, chunks, embeddings, qudemo_id
+            # Store in Google Cloud Storage
+            storage_success = self.store_in_gcs(
+                company_name, video_url, transcription_data, chunks, qudemo_id
             )
             
             if not storage_success:
-                logger.error("❌ Failed to store in Pinecone")
+                logger.error("❌ Failed to store in Google Cloud Storage")
                 return {
                     'success': False,
-                    'error': 'Failed to store in Pinecone',
+                    'error': 'Failed to store in Google Cloud Storage',
                     'video_url': video_url,
                     'company_name': company_name,
                     'qudemo_id': qudemo_id

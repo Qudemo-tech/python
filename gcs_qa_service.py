@@ -49,10 +49,12 @@ class GCSQAService:
                 return {
                     'success': False,
                     'error': 'No relevant content found for this question',
-                    'answer': 'I could not find relevant information to answer your question.',
+                    'answer': 'I could not find relevant information to answer your question. The available video content does not contain information about this topic.',
                     'timestamp': 0,
                     'formatted_timestamp': '00:00',
-                    'confidence': 0.0
+                    'confidence': 0.0,
+                    'video_url': '',
+                    'video_title': ''
                 }
             
             # Store the Q&A answer
@@ -63,14 +65,30 @@ class GCSQAService:
                 answer_data=answer_data
             )
             
-            # Get video URL from transcript data
-            video_url = ''
-            try:
+            # Get video URL and title from answer_data (which comes from direct transcript search)
+            # Handle multiple videos by getting the correct one from the answer data
+            video_url = answer_data.get('video_url', '')
+            video_title = answer_data.get('video_title', '')
+            
+            # If no video URL found, try to get it from the transcript data
+            if not video_url:
                 transcript_data = self.gcs_service.get_video_transcript(company_name, qudemo_id)
-                if transcript_data:
+                if transcript_data and 'videos' in transcript_data:
+                    # Multi-video format - find the video that matches the timestamp
+                    start_timestamp = answer_data.get('timestamp', 0)
+                    for video in transcript_data['videos']:
+                        video_timestamps = video.get('timestamps', [])
+                        for segment in video_timestamps:
+                            if abs(segment.get('start_timestamp', 0) - start_timestamp) < 5:  # Within 5 seconds
+                                video_url = video.get('video_url', '')
+                                video_title = video.get('video_title', '')
+                                break
+                        if video_url:
+                            break
+                elif transcript_data:
+                    # Single video format
                     video_url = transcript_data.get('video_url', '')
-            except Exception as e:
-                logger.warning(f"⚠️ Could not get video URL: {e}")
+                    video_title = transcript_data.get('video_title', '')
             
             # Calculate end timestamp from formatted timestamp or add duration
             start_timestamp = answer_data.get('timestamp', 0)
@@ -103,6 +121,7 @@ class GCSQAService:
                 'end': end_timestamp,
                 'formatted_timestamp': answer_data.get('formatted_timestamp', '00:00'),
                 'video_url': video_url,
+                'video_title': video_title,
                 'confidence': answer_data.get('confidence', 0.0),
                 'sources': answer_data.get('sources', []),
                 'answer_source': 'gcs_transcript_search'

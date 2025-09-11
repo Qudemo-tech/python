@@ -22,7 +22,6 @@ youtube-transcript-api==0.6.1
 
 # Vector databases
 supabase>=1.0.0
-pinecone>=3.0.0
 
 # AI/ML
 openai>=1.0.0

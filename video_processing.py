@@ -10,7 +10,6 @@ from datetime import datetime
 from typing import Dict, Optional, List
 from fastapi import HTTPException, Request
 from pydantic import BaseModel
-from pinecone import Pinecone, ServerlessSpec
 
 # Import processors
 from loom_processor import LoomVideoProcessor
@@ -45,9 +44,7 @@ def initialize_processors():
         if not gemini_api_key:
             logger.error("❌ GEMINI_API_KEY not found")
             return False
-        if not pinecone_api_key:
-            logger.error("❌ PINECONE_API_KEY not found")
-            return False
+        # Note: Pinecone functionality has been removed and replaced with GCS-based storage
         if not openai_api_key:
             logger.error("❌ OPENAI_API_KEY not found")
             return False
@@ -70,7 +67,7 @@ def initialize_processors():
         try:
             loom_processor = LoomVideoProcessor(
                 openai_api_key=os.getenv('OPENAI_API_KEY'),
-                pinecone_api_key=os.getenv('PINECONE_API_KEY')
+                pinecone_api_key=""  # Pinecone functionality removed
             )
             logger.info("Loom processor initialized")
         except Exception as e:
@@ -418,9 +415,9 @@ def _create_semantic_chunks_from_transcription(transcription: str, segments: lis
             'processed_at': datetime.now().isoformat()
         }
         
-        # Store chunks in Pinecone
+        # Note: Pinecone storage functionality has been removed
         if chunks:
-            logger.info(f"🔧 Storing {len(chunks)} unified chunks in Pinecone")
+            logger.info(f"⚠️ Pinecone storage functionality removed, using GCS-based storage")
             
             # Store chunks using knowledge integrator
             try:
@@ -432,7 +429,7 @@ def _create_semantic_chunks_from_transcription(transcription: str, segments: lis
                 )
                 
                 if result.get('success'):
-                    logger.info(f"✅ Successfully stored {len(chunks)} chunks in Pinecone")
+                    logger.info(f"⚠️ Pinecone storage functionality removed, using GCS-based storage")
                     return {
                         'success': True,
                         'message': f'Successfully processed video with {len(chunks)} chunks',

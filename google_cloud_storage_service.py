@@ -82,19 +82,32 @@ class GoogleCloudStorageService:
             # Create file path: qudemo_id/transcript.json (within company bucket)
             file_path = f"{qudemo_id}/transcript.json"
             
-            # Prepare transcript data with metadata
-            transcript_with_metadata = {
+            # Get existing transcript data or create new
+            existing_data = self.get_video_transcript(company_name, qudemo_id) or {
                 "company_name": company_name,
                 "qudemo_id": qudemo_id,
                 "processed_at": datetime.now().isoformat(),
+                "videos": []
+            }
+            
+            # Add new video transcript
+            video_transcript = {
                 "video_url": transcript_data.get('video_url', ''),
                 "video_title": transcript_data.get('video_title', ''),
                 "transcript": transcript_data.get('transcript', ''),
                 "timestamps": transcript_data.get('timestamps', []),
                 "segments": transcript_data.get('segments', []),
                 "topics": transcript_data.get('topics', []),
-                "chunks": transcript_data.get('chunks', [])
+                "chunks": transcript_data.get('chunks', []),
+                "processed_at": datetime.now().isoformat()
             }
+            
+            # Add to videos array
+            existing_data['videos'].append(video_transcript)
+            existing_data['updated_at'] = datetime.now().isoformat()
+            
+            # Use existing_data as transcript_with_metadata
+            transcript_with_metadata = existing_data
             
             # Upload to Google Cloud Storage
             blob = bucket.blob(file_path)
@@ -300,9 +313,7 @@ class GoogleCloudStorageService:
             result = self.direct_qa.search_transcript_directly(transcript_data, question)
             
             if result:
-                # Add video URL and other metadata
-                result['video_url'] = transcript_data.get('video_url', '')
-                result['video_title'] = transcript_data.get('video_title', '')
+                # Add metadata (video_url and video_title are already set by direct_qa)
                 result['processed_at'] = transcript_data.get('processed_at', '')
             
             return result

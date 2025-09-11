@@ -11,7 +11,6 @@ import json
 from typing import List, Dict, Optional, Tuple
 from collections import OrderedDict
 import openai
-from pinecone import Pinecone
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -19,30 +18,21 @@ class EnhancedSemanticQA:
     """Enhanced Q&A system with semantic understanding and context-aware relevance"""
     
     # Enhanced thresholds for better quality control (relaxed for better coverage)
-    KNOWLEDGE_MIN_RELEVANCE = 0.3   # Lowered threshold for knowledge
-    VIDEO_MIN_RELEVANCE = 0.2       # Much lower threshold for videos
-    SEMANTIC_SIMILARITY_THRESHOLD = 0.1  # Very low threshold to allow more content
-    CONTEXT_UNDERSTANDING_THRESHOLD = 0.3  # Lowered context understanding threshold
+    KNOWLEDGE_MIN_RELEVANCE = 0.15   # Further lowered threshold for knowledge
+    VIDEO_MIN_RELEVANCE = 0.1        # Much lower threshold for videos
+    SEMANTIC_SIMILARITY_THRESHOLD = 0.05  # Very low threshold to allow more content
+    CONTEXT_UNDERSTANDING_THRESHOLD = 0.2  # Lowered context understanding threshold
     
     # Retrieval parameters
-    TOP_K_RECALL = 25
-    TOP_K_RERANK = 10
-    SCORE_THRESHOLD = 0.05  # Much lower initial threshold
+    TOP_K_RECALL = 30  # Increased from 25
+    TOP_K_RERANK = 15  # Increased from 10
+    SCORE_THRESHOLD = 0.02  # Much lower initial threshold
     
     def __init__(self):
         """Initialize enhanced semantic QA system"""
-        # Pinecone indexes
-        self.indexes = {
-            'video': 'qudemo-video-index',
-            'knowledge': 'qudemo-knowledge-index',
-            'legacy': 'qudemo-index'
-        }
-        
+        # Note: Pinecone functionality has been removed and replaced with GCS-based storage
         # OpenAI client
         self.openai_client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-        
-        # Pinecone client
-        self.pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
         
         # Enhanced embedding cache
         self._embedding_cache = OrderedDict()
@@ -214,36 +204,12 @@ class EnhancedSemanticQA:
         return " ".join(enhanced_parts)
     
     def _search_with_intent(self, index_type: str, namespace: str, question_embedding: List[float], enhanced_embedding: List[float], question_analysis: Dict) -> List[Dict]:
-        """Search with intent-aware parameters"""
+        """Search with intent-aware parameters - Pinecone functionality removed"""
         try:
-            # Get index
-            if index_type in self.indexes:
-                index = self.pc.Index(self.indexes[index_type])
-            else:
-                return []
-            
-            # Set filters based on index type and intent
-            filter_query = self._create_intent_filter(index_type, question_analysis)
-            
-            # Use enhanced embedding for better semantic matching
-            results = index.query(
-                vector=enhanced_embedding,
-                top_k=self.TOP_K_RECALL,
-                include_metadata=True,
-                namespace=namespace,
-                filter=filter_query,
-                score_threshold=self.SCORE_THRESHOLD
-            )
-            
-            # Convert to candidate format
-            candidates = []
-            for match in results.matches:
-                candidate = self._build_enhanced_candidate(match, index_type, question_analysis)
-                if candidate:
-                    candidates.append(candidate)
-            
-            print(f"✅ {index_type}: {len(candidates)} candidates found")
-            return candidates
+            # Note: Pinecone search functionality has been removed
+            # This method now returns empty results as the system uses GCS-based storage
+            print(f"⚠️ {index_type} search: Pinecone functionality removed, using GCS-based storage")
+            return []
             
         except Exception as e:
             print(f"❌ {index_type} search error: {e}")
@@ -330,7 +296,7 @@ class EnhancedSemanticQA:
             
             # Calculate enhanced scores for each candidate
             for candidate in all_candidates:
-                # Use existing Pinecone score as semantic similarity (already computed)
+                # Use existing score as semantic similarity (already computed)
                 semantic_score = candidate.get('score', 0)
                 
                 # Intent alignment score
@@ -859,8 +825,8 @@ class EnhancedSemanticQA:
             return False
         
         # Intent alignment threshold (very low to allow more candidates)
-        if candidate['intent_score'] < 0.0:
-            print(f"❌ Video failed: intent score {candidate['intent_score']:.3f} < 0.0")
+        if candidate['intent_score'] < -0.1:  # Allow negative scores
+            print(f"❌ Video failed: intent score {candidate['intent_score']:.3f} < -0.1")
             return False
         
         # Video-specific requirements (relaxed - we have timestamps)
@@ -912,9 +878,9 @@ class EnhancedSemanticQA:
             print(f"❌ Knowledge failed: semantic score {candidate['semantic_score']:.3f} < {self.SEMANTIC_SIMILARITY_THRESHOLD}")
             return False
         
-        # Intent alignment threshold
-        if candidate['intent_score'] < 0.5:
-            print(f"❌ Knowledge failed: intent score {candidate['intent_score']:.3f} < 0.5")
+        # Intent alignment threshold (relaxed)
+        if candidate['intent_score'] < 0.2:  # Lowered from 0.5
+            print(f"❌ Knowledge failed: intent score {candidate['intent_score']:.3f} < 0.2")
             return False
         
         # Content quality requirements
@@ -991,10 +957,14 @@ class EnhancedSemanticQA:
             # Add video fields only if appropriate
             if answer_type == 'video' and decision.get('candidate'):
                 video_candidate = decision['candidate']
+                
+                # Handle multiple video URLs - prioritize the correct one
+                video_url = self._get_correct_video_url(video_candidate)
+                
                 response.update({
                     'start': video_candidate.get('start', 0),
                     'end': video_candidate.get('end', 0),
-                    'video_url': video_candidate.get('video_url', '') or video_candidate.get('url', ''),
+                    'video_url': video_url,
                     'timestamp': self._format_timestamp(video_candidate.get('start', 0), video_candidate.get('end', 0)),
                     'formatted_timestamp': self._format_timestamp(video_candidate.get('start', 0), video_candidate.get('end', 0))
                 })
@@ -1551,6 +1521,30 @@ Answer:"""
         """Detect if question is video-specific"""
         video_keywords = ['video', 'show me', 'watch', 'play', 'timestamp', 'demo', 'recording']
         return any(keyword in question.lower() for keyword in video_keywords)
+    
+    def _get_correct_video_url(self, video_candidate: Dict) -> str:
+        """Get the correct video URL for the candidate, handling multiple videos"""
+        try:
+            # Priority order for video URL sources
+            video_url_sources = [
+                video_candidate.get('video_url', ''),
+                video_candidate.get('url', ''),
+                video_candidate.get('metadata', {}).get('video_url', ''),
+                video_candidate.get('metadata', {}).get('url', ''),
+                video_candidate.get('metadata', {}).get('source_url', '')
+            ]
+            
+            # Return the first non-empty URL
+            for url in video_url_sources:
+                if url and url.strip():
+                    return url.strip()
+            
+            # Fallback to empty string
+            return ''
+            
+        except Exception as e:
+            print(f"❌ Error getting correct video URL: {e}")
+            return ''
     
     def _filter_similar_chunks(self, chunks: List[Dict], question: str) -> List[Dict]:
         """Filter out similar chunks to avoid repetitive content"""

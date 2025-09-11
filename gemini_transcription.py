@@ -165,7 +165,7 @@ def _split_text_evenly(text: str, target_items: int = 15) -> list[str]:
     return out
 
 def _validate_timestamped_chunks(chunks: list[dict], video_duration_sec: float) -> None:
-    """Safety gates to ensure bad data never hits Pinecone."""
+    """Safety gates to ensure bad data never hits storage."""
     vd = float(video_duration_sec)
     prev_end = 0.0
     for i, c in enumerate(chunks):
@@ -178,7 +178,6 @@ def _validate_timestamped_chunks(chunks: list[dict], video_duration_sec: float) 
         assert s >= prev_end - 1e-3 or c["local_index"] == 0, f"Non-monotonic timestamps near {i}"
         prev_end = max(prev_end, e)
 
-from pinecone import Pinecone, ServerlessSpec
 import numpy as np
 import openai
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -1086,7 +1085,7 @@ class GeminiTranscriptionProcessor:
                     'company_name': company_name
                 }
             
-            # Store in Pinecone
+            # Note: Pinecone storage functionality has been removed
             transcription_data = {
                 'title': f'Long YouTube Video {video_id}',
                 'transcription': fallback_content,
@@ -1096,15 +1095,15 @@ class GeminiTranscriptionProcessor:
                 'method': 'fallback_long_video'
             }
             
-            storage_success = await self.store_in_pinecone(
-                company_name, video_url, transcription_data, chunks, embeddings, qudemo_id
-            )
+            # Note: Pinecone storage functionality has been removed
+            logger.warning("⚠️ Pinecone storage functionality removed, using GCS-based storage")
+            storage_success = False
             
             if not storage_success:
-                logger.error("❌ Failed to store fallback content in Pinecone")
+                logger.warning("⚠️ Pinecone storage functionality removed, using GCS-based storage")
                 return {
                     'success': False,
-                    'error': 'Failed to store fallback content in Pinecone',
+                    'error': 'Pinecone storage functionality removed, using GCS-based storage',
                     'video_url': video_url,
                     'company_name': company_name
                 }
@@ -1517,7 +1516,7 @@ class GeminiTranscriptionProcessor:
     def _store_directly_in_pinecone(self, company_name: str, video_url: str, transcription_data: Dict, 
                                         chunks: List[Dict], embeddings: List[List[float]], qudemo_id: str = None) -> bool:
         """
-        Fallback direct Pinecone storage when enhanced manager is not available
+        Fallback direct Pinecone storage - Pinecone functionality removed
         
         Args:
             company_name: Name of the company
@@ -1528,82 +1527,12 @@ class GeminiTranscriptionProcessor:
             qudemo_id: QuDemo ID for namespace isolation
             
         Returns:
-            True if successful, False otherwise
+            False (Pinecone functionality removed)
         """
         try:
-            logger.info(f"🗄️ Using direct Pinecone storage for company: {company_name} qudemo {qudemo_id}")
-            
-            # Create or get single shared index
-            index_name = self.default_index_name
-            
-            # Check if index exists
-            existing_indexes = [index.name for index in self.pc.list_indexes()]
-            
-            if index_name not in existing_indexes:
-                try:
-                    logger.info(f"📊 Creating new Pinecone index: {index_name}")
-                    self.pc.create_index(
-                        name=index_name,
-                        dimension=3072,  # OpenAI text-embedding-3-large dimension
-                        metric='cosine',
-                        spec=ServerlessSpec(
-                            cloud='aws',
-                            region='us-east-1'
-                        )
-                    )
-                    # Wait for index to be ready
-                    time.sleep(10)
-                except Exception as ce:
-                    msg = str(ce)
-                    if 'max serverless indexes' in msg.lower() or 'forbidden' in msg.lower():
-                        if existing_indexes:
-                            fallback = existing_indexes[0]
-                            logger.info(f"ℹ️ Using existing index: {fallback}")
-                            index_name = fallback
-                        else:
-                            logger.error("❌ No existing Pinecone indexes available to fallback to.")
-                            raise
-                    else:
-                        raise
-            
-            # Get index and namespace per company
-            index = self.pc.Index(index_name)
-            # Use the same namespace format as the Q&A system: company-qudemo_id
-            namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
-            
-            # Prepare vectors for upsert
-            vectors = []
-            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-                vector_id = f"{company_name}_{video_url}_{i}"
-                
-                vector_data = {
-                    'id': vector_id,
-                    'values': embedding,
-                    'metadata': {
-                        'company': company_name,
-                        'video_url': video_url,
-                        'chunk_index': i,
-                        'text': chunk['text'] if isinstance(chunk, dict) else str(chunk),
-                        'start': float(chunk.get('start', 0.0)) if isinstance(chunk, dict) else 0.0,
-                        'end': float(chunk.get('end', 0.0)) if isinstance(chunk, dict) else 0.0,
-                        'title': transcription_data.get('title', 'Unknown'),
-                        'duration': transcription_data.get('duration', 'Unknown'),
-                        'language': transcription_data.get('language', 'Unknown'),
-                        'word_count': transcription_data.get('word_count', 'Unknown'),
-                        'source_type': 'video'
-                    }
-                }
-                vectors.append(vector_data)
-            
-            # Upsert vectors in batches
-            batch_size = 100
-            for i in range(0, len(vectors), batch_size):
-                batch = vectors[i:i + batch_size]
-                index.upsert(vectors=batch, namespace=namespace)
-                logger.info(f"✅ Upserted batch {i//batch_size + 1}")
-            
-            logger.info(f"✅ Successfully stored {len(vectors)} vectors in Pinecone")
-            return True
+            # Note: Pinecone storage functionality has been removed
+            logger.warning(f"⚠️ Pinecone storage functionality removed, using GCS-based storage")
+            return False
             
         except Exception as e:
             logger.error(f"❌ Direct Pinecone storage failed: {e}")
@@ -1809,7 +1738,7 @@ class GeminiTranscriptionProcessor:
 
     def search_similar_chunks(self, company_name: str, query: str, top_k: int = 5) -> List[Dict]:
         """
-        Search for similar chunks in Pinecone
+        Search for similar chunks - Pinecone functionality removed
         
         Args:
             company_name: Company name
@@ -1817,38 +1746,12 @@ class GeminiTranscriptionProcessor:
             top_k: Number of results to return
             
         Returns:
-            List of similar chunks with metadata
+            Empty list (Pinecone functionality removed)
         """
         try:
-            import pinecone
-            from pinecone import Pinecone
-            import os
-            from dotenv import load_dotenv
-            
-            load_dotenv()
-            pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
-            index = pc.Index('qudemo-video-index')
-            
-            # Get query embedding
-            query_embedding = self.create_embeddings([query])[0]
-            
-            # Search in Pinecone
-            results = index.query(
-                vector=query_embedding,
-                top_k=top_k,
-                include_metadata=True,
-                namespace=f"{company_name.lower().replace(' ', '-')}-*"
-            )
-            
-            chunks = []
-            for match in results.matches:
-                chunks.append({
-                    'text': match.metadata.get('text', ''),
-                    'score': match.score,
-                    'metadata': match.metadata
-                })
-            
-            return chunks
+            # Note: Pinecone search functionality has been removed
+            logger.warning(f"⚠️ Pinecone search functionality removed, using GCS-based storage")
+            return []
             
         except Exception as e:
             logger.error(f"❌ Search failed: {e}")

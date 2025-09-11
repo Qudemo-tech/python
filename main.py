@@ -19,12 +19,8 @@ import tempfile
 import shutil
 
 # Enhanced components
-from enhanced_pinecone_manager import initialize_enhanced_pinecone_manager, get_enhanced_pinecone_manager
-from enhanced_knowledge_integration import initialize_enhanced_knowledge_integration, get_enhanced_knowledge_integration
-from enhanced_qa_simple import initialize_simple_enhanced_qa, get_simple_enhanced_qa
 from enhanced_qa_semantic import initialize_enhanced_semantic_qa, get_enhanced_semantic_qa
-from enhanced_qa_topic_wise import initialize_enhanced_topic_wise_qa, get_enhanced_topic_wise_qa
-from context_first_qa import initialize_context_first_qa, get_context_first_qa
+from enhanced_qa_hybrid import initialize_enhanced_hybrid_qa, get_enhanced_hybrid_qa
 from final_gemini_scraper import FinalGeminiScraper
 from gcs_qa_service import GCSQAService
 from simple_gemini_transcriber import SimpleGeminiTranscriber
@@ -36,9 +32,7 @@ from company_bucket_service import initialize_company_bucket_service, get_compan
 # from universal_help_scraper import UniversalScraperIntegration
 
 # Video processing imports
-from enhanced_video_processor import initialize_enhanced_video_processor, get_enhanced_video_processor
-from enhanced_video_chunking_processor import initialize_enhanced_chunking_processor, get_enhanced_chunking_processor
-from delete_reprocess_utils import initialize_delete_reprocess_manager, get_delete_reprocess_manager
+from loom_processor_gcs import LoomVideoProcessorGCS
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -49,52 +43,20 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Global instances
-enhanced_pinecone_manager = None
-enhanced_knowledge_integration = None
-enhanced_qa_system = None
 enhanced_semantic_qa_system = None
-enhanced_topic_wise_qa_system = None
-context_first_qa_system = None
-enhanced_video_processor = None
-enhanced_chunking_processor = None
-delete_reprocess_manager = None
+enhanced_hybrid_qa_system = None
+loom_processor_gcs = None
 gcs_qa_service = None
 simple_transcriber = None
 company_bucket_service = None
-universal_scraper_integration = None
-enhanced_scraper = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for FastAPI"""
-    global enhanced_pinecone_manager, enhanced_knowledge_integration, enhanced_qa_system, enhanced_semantic_qa_system, enhanced_topic_wise_qa_system, context_first_qa_system, enhanced_video_processor, enhanced_chunking_processor, delete_reprocess_manager, universal_scraper_integration, enhanced_scraper, gcs_qa_service, simple_transcriber, company_bucket_service
+    global enhanced_semantic_qa_system, enhanced_hybrid_qa_system, loom_processor_gcs, gcs_qa_service, simple_transcriber, company_bucket_service
     
     try:
-        logger.info("🚀 Starting Enhanced QuDemo Python Backend...")
-        
-        # Initialize Enhanced Pinecone Manager
-        if initialize_enhanced_pinecone_manager():
-            enhanced_pinecone_manager = get_enhanced_pinecone_manager()
-            logger.info("✅ Enhanced Pinecone Manager initialized")
-        else:
-            logger.error("❌ Failed to initialize Enhanced Pinecone Manager")
-            return
-        
-        # Initialize Enhanced Knowledge Integration
-        if initialize_enhanced_knowledge_integration():
-            enhanced_knowledge_integration = get_enhanced_knowledge_integration()
-            logger.info("✅ Enhanced Knowledge Integration initialized")
-        else:
-            logger.error("❌ Failed to initialize Enhanced Knowledge Integration")
-            return
-        
-        # Initialize Enhanced Q&A System
-        if initialize_simple_enhanced_qa():
-            enhanced_qa_system = get_simple_enhanced_qa()
-            logger.info("✅ Enhanced Q&A System initialized")
-        else:
-            logger.error("❌ Failed to initialize Enhanced Q&A System")
-            return
+        logger.info("🚀 Starting Enhanced QuDemo Python Backend (GCS-based)...")
         
         # Initialize Enhanced Semantic Q&A System
         if initialize_enhanced_semantic_qa():
@@ -104,23 +66,24 @@ async def lifespan(app: FastAPI):
             logger.error("❌ Failed to initialize Enhanced Semantic Q&A System")
             return
         
-        # Initialize Enhanced Topic-Wise Q&A System (NEW - Primary for topic-wise chunks)
+        # Initialize Enhanced Hybrid Q&A System (NEW - Combines semantic and GCS)
         try:
-            if initialize_enhanced_topic_wise_qa():
-                enhanced_topic_wise_qa_system = get_enhanced_topic_wise_qa()
-                logger.info("✅ Enhanced Topic-Wise Q&A System initialized (Primary for topic-wise chunks)")
+            if initialize_enhanced_hybrid_qa():
+                enhanced_hybrid_qa_system = get_enhanced_hybrid_qa()
+                logger.info("✅ Enhanced Hybrid Q&A System initialized (Combines semantic and GCS)")
             else:
-                logger.warning("⚠️ Enhanced Topic-Wise Q&A System initialization failed, will use fallback")
-                enhanced_topic_wise_qa_system = None
+                logger.warning("⚠️ Enhanced Hybrid Q&A System initialization failed, will use fallback")
+                enhanced_hybrid_qa_system = None
         except Exception as e:
-            logger.warning(f"⚠️ Enhanced Topic-Wise Q&A System initialization failed: {e}, will use fallback")
-            enhanced_topic_wise_qa_system = None
+            logger.warning(f"⚠️ Enhanced Hybrid Q&A System initialization failed: {e}, will use fallback")
+            enhanced_hybrid_qa_system = None
         
         # Initialize GCS Q&A Service (NEW - Google Cloud Storage based)
         try:
             # Check if service account file exists
             service_account_path = 'service-account-key.json'
             if os.path.exists(service_account_path):
+                logger.info(f"🔍 Service account file found: {service_account_path}")
                 gcs_qa_service = GCSQAService()
                 logger.info("✅ GCS Q&A Service initialized (Google Cloud Storage based)")
             else:
@@ -128,6 +91,8 @@ async def lifespan(app: FastAPI):
                 gcs_qa_service = None
         except Exception as e:
             logger.error(f"❌ GCS Q&A Service initialization error: {e}")
+            import traceback
+            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
             gcs_qa_service = None
         
         # Initialize Simple Gemini Transcriber (NEW - Simple GCS-based transcription)
@@ -163,69 +128,23 @@ async def lifespan(app: FastAPI):
             logger.error(f"❌ Company Bucket Service initialization error: {e}")
             company_bucket_service = None
         
-        # Initialize Context-First Q&A System
-        if initialize_context_first_qa():
-            context_first_qa_system = get_context_first_qa()
-            logger.info("✅ Context-First Q&A System initialized")
-        else:
-            logger.error("❌ Failed to initialize Context-First Q&A System")
-            return
-        
-        # Initialize Enhanced Video Processor
+        # Initialize GCS-based Loom Video Processor (NEW - Replaces Pinecone-based processor)
         try:
-            if initialize_enhanced_video_processor():
-                enhanced_video_processor = get_enhanced_video_processor()
-                logger.info("✅ Enhanced Video Processor initialized")
+            openai_api_key = os.getenv('OPENAI_API_KEY')
+            if openai_api_key:
+                loom_processor_gcs = LoomVideoProcessorGCS(
+                    openai_api_key=openai_api_key,
+                    gcs_bucket_name='qudemo-video-transcripts'
+                )
+                logger.info("✅ GCS-based Loom Video Processor initialized")
             else:
-                logger.warning("⚠️ Enhanced Video Processor initialization failed, will use direct processor")
-                enhanced_video_processor = None
+                logger.warning("⚠️ OPENAI_API_KEY not found, Loom Processor not initialized")
+                loom_processor_gcs = None
         except Exception as e:
-            logger.warning(f"⚠️ Enhanced Video Processor initialization failed: {e}, will use direct processor")
-            enhanced_video_processor = None
+            logger.error(f"❌ GCS-based Loom Video Processor initialization error: {e}")
+            loom_processor_gcs = None
         
-        # Initialize Enhanced Chunking Processor (NEW - Primary for YouTube videos)
-        try:
-            if initialize_enhanced_chunking_processor():
-                enhanced_chunking_processor = get_enhanced_chunking_processor()
-                logger.info("✅ Enhanced Chunking Processor initialized (Primary for YouTube)")
-            else:
-                logger.warning("⚠️ Enhanced Chunking Processor initialization failed, will use fallback")
-                enhanced_chunking_processor = None
-        except Exception as e:
-            logger.warning(f"⚠️ Enhanced Chunking Processor initialization failed: {e}, will use fallback")
-            enhanced_chunking_processor = None
-        
-        # Initialize Delete/Reprocess Manager
-        try:
-            if initialize_delete_reprocess_manager():
-                delete_reprocess_manager = get_delete_reprocess_manager()
-                logger.info("✅ Delete/Reprocess Manager initialized")
-            else:
-                logger.warning("⚠️ Delete/Reprocess Manager initialization failed")
-                delete_reprocess_manager = None
-        except Exception as e:
-            logger.warning(f"⚠️ Delete/Reprocess Manager initialization failed: {e}")
-            delete_reprocess_manager = None
-        
-        # Initialize existing video processing system as fallback
-        try:
-            from video_processing import initialize_processors
-            if initialize_processors():
-                logger.info("✅ Existing video processing system initialized as fallback")
-            else:
-                logger.warning("⚠️ Failed to initialize existing video processing system")
-        except Exception as e:
-            logger.warning(f"⚠️ Could not initialize existing video processing system: {e}")
-        
-        # Initialize Universal Scraper Integration (disabled - module deleted)
-        universal_scraper_integration = None
-        logger.info("ℹ️ Universal Scraper Integration disabled (module deleted)")
-        
-        # Initialize Enhanced Scraper with Failure Handling (disabled - module deleted)
-        enhanced_scraper = None
-        logger.info("ℹ️ Enhanced Scraper disabled (module deleted)")
-        
-        logger.info("🎉 All enhanced components initialized successfully!")
+        logger.info("🎉 All GCS-based components initialized successfully!")
         
     except Exception as e:
         logger.error(f"❌ Error during startup: {e}")
@@ -234,23 +153,17 @@ async def lifespan(app: FastAPI):
     yield
     
     # Cleanup on shutdown
-    logger.info("🔄 Shutting down Enhanced QuDemo Python Backend...")
+    logger.info("🔄 Shutting down GCS-based QuDemo Python Backend...")
     try:
-        if enhanced_pinecone_manager:
-            enhanced_pinecone_manager.cleanup_cache()
-            logger.info("🧹 Enhanced Pinecone Manager cache cleaned")
-        
-        # Universal scraper doesn't need cleanup
-        
         logger.info("✅ Shutdown completed successfully")
     except Exception as e:
         logger.error(f"❌ Error during shutdown: {e}")
 
 # Initialize FastAPI app with lifespan
 app = FastAPI(
-    title="Enhanced QuDemo Python Backend",
-    description="Optimized backend with Pinecone Standard Plan multi-index architecture",
-    version="2.0.0",
+    title="GCS-based QuDemo Python Backend",
+    description="Optimized backend with Google Cloud Storage architecture",
+    version="3.0.0",
     lifespan=lifespan
 )
 
@@ -284,11 +197,11 @@ class BatchUrlRequest(BaseModel):
 async def root():
     """Root endpoint"""
     return {
-        "message": "Enhanced QuDemo Python Backend",
-        "version": "2.0.0",
+        "message": "GCS-based QuDemo Python Backend",
+        "version": "3.0.0",
         "status": "running",
         "features": [
-            "Pinecone Standard Plan Multi-Index Architecture",
+            "Google Cloud Storage Architecture",
             "Enhanced Q&A with Context-Aware Answers",
             "Intelligent Content Routing",
             "Advanced Video Processing",
@@ -301,14 +214,12 @@ async def health_check():
     """Health check endpoint"""
     try:
         components_status = {
-            "pinecone_manager": enhanced_pinecone_manager is not None,
-            "knowledge_integration": enhanced_knowledge_integration is not None,
-            "qa_system": enhanced_qa_system is not None,
             "semantic_qa_system": enhanced_semantic_qa_system is not None,
-            "topic_wise_qa_system": enhanced_topic_wise_qa_system is not None,
-            "video_processor": enhanced_video_processor is not None,
-            "chunking_processor": enhanced_chunking_processor is not None,
-            "enhanced_scraper": False  # Disabled - module deleted
+            "hybrid_qa_system": enhanced_hybrid_qa_system is not None,
+            "loom_processor_gcs": loom_processor_gcs is not None,
+            "gcs_qa_service": gcs_qa_service is not None,
+            "simple_transcriber": simple_transcriber is not None,
+            "company_bucket_service": company_bucket_service is not None
         }
         
         all_healthy = all(components_status.values())
@@ -332,32 +243,16 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
     """Ask a question and get context-aware answer using GCS Q&A service (primary) with fallbacks"""
     try:
         # Try GCS Q&A service first (primary for Google Cloud Storage)
-        if gcs_qa_service:
-            logger.info(f"❓ Processing question for {company_name} qudemo {qudemo_id} using GCS Q&A")
-            
-            answer_result = await gcs_qa_service.ask_question(
-                question=request.question,
-                company_name=company_name,
-                qudemo_id=qudemo_id
-            )
-        elif enhanced_topic_wise_qa_system:
-            logger.info(f"❓ Processing question for {company_name} qudemo {qudemo_id} using TOPIC-WISE QA")
-            
-            answer_result = enhanced_topic_wise_qa_system.ask_question(
-                question=request.question,
-                company_name=company_name,
-                qudemo_id=qudemo_id
-            )
-        elif enhanced_semantic_qa_system:
-            logger.info(f"❓ Processing question for {company_name} qudemo {qudemo_id} using SEMANTIC QA (fallback)")
-            
-            answer_result = enhanced_semantic_qa_system.ask_question(
-                question=request.question,
-                company_name=company_name,
-                qudemo_id=qudemo_id
-            )
-        else:
-            raise HTTPException(status_code=500, detail="No Q&A system available")
+        # Always try to use GCS service directly
+        logger.info(f"❓ Processing question for {company_name} qudemo {qudemo_id} using GCS Q&A (forced)")
+        
+        # Create GCS service instance directly
+        gcs_service = GCSQAService()
+        answer_result = await gcs_service.ask_question(
+            question=request.question,
+            company_name=company_name,
+            qudemo_id=qudemo_id
+        )
         
         if answer_result['success']:
             return {
@@ -373,6 +268,8 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
                 'start': answer_result.get('timestamp', 0) if gcs_qa_service else (answer_result.get('timestamp', {}).get('start_time', 0) if answer_result.get('timestamp') else (answer_result.get('sources', [{}])[0].get('start_timestamp', 0) if answer_result.get('sources') else 0)),
                 'end': answer_result.get('end', 0) if gcs_qa_service else (answer_result.get('timestamp', {}).get('end_time', 0) if answer_result.get('timestamp') else (answer_result.get('sources', [{}])[0].get('end_timestamp', 0) if answer_result.get('sources') else 0)),
                 'video_url': answer_result.get('video_url', '') if gcs_qa_service else (answer_result.get('sources', [{}])[0].get('video_url', '') if answer_result.get('sources') else ''),
+                'video_title': answer_result.get('video_title', '') if gcs_qa_service else (answer_result.get('sources', [{}])[0].get('video_title', '') if answer_result.get('sources') else ''),
+                'timestamp': answer_result.get('timestamp', 0) if gcs_qa_service else (answer_result.get('timestamp', {}).get('start_time', 0) if answer_result.get('timestamp') else (answer_result.get('sources', [{}])[0].get('start_timestamp', 0) if answer_result.get('sources') else 0)),
                 'formatted_timestamp': answer_result.get('formatted_timestamp', '') if gcs_qa_service else (answer_result.get('timestamp', {}).get('formatted_start', '') if answer_result.get('timestamp') else ''),
                 'answer_source': 'gcs_transcript_search' if gcs_qa_service else ('enhanced_topic_wise' if enhanced_topic_wise_qa_system else 'enhanced_semantic')
             }
@@ -528,6 +425,52 @@ async def ask_question_context_first(company_name: str, qudemo_id: str, request:
             
     except Exception as e:
         logger.error(f"❌ Error processing question: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ask-hybrid/{company_name}/{qudemo_id}")
+async def ask_question_hybrid(company_name: str, qudemo_id: str, request: QuestionRequest):
+    """Ask a question using enhanced hybrid QA system (combines semantic and GCS search)"""
+    try:
+        if not enhanced_hybrid_qa_system:
+            raise HTTPException(status_code=500, detail="Enhanced Hybrid Q&A System not initialized")
+        
+        logger.info(f"🔀 Hybrid QA: {request.question} for {company_name} qudemo {qudemo_id}")
+        
+        # Use hybrid Q&A system to get answer
+        answer_result = await enhanced_hybrid_qa_system.ask_question(
+            question=request.question,
+            company_name=company_name,
+            qudemo_id=qudemo_id
+        )
+        
+        if answer_result['success']:
+            return {
+                'success': True,
+                'answer': answer_result['answer'],
+                'sources': answer_result.get('sources', []),
+                'total_sources': answer_result.get('total_sources', 0),
+                'search_score': answer_result.get('search_score', 0),
+                'content_types_found': answer_result.get('content_types_found', []),
+                'difficulty_level': answer_result.get('difficulty_level', 'intermediate'),
+                'estimated_time': answer_result.get('estimated_time', '2-3 minutes'),
+                'start': answer_result.get('start', 0),
+                'end': answer_result.get('end', 0),
+                'video_url': answer_result.get('video_url'),
+                'formatted_timestamp': answer_result.get('formatted_timestamp'),
+                'answer_source': 'enhanced_hybrid_qa',
+                'processing_method': answer_result.get('processing_method', 'hybrid_semantic_gcs')
+            }
+        else:
+            return {
+                'success': False,
+                'error': answer_result.get('error', 'Unknown error'),
+                'answer': answer_result.get('answer', ''),
+                'sources': [],
+                'fallback_reason': answer_result.get('fallback_reason', 'unknown')
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Error processing hybrid question: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/knowledge/sources/{company_name}")
@@ -690,13 +633,13 @@ async def upload_loom_media(
         
         logger.info(f"💾 Saved uploaded file to: {temp_file_path}")
         
-        # Process with media file
-        if enhanced_video_processor:
-            result = await enhanced_video_processor.process_loom_video(
+        # Process with media file using GCS-based Loom processor
+        if loom_processor_gcs:
+            result = loom_processor_gcs.process_loom_video(
                 video_url, company_name, qudemo_id, temp_file_path
             )
         else:
-            raise HTTPException(status_code=500, detail="Enhanced video processor not available")
+            raise HTTPException(status_code=500, detail="GCS-based Loom processor not available")
         
         # Clean up temporary file
         try:
@@ -918,26 +861,22 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                     logger.info(f"🔍 Processing Loom video {i+1}/{len(loom_videos)}: {video_url}")
                     logger.info(f"🎬 Detected video type: loom")
                     
-                    # Process video using enhanced video processor or fallback
-                    if enhanced_video_processor:
-                        logger.info(f"🎥 Processing Loom video: {video_url}")
-                        result = await enhanced_video_processor.process_loom_video(
+                    # Process video using GCS-based Loom processor
+                    if loom_processor_gcs:
+                        logger.info(f"🎥 Processing Loom video with GCS: {video_url}")
+                        result = loom_processor_gcs.process_loom_video(
                             video_url, company_name, qudemo_id
                         )
-                    else:
-                        # Fallback to direct processor
-                        logger.info(f"🎥 Using direct processor for Loom video: {video_url}")
-                        from video_processing import process_video
-                        result = await process_video(video_url, company_name, qudemo_id)
                         
-                        # Convert result format to match enhanced processor
+                        # Convert result format to match expected structure
                         if result and result.get('success'):
                             result = {
                                 'success': True,
-                                'chunks_stored': result.get('result', {}).get('chunks_created', 0),
+                                'chunks_stored': result.get('chunks_created', 0),
                                 'video_type': 'loom',
                                 'company_name': company_name,
-                                'qudemo_id': qudemo_id
+                                'qudemo_id': qudemo_id,
+                                'method': 'loom_processor_gcs'
                             }
                         else:
                             result = {
@@ -945,6 +884,13 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                                 'error': result.get('error', 'Unknown error') if result else 'No result returned',
                                 'chunks_stored': 0
                             }
+                    else:
+                        logger.error("❌ GCS-based Loom processor not available")
+                        result = {
+                            'success': False,
+                            'error': 'GCS-based Loom processor not initialized',
+                            'chunks_stored': 0
+                        }
                     
                     logger.info(f"📊 Loom video processing result: {result}")
                     
@@ -1186,126 +1132,35 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
         logger.error(f"❌ Error processing qudemo content: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/pinecone/status")
-async def get_pinecone_status():
-    """Get Pinecone connection and index status"""
+@app.get("/gcs/status")
+async def get_gcs_status():
+    """Get Google Cloud Storage connection and bucket status"""
     try:
-        if not enhanced_pinecone_manager:
-            raise HTTPException(status_code=500, detail="Enhanced Pinecone Manager not initialized")
+        if not gcs_qa_service:
+            raise HTTPException(status_code=500, detail="GCS Q&A service not initialized")
         
-        status = enhanced_pinecone_manager.get_status()
+        # Get GCS service status
+        gcs_service = gcs_qa_service.gcs_service
+        companies = gcs_service.list_companies()
+        
         return {
             'success': True,
-            'status': status,
+            'status': {
+                'gcs_connected': True,
+                'companies_count': len(companies),
+                'companies': companies,
+                'bucket_type': 'company-specific buckets'
+            },
             'timestamp': datetime.now().isoformat()
         }
             
     except Exception as e:
-        logger.error(f"❌ Error getting Pinecone status: {e}")
+        logger.error(f"❌ Error getting GCS status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/cleanup-qudemo/{company_name}/{qudemo_id}")
 async def cleanup_qudemo_data(company_name: str, qudemo_id: str):
-    """Clean up all Pinecone data for a specific QuDemo"""
-    try:
-        logger.info(f"🧹 Starting cleanup for QuDemo: {qudemo_id} in company: {company_name}")
-        
-        if not enhanced_pinecone_manager:
-            raise HTTPException(status_code=500, detail="Enhanced Pinecone Manager not initialized")
-        
-        cleanup_results = {
-            'company_name': company_name,
-            'qudemo_id': qudemo_id,
-            'cleaned_indexes': [],
-            'total_vectors_deleted': 0,
-            'errors': []
-        }
-        
-        # Clean up each index
-        for index_name, index_id in enhanced_pinecone_manager.indexes.items():
-            try:
-                logger.info(f"🧹 Cleaning up {index_name} index: {index_id}")
-                
-                # Create namespace for this company and qudemo (consistent with storage format)
-                namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
-                
-                # Get the index
-                index = enhanced_pinecone_manager.pc.Index(index_id)
-                
-                # Delete all vectors in the namespace
-                try:
-                    # Determine the correct vector dimension based on index type
-                    if index_name == 'video':
-                        vector_dim = 3072  # Video index uses text-embedding-3-large
-                    else:
-                        vector_dim = 1536  # Other indexes use text-embedding-3-small
-                    
-                    # Query to get all vectors in the namespace
-                    query_result = index.query(
-                        vector=[0.0] * vector_dim,  # Correct dimension for each index
-                        top_k=10000,  # Large number to get all vectors
-                        include_metadata=True,
-                        namespace=namespace
-                    )
-                    
-                    if query_result.matches:
-                        # Extract vector IDs
-                        vector_ids = [match.id for match in query_result.matches]
-                        
-                        # Delete the vectors
-                        index.delete(ids=vector_ids, namespace=namespace)
-                        
-                        vectors_deleted = len(vector_ids)
-                        cleanup_results['total_vectors_deleted'] += vectors_deleted
-                        cleanup_results['cleaned_indexes'].append({
-                            'index_name': index_name,
-                            'index_id': index_id,
-                            'namespace': namespace,
-                            'vectors_deleted': vectors_deleted
-                        })
-                        
-                        logger.info(f"✅ Deleted {vectors_deleted} vectors from {index_name} index")
-                    else:
-                        logger.info(f"ℹ️ No vectors found in {index_name} index for namespace {namespace}")
-                        cleanup_results['cleaned_indexes'].append({
-                            'index_name': index_name,
-                            'index_id': index_id,
-                            'namespace': namespace,
-                            'vectors_deleted': 0
-                        })
-                        
-                except Exception as e:
-                    logger.warning(f"⚠️ Could not query/delete from {index_name} index: {e}")
-                    cleanup_results['errors'].append({
-                        'index_name': index_name,
-                        'error': str(e)
-                    })
-                    
-            except Exception as e:
-                logger.error(f"❌ Error cleaning up {index_name} index: {e}")
-                cleanup_results['errors'].append({
-                    'index_name': index_name,
-                    'error': str(e)
-                })
-        
-        logger.info(f"✅ QuDemo cleanup completed: {cleanup_results['total_vectors_deleted']} vectors deleted")
-        
-        return {
-            "success": True,
-            "message": f"QuDemo cleanup completed successfully",
-            "data": cleanup_results
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error in QuDemo cleanup: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.delete("/cleanup-gcs-qudemo/{company_name}/{qudemo_id}")
-async def cleanup_gcs_qudemo_data(company_name: str, qudemo_id: str):
-    """
-    Clean up ALL GCS data for a specific QuDemo
-    This includes all transcript data, Q&A answers, and related files
-    """
+    """Clean up all GCS data for a specific QuDemo (replaces Pinecone cleanup)"""
     try:
         logger.info(f"🧹 Starting GCS cleanup for QuDemo: {qudemo_id} in company: {company_name}")
         
@@ -1334,276 +1189,94 @@ async def cleanup_gcs_qudemo_data(company_name: str, qudemo_id: str):
             }
         
     except Exception as e:
-        logger.error(f"❌ Error cleaning up GCS QuDemo data: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to cleanup GCS QuDemo data: {str(e)}")
+        logger.error(f"❌ Error in GCS QuDemo cleanup: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.delete("/cleanup-all-qudemo-data/{company_name}/{qudemo_id}")
 async def cleanup_all_qudemo_data(company_name: str, qudemo_id: str):
     """
-    Clean up ALL data for a specific QuDemo from both Pinecone and GCS
-    This is a comprehensive cleanup that handles both storage systems
+    Clean up ALL data for a specific QuDemo from GCS
+    This is a comprehensive cleanup that handles GCS storage system
     """
     try:
-        logger.info(f"🧹 Starting comprehensive cleanup for QuDemo: {qudemo_id} in company: {company_name}")
+        logger.info(f"🧹 Starting comprehensive GCS cleanup for QuDemo: {qudemo_id} in company: {company_name}")
         
-        cleanup_results = {
-            'company_name': company_name,
-            'qudemo_id': qudemo_id,
-            'pinecone_cleanup': {'success': False, 'message': ''},
-            'gcs_cleanup': {'success': False, 'message': ''},
-            'overall_success': False
-        }
+        if not gcs_qa_service:
+            raise HTTPException(status_code=500, detail="GCS Q&A service not initialized")
         
-        # 1. Clean up Pinecone data
-        try:
-            logger.info(f"🧹 Cleaning up Pinecone data...")
-            if enhanced_pinecone_manager:
-                # Call the existing Pinecone cleanup logic
-                cleanup_results['pinecone_cleanup'] = {
-                    'success': True,
-                    'message': 'Pinecone cleanup initiated'
+        # Clean up GCS data
+        deletion_success = gcs_qa_service.delete_qudemo(company_name, qudemo_id)
+        
+        if deletion_success:
+            logger.info(f"✅ Comprehensive GCS cleanup successful for {company_name}/{qudemo_id}")
+            return {
+                "success": True,
+                "message": f"Comprehensive GCS cleanup completed for {company_name}/{qudemo_id}",
+                "data": {
+                    'company_name': company_name,
+                    'qudemo_id': qudemo_id,
+                    'gcs_cleanup': {'success': True, 'message': 'GCS data deleted successfully'},
+                    'overall_success': True
                 }
-                logger.info(f"✅ Pinecone cleanup initiated for {company_name}/{qudemo_id}")
-            else:
-                cleanup_results['pinecone_cleanup'] = {
-                    'success': False,
-                    'message': 'Pinecone manager not initialized'
-                }
-        except Exception as e:
-            logger.error(f"❌ Pinecone cleanup error: {e}")
-            cleanup_results['pinecone_cleanup'] = {
-                'success': False,
-                'message': f'Pinecone cleanup failed: {str(e)}'
             }
-        
-        # 2. Clean up GCS data
-        try:
-            logger.info(f"🧹 Cleaning up GCS data...")
-            if gcs_qa_service:
-                deletion_success = gcs_qa_service.delete_qudemo(company_name, qudemo_id)
-                if deletion_success:
-                    cleanup_results['gcs_cleanup'] = {
-                        'success': True,
-                        'message': 'GCS data deleted successfully'
-                    }
-                    logger.info(f"✅ GCS cleanup successful for {company_name}/{qudemo_id}")
-                else:
-                    cleanup_results['gcs_cleanup'] = {
-                        'success': False,
-                        'message': 'GCS deletion returned false'
-                    }
-            else:
-                cleanup_results['gcs_cleanup'] = {
-                    'success': False,
-                    'message': 'GCS Q&A service not initialized'
-                }
-        except Exception as e:
-            logger.error(f"❌ GCS cleanup error: {e}")
-            cleanup_results['gcs_cleanup'] = {
-                'success': False,
-                'message': f'GCS cleanup failed: {str(e)}'
-            }
-        
-        # 3. Determine overall success
-        cleanup_results['overall_success'] = (
-            cleanup_results['pinecone_cleanup']['success'] and 
-            cleanup_results['gcs_cleanup']['success']
-        )
-        
-        if cleanup_results['overall_success']:
-            logger.info(f"✅ Comprehensive cleanup completed successfully for {company_name}/{qudemo_id}")
         else:
-            logger.warning(f"⚠️ Comprehensive cleanup completed with some issues for {company_name}/{qudemo_id}")
-        
-        return {
-            "success": cleanup_results['overall_success'],
-            "message": f"Comprehensive cleanup completed for {company_name}/{qudemo_id}",
-            "data": cleanup_results
-        }
+            logger.error(f"❌ Comprehensive GCS cleanup failed for {company_name}/{qudemo_id}")
+            return {
+                "success": False,
+                "error": "Failed to delete QuDemo data from GCS",
+                "data": {
+                    'company_name': company_name,
+                    'qudemo_id': qudemo_id,
+                    'gcs_cleanup': {'success': False, 'message': 'GCS deletion returned false'},
+                    'overall_success': False
+                }
+            }
         
     except Exception as e:
-        logger.error(f"❌ Error in comprehensive QuDemo cleanup: {e}")
+        logger.error(f"❌ Error in comprehensive GCS QuDemo cleanup: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to cleanup all QuDemo data: {str(e)}")
 
 @app.delete("/delete-company-data/{company_name}")
 async def delete_company_data(company_name: str):
-    """Delete ALL Pinecone data for a company (all QuDemos, all indexes)"""
+    """Delete ALL GCS data for a company (all QuDemos, all buckets)"""
     try:
-        logger.info(f"🗑️ Starting complete company deletion for: {company_name}")
+        logger.info(f"🗑️ Starting complete GCS company deletion for: {company_name}")
         
-        if not enhanced_pinecone_manager:
-            raise HTTPException(status_code=500, detail="Enhanced Pinecone Manager not initialized")
+        if not gcs_qa_service:
+            raise HTTPException(status_code=500, detail="GCS Q&A service not initialized")
         
-        cleanup_results = {
-            'company_name': company_name,
-            'cleaned_indexes': [],
-            'total_vectors_deleted': 0,
-            'total_namespaces_cleaned': 0,
-            'errors': []
-        }
+        # Use GCS service to delete company bucket
+        gcs_service = gcs_qa_service.gcs_service
+        deletion_success = gcs_service.delete_company_bucket(company_name)
         
-        # Clean up each index
-        for index_name, index_id in enhanced_pinecone_manager.indexes.items():
-            try:
-                logger.info(f"🗑️ Cleaning up {index_name} index: {index_id}")
-                
-                # Get the index
-                index = enhanced_pinecone_manager.pc.Index(index_id)
-                
-                # Get all namespaces in this index
-                try:
-                    stats = index.describe_index_stats()
-                    namespaces = stats.get('namespaces', {})
-                    
-                    company_namespaces = []
-                    # Normalize company name to match storage format
-                    normalized_company_name = company_name.lower().replace(' ', '-')
-                    for namespace_name in namespaces.keys():
-                        if namespace_name.startswith(f"{normalized_company_name}-"):
-                            company_namespaces.append(namespace_name)
-                    
-                    logger.info(f"📊 Found {len(company_namespaces)} namespaces for company {company_name} in {index_name} index")
-                    
-                    index_vectors_deleted = 0
-                    for namespace in company_namespaces:
-                        try:
-                            # Determine the correct vector dimension based on index type
-                            if index_name == 'video':
-                                vector_dim = 3072  # Video index uses text-embedding-3-large
-                            else:
-                                vector_dim = 1536  # Other indexes use text-embedding-3-small
-                            
-                            # Query to get all vectors in this namespace
-                            query_result = index.query(
-                                vector=[0.0] * vector_dim,  # Correct dimension for each index
-                                top_k=10000,  # Large number to get all vectors
-                                include_metadata=True,
-                                namespace=namespace
-                            )
-                            
-                            if query_result.matches:
-                                # Extract vector IDs
-                                vector_ids = [match.id for match in query_result.matches]
-                                
-                                # Delete the vectors
-                                index.delete(ids=vector_ids, namespace=namespace)
-                                
-                                vectors_deleted = len(vector_ids)
-                                index_vectors_deleted += vectors_deleted
-                                cleanup_results['total_namespaces_cleaned'] += 1
-                                
-                                logger.info(f"✅ Deleted {vectors_deleted} vectors from namespace {namespace}")
-                            else:
-                                logger.info(f"ℹ️ No vectors found in namespace {namespace}")
-                                
-                        except Exception as e:
-                            logger.warning(f"⚠️ Could not clean namespace {namespace}: {e}")
-                            cleanup_results['errors'].append({
-                                'index_name': index_name,
-                                'namespace': namespace,
-                                'error': str(e)
-                            })
-                    
-                    cleanup_results['total_vectors_deleted'] += index_vectors_deleted
-                    cleanup_results['cleaned_indexes'].append({
-                        'index_name': index_name,
-                        'index_id': index_id,
-                        'namespaces_cleaned': len(company_namespaces),
-                        'vectors_deleted': index_vectors_deleted
-                    })
-                    
-                    logger.info(f"✅ Cleaned {index_name} index: {index_vectors_deleted} vectors from {len(company_namespaces)} namespaces")
-                    
-                except Exception as e:
-                    logger.warning(f"⚠️ Could not get namespace stats for {index_name} index: {e}")
-                    cleanup_results['errors'].append({
-                        'index_name': index_name,
-                        'error': str(e)
-                    })
-                    
-            except Exception as e:
-                logger.error(f"❌ Error cleaning up {index_name} index: {e}")
-                cleanup_results['errors'].append({
-                    'index_name': index_name,
-                    'error': str(e)
-                })
-        
-        logger.info(f"🎉 Company deletion completed: {cleanup_results['total_vectors_deleted']} vectors deleted from {cleanup_results['total_namespaces_cleaned']} namespaces")
-        
-        return {
-            "success": True,
-            "message": f"Company data deletion completed successfully",
-            "data": cleanup_results
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error in company data deletion: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.delete("/delete-reprocess/{company_name}/{qudemo_id}")
-async def delete_reprocess_content(
-    company_name: str, 
-    qudemo_id: str,
-    transcript_version: str = "v1",
-    chunking_version: str = "v2-seg-safe"
-):
-    """Delete content by namespace and version for reprocessing"""
-    try:
-        if not delete_reprocess_manager:
-            raise HTTPException(status_code=500, detail="Delete/Reprocess Manager not initialized")
-        
-        logger.info(f"🗑️ Deleting content for {company_name} qudemo {qudemo_id} (versions: {transcript_version}/{chunking_version})")
-        
-        result = delete_reprocess_manager.delete_by_namespace_and_version(
-            company_name=company_name,
-            qudemo_id=qudemo_id,
-            transcript_version=transcript_version,
-            chunking_version=chunking_version
-        )
-        
-        if result['success']:
+        if deletion_success:
+            logger.info(f"✅ GCS company deletion successful for {company_name}")
             return {
-                'success': True,
-                'message': f"Successfully deleted {result['deleted_count']} vectors",
-                'deleted_count': result['deleted_count'],
-                'namespace': result['namespace'],
-                'transcript_version': transcript_version,
-                'chunking_version': chunking_version
+                "success": True,
+                "message": f"GCS company data deletion completed for {company_name}",
+                "data": {
+                    'company_name': company_name,
+                    'deleted_bucket': f"qudemo-{company_name.lower().replace(' ', '-')}",
+                    'deleted_files': "All company files and QuDemos deleted from GCS"
+                }
             }
         else:
-            raise HTTPException(status_code=500, detail=f"Delete failed: {result.get('error', 'Unknown error')}")
-            
+            logger.error(f"❌ GCS company deletion failed for {company_name}")
+            return {
+                "success": False,
+                "error": "Failed to delete company data from GCS",
+                "data": {
+                    'company_name': company_name,
+                    'deleted_bucket': None,
+                    'deleted_files': 0
+                }
+            }
+        
     except Exception as e:
-        logger.error(f"❌ Error deleting content: {e}")
+        logger.error(f"❌ Error in GCS company data deletion: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/namespace-stats/{company_name}/{qudemo_id}")
-async def get_namespace_stats(company_name: str, qudemo_id: str):
-    """Get statistics for a namespace"""
-    try:
-        if not delete_reprocess_manager:
-            raise HTTPException(status_code=500, detail="Delete/Reprocess Manager not initialized")
-        
-        logger.info(f"📊 Getting namespace stats for {company_name} qudemo {qudemo_id}")
-        
-        stats = delete_reprocess_manager.get_namespace_stats(
-            company_name=company_name,
-            qudemo_id=qudemo_id
-        )
-        
-        if stats['success']:
-            return {
-                'success': True,
-                'data': stats,
-                'company_name': company_name,
-                'qudemo_id': qudemo_id
-            }
-        else:
-            raise HTTPException(status_code=500, detail=f"Failed to get stats: {stats.get('error', 'Unknown error')}")
-            
-    except Exception as e:
-        logger.error(f"❌ Error getting namespace stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 # Universal Scraper Endpoints (disabled - module deleted)
 
@@ -1656,46 +1329,51 @@ def _generate_processing_status_message(successful_content: Dict, processing_err
     
     return "\n".join(messages)
 
-# Debug endpoint to examine stored chunks
+# Debug endpoint to examine stored chunks in GCS
 @app.get("/debug-chunks/{company_name}/{qudemo_id}")
 async def debug_chunks(company_name: str, qudemo_id: str):
-    """Debug endpoint to examine what chunks are stored for a qudemo"""
+    """Debug endpoint to examine what chunks are stored for a qudemo in GCS"""
     try:
-        if not enhanced_qa_processor:
-            return {"success": False, "error": "Enhanced Q&A processor not initialized"}
+        if not gcs_qa_service:
+            return {"success": False, "error": "GCS Q&A service not initialized"}
         
-        # Get the Pinecone index
-        namespace = f"{company_name}-{qudemo_id}"
-        index = enhanced_qa_processor.pc.Index(enhanced_qa_processor.indexes['video'])
-        
-        # Query all chunks in the namespace
-        query_response = index.query(
-            namespace=namespace,
-            vector=[0.0] * 1536,  # Dummy vector
-            top_k=100,
-            include_metadata=True
+        # Get transcript data from GCS
+        transcript_data = gcs_qa_service.gcs_service.get_video_transcript(
+            company_name=company_name,
+            qudemo_id=qudemo_id
         )
         
-        chunks_info = []
-        for match in query_response.matches:
-            metadata = match.metadata
-            chunks_info.append({
-                'id': match.id,
-                'score': match.score,
-                'segment_topic': metadata.get('segment_topic', 'Unknown'),
-                'segment_summary': metadata.get('segment_summary', ''),
-                'start_timestamp': metadata.get('start_timestamp', 0),
-                'end_timestamp': metadata.get('end_timestamp', 0),
-                'quality_score': metadata.get('quality_score', 0),
-                'text_preview': metadata.get('text', '')[:200] + '...' if metadata.get('text') else ''
-            })
-        
-        return {
-            "success": True,
-            "namespace": namespace,
-            "total_chunks": len(chunks_info),
-            "chunks": chunks_info
-        }
+        if transcript_data:
+            chunks = transcript_data.get('chunks', [])
+            segments = transcript_data.get('segments', [])
+            
+            chunks_info = []
+            for i, chunk in enumerate(chunks):
+                chunks_info.append({
+                    'chunk_index': i,
+                    'text_preview': chunk.get('text', '')[:200] + '...' if chunk.get('text') else '',
+                    'start_timestamp': chunk.get('start_timestamp', 0),
+                    'end_timestamp': chunk.get('end_timestamp', 0),
+                    'source': chunk.get('source', 'unknown'),
+                    'title': chunk.get('title', 'Unknown')
+                })
+            
+            return {
+                "success": True,
+                "company_name": company_name,
+                "qudemo_id": qudemo_id,
+                "total_chunks": len(chunks_info),
+                "total_segments": len(segments),
+                "chunks": chunks_info,
+                "storage_type": "gcs"
+            }
+        else:
+            return {
+                "success": False,
+                "error": "No transcript data found for this QuDemo",
+                "company_name": company_name,
+                "qudemo_id": qudemo_id
+            }
         
     except Exception as e:
         logger.error(f"❌ Debug chunks error: {e}")

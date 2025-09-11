@@ -24,7 +24,6 @@ def check_environment():
     """Check if all required environment variables are set"""
     required_vars = [
         'OPENAI_API_KEY',
-        'PINECONE_API_KEY',
         'GEMINI_API_KEY'
     ]
     
@@ -46,7 +45,6 @@ def check_dependencies():
         import fastapi
         import uvicorn
         import openai
-        import pinecone
         import whisper
         import yt_dlp
         import google.generativeai

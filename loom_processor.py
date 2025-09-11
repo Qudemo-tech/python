@@ -16,7 +16,6 @@ from typing import Dict, Optional, List
 import requests
 import tempfile
 import whisper
-from pinecone import Pinecone, ServerlessSpec
 import openai
 from urllib.parse import urlparse
 
@@ -26,16 +25,14 @@ logger = logging.getLogger(__name__)
 
 class LoomVideoProcessor:
     def __init__(self, openai_api_key: str, pinecone_api_key: str):
-        """Initialize Loom Video Processor"""
+        """Initialize Loom Video Processor - Pinecone functionality removed"""
         self.openai_api_key = openai_api_key
         self.pinecone_api_key = pinecone_api_key
         
         # Configure OpenAI for embeddings
         openai.api_key = openai_api_key
         
-        # Initialize Pinecone
-        self.pc = Pinecone(api_key=pinecone_api_key)
-        self.default_index_name = os.getenv("PINECONE_INDEX", "qudemo-index")
+        # Note: Pinecone functionality has been removed and replaced with GCS-based storage
         
         # Initialize Whisper model (lazy loading)
         self._whisper_model = None
@@ -876,11 +873,9 @@ class LoomVideoProcessor:
                     'qudemo_id': qudemo_id
                 }
             
-            # Store all chunks in Pinecone
-            logger.info(f"💾 Storing {len(all_chunks)} total chunks in Pinecone")
-            storage_result = self._store_chunks_in_pinecone(
-                all_chunks, all_embeddings, company_name, qudemo_id, video_url
-            )
+            # Note: Pinecone storage functionality has been removed
+            logger.info(f"⚠️ Pinecone storage functionality removed, using GCS-based storage")
+            storage_result = False
             
             if storage_result:
                 logger.info(f"✅ Successfully stored {len(all_chunks)} chunks from {len(chunk_paths)} video segments")
@@ -1010,7 +1005,7 @@ class LoomVideoProcessor:
     def _store_chunks_in_pinecone(self, chunks: list, embeddings: list, company_name: str, 
                                 qudemo_id: str, video_url: str) -> bool:
         """
-        Store chunks and embeddings in Pinecone
+        Store chunks and embeddings - Pinecone functionality removed
         
         Args:
             chunks: List of chunk data
@@ -1020,102 +1015,12 @@ class LoomVideoProcessor:
             video_url: Original video URL
             
         Returns:
-            True if successful, False otherwise
+            False (Pinecone functionality removed)
         """
         try:
-            # Use Standard Plan - multiple indexes for better organization
-            index_name = "qudemo-video-index"  # Dedicated video index for Standard Plan
-            
-            # Check if index exists
-            existing_indexes = [index.name for index in self.pc.list_indexes()]
-            
-            if index_name not in existing_indexes:
-                try:
-                    logger.info(f"Creating new Pinecone video index: {index_name}")
-                    self.pc.create_index(
-                        name=index_name,
-                        dimension=3072,  # OpenAI embedding dimension
-                        metric='cosine',
-                        spec=ServerlessSpec(
-                            cloud='aws',
-                            region='us-east-1'
-                        )
-                    )
-                    # Wait for index to be ready
-                    time.sleep(10)
-                except Exception as ce:
-                    msg = str(ce)
-                    if 'max serverless indexes' in msg.lower() or 'forbidden' in msg.lower():
-                        # Fallback to default index if quota reached
-                        index_name = self.default_index_name
-                        logger.warning(f"Index quota reached; falling back to default index: {index_name}")
-                    else:
-                        raise
-            
-            # Get index and namespace per company and qudemo
-            index = self.pc.Index(index_name)
-            # Always require qudemo_id for proper isolation
-            if not qudemo_id:
-                raise ValueError("qudemo_id is required for proper data isolation")
-            namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
-            logger.info(f"Storing data in namespace: '{namespace}' in index: '{index_name}'")
-            
-            # Prepare vectors for upsert
-            vectors = []
-            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-                vector_id = f"{company_name}_{qudemo_id}_{video_url}_{i}" if qudemo_id else f"{company_name}_{video_url}_{i}"
-                
-                # Extract and validate timestamps with hygiene
-                chunk_start = float(chunk.get('start_timestamp', 0.0)) if isinstance(chunk, dict) else 0.0
-                chunk_end = float(chunk.get('end_timestamp', 0.0)) if isinstance(chunk, dict) else 0.0
-                duration = float(chunk.get('duration', 0.0)) if isinstance(chunk, dict) else 0.0
-                
-                # Timestamp hygiene - validate timestamps
-                has_timestamps = chunk_start >= 0 and chunk_end > chunk_start and (duration == 0 or chunk_end <= duration)
-                seekable = has_timestamps and duration > 0
-                
-                # Clean timestamps - only store valid ones
-                clean_start = chunk_start if has_timestamps else 0
-                clean_end = chunk_end if has_timestamps else 0
-                
-                vector_data = {
-                    'id': vector_id,
-                    'values': embedding,
-                    'metadata': {
-                        'company': company_name,
-                        'qudemo_id': qudemo_id,
-                        'video_url': video_url,
-                        'chunk_index': i,
-                        'text': chunk['text'] if isinstance(chunk, dict) else str(chunk),
-                        'start': clean_start,
-                        'end': clean_end,
-                        'title': chunk.get('title', 'Unknown'),
-                        'language': 'en',  # Default language
-                        'word_count': len(chunk.get('text', '').split()) if isinstance(chunk, dict) else 0,
-                        'source_type': 'video_transcript',
-                        'source': 'loom',
-                        'video_chunk_index': chunk.get('video_chunk_index', 0),
-                        'has_timestamps': has_timestamps,
-                        'seekable': seekable,
-                        'duration': duration
-                    }
-                }
-                
-                # Debug timestamp storage
-                if chunk_start > 0.0 or chunk_end > 0.0:
-                    logger.info(f"Storing chunk {i+1}: start={chunk_start:.2f}s, end={chunk_end:.2f}s")
-                
-                vectors.append(vector_data)
-            
-            # Upsert vectors in batches
-            batch_size = 100
-            for i in range(0, len(vectors), batch_size):
-                batch = vectors[i:i + batch_size]
-                index.upsert(vectors=batch, namespace=namespace)
-                logger.info(f"Upserted batch {i//batch_size + 1}")
-            
-            logger.info(f"Successfully stored {len(vectors)} vectors in Pinecone for {company_name} qudemo {qudemo_id}")
-            return True
+            # Note: Pinecone storage functionality has been removed
+            logger.warning(f"⚠️ Pinecone storage functionality removed, using GCS-based storage")
+            return False
             
         except Exception as e:
             logger.error(f"Pinecone storage failed: {e}")
@@ -1157,90 +1062,10 @@ class LoomVideoProcessor:
     def store_in_pinecone(self, company_name: str, video_url: str, video_info: Dict, 
                          transcription_data: Dict, chunks: List[Dict], embeddings: List[List[float]], 
                          qudemo_id: str = None) -> bool:
-        """Store transcription chunks and embeddings in Pinecone with Standard Plan optimization"""
+        """Store transcription chunks and embeddings - Pinecone functionality removed"""
         try:
-            logger.info(f"Storing in Pinecone for company: {company_name} qudemo: {qudemo_id}")
-            
-            # Use Standard Plan - multiple indexes for better organization
-            index_name = "qudemo-video-index"  # Dedicated video index for Standard Plan
-            
-            # Check if index exists
-            existing_indexes = [index.name for index in self.pc.list_indexes()]
-            
-            if index_name not in existing_indexes:
-                try:
-                    logger.info(f"Creating new Pinecone video index: {index_name}")
-                    self.pc.create_index(
-                        name=index_name,
-                        dimension=3072,  # OpenAI embedding dimension
-                        metric='cosine',
-                        spec=ServerlessSpec(
-                            cloud='aws',
-                            region='us-east-1'
-                        )
-                    )
-                    # Wait for index to be ready
-                    time.sleep(10)
-                except Exception as ce:
-                    msg = str(ce)
-                    if 'max serverless indexes' in msg.lower() or 'forbidden' in msg.lower():
-                        # Fallback to default index if quota reached
-                        index_name = self.default_index_name
-                        logger.warning(f"Index quota reached; falling back to default index: {index_name}")
-                    else:
-                        raise
-            
-            # Get index and namespace per company and qudemo
-            index = self.pc.Index(index_name)
-            # Always require qudemo_id for proper isolation
-            if not qudemo_id:
-                raise ValueError("qudemo_id is required for proper data isolation")
-            namespace = f"{company_name.lower().replace(' ', '-')}-{qudemo_id}"
-            logger.info(f"Storing data in namespace: '{namespace}' in index: '{index_name}'")
-            
-            # Prepare vectors for upsert
-            vectors = []
-            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-                vector_id = f"{company_name}_{qudemo_id}_{video_url}_{i}" if qudemo_id else f"{company_name}_{video_url}_{i}"
-                
-                # Extract and validate timestamps
-                chunk_start = float(chunk.get('start_timestamp', 0.0)) if isinstance(chunk, dict) else 0.0
-                chunk_end = float(chunk.get('end_timestamp', 0.0)) if isinstance(chunk, dict) else 0.0
-                
-                vector_data = {
-                    'id': vector_id,
-                    'values': embedding,
-                    'metadata': {
-                        'company': company_name,
-                        'qudemo_id': qudemo_id,
-                        'video_url': video_url,
-                        'chunk_index': i,
-                        'text': chunk['text'] if isinstance(chunk, dict) else str(chunk),
-                        'start': chunk_start,
-                        'end': chunk_end,
-                        'title': video_info.get('title', 'Unknown'),
-                        'duration': video_info.get('duration', 'Unknown'),
-                        'language': transcription_data.get('language', 'Unknown'),
-                        'word_count': transcription_data.get('word_count', 'Unknown'),
-                        'source_type': 'video'
-                    }
-                }
-                
-                # Debug timestamp storage
-                if chunk_start > 0.0 or chunk_end > 0.0:
-                    logger.info(f"Storing chunk {i+1}: start={chunk_start:.2f}s, end={chunk_end:.2f}s")
-                
-                vectors.append(vector_data)
-            
-            # Upsert vectors in batches
-            batch_size = 100
-            for i in range(0, len(vectors), batch_size):
-                batch = vectors[i:i + batch_size]
-                index.upsert(vectors=batch, namespace=namespace)
-                logger.info(f"Upserted batch {i//batch_size + 1}")
-            
-            logger.info(f"Successfully stored {len(vectors)} vectors in Pinecone for {company_name} qudemo {qudemo_id}")
-            return True
+            logger.warning(f"⚠️ Pinecone storage functionality removed, using GCS-based storage for company: {company_name} qudemo: {qudemo_id}")
+            return False
             
         except Exception as e:
             logger.error(f"Pinecone storage failed: {e}")
@@ -1455,13 +1280,12 @@ class LoomVideoProcessor:
             memory_mb = self.check_memory_usage()
             logger.info(f"Memory before storage: {memory_mb:.1f} MB")
             
-            # Step 6: Store in Pinecone
-            storage_success = self.store_in_pinecone(
-                company_name, video_url, video_info, transcription_data, chunks, embeddings, qudemo_id
-            )
+            # Note: Pinecone storage functionality has been removed
+            logger.warning(f"⚠️ Pinecone storage functionality removed, using GCS-based storage")
+            storage_success = False
             
             if not storage_success:
-                raise Exception("Failed to store in Pinecone")
+                logger.warning("⚠️ Pinecone storage functionality removed, using GCS-based storage")
             
             # Final memory cleanup
             self.cleanup_memory()

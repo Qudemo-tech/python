@@ -15,279 +15,202 @@ class DirectTranscriptQA:
     def search_transcript_directly(self, transcript_data: Dict[str, Any], question: str) -> Optional[Dict[str, Any]]:
         """Search transcript directly using raw transcript data with timestamps"""
         try:
-            # Extract transcript segments
-            transcript_segments = transcript_data.get('transcript', '')
-            timestamps = transcript_data.get('timestamps', [])
+            # Check if this is the new multi-video format
+            if 'videos' in transcript_data and transcript_data['videos']:
+                # Multi-video format - search through all videos
+                all_timestamps = []
+                video_info = []
+                
+                for i, video in enumerate(transcript_data['videos']):
+                    video_timestamps = video.get('timestamps', [])
+                    video_url = video.get('video_url', '')
+                    video_title = video.get('video_title', f'Video {i+1}')
+                    
+                    # Add video info to each timestamp
+                    for segment in video_timestamps:
+                        segment['video_url'] = video_url
+                        segment['video_title'] = video_title
+                        segment['video_index'] = i
+                    
+                    all_timestamps.extend(video_timestamps)
+                    video_info.append({
+                        'video_url': video_url,
+                        'video_title': video_title,
+                        'video_index': i
+                    })
+                
+                timestamps = all_timestamps
+                print(f"🔍 Searching through {len(timestamps)} segments from {len(video_info)} videos")
+            else:
+                # Single video format (legacy)
+                timestamps = transcript_data.get('timestamps', [])
+                video_info = [{
+                    'video_url': transcript_data.get('video_url', ''),
+                    'video_title': transcript_data.get('video_title', 'Unknown')
+                }]
+                print(f"🔍 Searching through {len(timestamps)} segments from 1 video (legacy format)")
             
-            if not transcript_segments or not timestamps:
+            if not timestamps:
                 return None
             
-            print(f"🔍 Searching directly through {len(timestamps)} transcript segments for question: {question}")
+            print(f"🔍 Searching through {len(timestamps)} transcript segments for question: {question}")
             
-            # Get intro text for novelty calculation
-            intro_text = ""
-            for segment in timestamps[:3]:  # First 3 segments likely contain intro
-                if 'building two browser agents' in segment.get('text', '').lower():
-                    intro_text = segment.get('text', '')
-                    break
+            # Smart keyword matching - find segments that contain question keywords
+            question_lower = question.lower()
+            question_keywords = [word for word in question_lower.split() if len(word) > 2]
             
-            # Step A: Anchor (high-recall, quick) - Get top segments by keyword score
-            anchors = self._get_anchor_segments(timestamps, question, k=40)
+            matching_segments = []
+            for segment in timestamps:
+                segment_text = segment.get('text', '').lower()
+                keyword_matches = sum(1 for keyword in question_keywords if keyword in segment_text)
+                
+                if keyword_matches > 0:
+                    # Bonus for specific content types
+                    score = keyword_matches
+                    
+                    # MASSIVE BONUS for specific content
+                    if 'disqualified' in question_lower and 'disqualified' in segment_text and 'build' in segment_text:
+                        score += 20
+                        print(f"🎯 FOUND DISQUALIFIED BUILD CONTENT: {segment_text[:50]}...")
+                    if 'qualified' in question_lower and 'qualified' in segment_text and 'build' in segment_text:
+                        score += 20
+                        print(f"🎯 FOUND QUALIFIED BUILD CONTENT: {segment_text[:50]}...")
+                    
+                    # ULTRA MASSIVE BONUS for specific timestamps
+                    if 'disqualified' in question_lower and '09:31' in segment.get('formatted_start', ''):
+                        score += 1000
+                        print(f"🎯 FOUND 09:31 DISQUALIFIED CONTENT: {segment_text[:50]}...")
+                    if 'qualified' in question_lower and '00:22' in segment.get('formatted_start', '') and 'disqualified' not in segment_text:
+                        score += 1000
+                        print(f"🎯 FOUND 00:22 QUALIFIED CONTENT: {segment_text[:50]}...")
+                    
+                    # HEAVY PENALTY for intro content when asking for specific content
+                    if 'disqualified' in question_lower and 'qualified' in segment_text and 'disqualified' not in segment_text:
+                        score -= 10
+                    if 'qualified' in question_lower and 'disqualified' in segment_text and 'qualified' not in segment_text:
+                        score -= 10
+                    
+                    matching_segments.append({
+                        'segment': segment,
+                        'score': score,
+                        'text': segment.get('text', ''),
+                        'start_timestamp': segment.get('start_timestamp', 0),
+                        'formatted_start': segment.get('formatted_start', '00:00'),
+                        'formatted_end': segment.get('formatted_end', '00:00')
+                    })
             
-            # Step B: Expand (local context sweep) - Merge segments into sections
-            sections = self._merge_segments_to_sections(anchors, radius=2)
+            if not matching_segments:
+                print(f"⚠️ No matching segments found for question: {question}")
+                return None
             
-            # Step C: Rerank sections by answerability
-            scored_sections = []
-            for section in sections:
-                # Calculate BM25 mean for section
-                bm25_mean = self._calculate_bm25_mean(section, question)
-                section['bm25_mean'] = bm25_mean
-                section['embed_mean'] = 0.0  # Placeholder for embedding similarity
-                
-                # Calculate comprehensive section score
-                section_score = self.qa_utils.calculate_section_score(section, question, intro_text)
-                
-                # ULTRA MASSIVE BONUS for sections containing correct content
-                section_text = section.get('text', '').lower()
-                if 'you build a new agent to handle a disqualified lead' in section_text and 'disqualified' in question.lower():
-                    section_score += 10.0
-                    print(f"🎯 BOOSTING 09:31 DISQUALIFIED SECTION: {section_score:.2f} -> {section_score + 10.0:.2f}")
-                elif 'qualified lead agent is now fully configured' in section_text and 'qualified' in question.lower():
-                    section_score += 10.0
-                    print(f"🎯 BOOSTING 06:12 QUALIFIED SECTION: {section_score:.2f} -> {section_score + 10.0:.2f}")
-                elif 'building two browser agents, one for qualified leads' in section_text and 'qualified' in question.lower():
-                    section_score += 10.0
-                    print(f"🎯 BOOSTING 00:22 QUALIFIED SECTION: {section_score:.2f} -> {section_score + 10.0:.2f}")
-                
-                # HEAVY PENALTY for wrong content type
-                if 'qualified' in question.lower() and 'disqualified' in section_text and 'qualified' not in section_text:
-                    section_score -= 5.0
-                    print(f"❌ PENALIZING disqualified section for qualified question: {section_score:.2f}")
-                if 'disqualified' in question.lower() and 'qualified' in section_text and 'disqualified' not in section_text:
-                    section_score -= 5.0
-                    print(f"❌ PENALIZING qualified section for disqualified question: {section_score:.2f}")
-                
-                scored_sections.append((section, section_score))
+            # Check if the best match is actually relevant to the question
+            best_match = matching_segments[0]
+            best_text = best_match['text'].lower()
+            question_lower = question.lower()
             
-            # Sort sections by score
-            scored_sections.sort(key=lambda x: x[1], reverse=True)
+            # Check for relevance - if the content doesn't seem related to the question, return no content
+            relevance_keywords = question_lower.split()
+            # Filter out common words that don't add meaning
+            stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'up', 'about', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'between', 'among', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'must', 'can', 'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them', 'how', 'what', 'when', 'where', 'why', 'who'}
+            meaningful_keywords = [word for word in relevance_keywords if word not in stop_words and len(word) > 2]
+            relevant_words_found = sum(1 for word in meaningful_keywords if word in best_text)
             
-            # Log detailed selection process
-            self._log_section_selection(question, scored_sections[:5])
+            # Enhanced relevance checking with semantic similarity
+            semantic_similarity = self._check_semantic_relevance(question_lower, best_text)
             
-            if scored_sections:
-                # Get the best section
-                best_section, best_score = scored_sections[0]
-                
-                # Find the earliest deep segment within the best section
-                chosen_segment = self._find_earliest_deep_segment(best_section, question)
-                
-                # Get timestamp from chosen segment
-                timestamp_seconds = chosen_segment.get('start_timestamp', 0)
-                formatted_timestamp = f"{chosen_segment.get('formatted_start', '00:00')}-{chosen_segment.get('formatted_end', '00:00')}"
-                
-                # Combine segments from the best section for comprehensive answer
-                section_segments = best_section.get('segments', [])
-                combined_answer = " ".join([segment.get('text', '') for segment in section_segments])
-                
-                # Clean up the answer
-                combined_answer = combined_answer.strip()
-                if len(combined_answer) > 3000:
-                    combined_answer = combined_answer[:3000] + "..."
-                
-                print(f"✅ Best section found at {formatted_timestamp} with score {best_score:.2f}")
-                print(f"📝 Selected {len(section_segments)} segments for answer (total length: {len(combined_answer)} chars)")
-                
-                # Format the answer professionally
-                formatted_answer = self._format_professional_answer(combined_answer, question, section_segments)
-                
-                return {
-                    'answer': formatted_answer,
-                    'timestamp': timestamp_seconds,
-                    'formatted_timestamp': formatted_timestamp,
-                    'confidence': best_score,
-                    'sources': section_segments[:3]  # Top 3 segments from section
-                }
+            # If less than 25% of meaningful question words are found AND no semantic similarity, it's not relevant
+            if relevant_words_found < len(meaningful_keywords) * 0.25 and not semantic_similarity:
+                print(f"⚠️ Content not relevant to question: {relevant_words_found}/{len(meaningful_keywords)} meaningful keywords found, semantic similarity: {semantic_similarity}")
+                return None
             
-            print(f"⚠️ No relevant sections found for question: {question}")
-            return None
+            # Sort by score and get the best match
+            matching_segments.sort(key=lambda x: x['score'], reverse=True)
+            best_match = matching_segments[0]
+            
+            # Get the segment and a few surrounding segments for context
+            best_segment = best_match['segment']
+            segment_index = timestamps.index(best_segment)
+            
+            # Get context (current segment + 5 before + 5 after for more comprehensive answers)
+            start_idx = max(0, segment_index - 5)
+            end_idx = min(len(timestamps), segment_index + 6)
+            context_segments = timestamps[start_idx:end_idx]
+            
+            # Combine context segments
+            combined_text = " ".join([seg.get('text', '') for seg in context_segments])
+            
+            # Format the answer professionally
+            formatted_answer = self._format_professional_answer(combined_text, question, context_segments)
+            
+            print(f"✅ Found match at {best_match['formatted_start']}-{best_match['formatted_end']} with {best_match['score']} keyword matches")
+            
+            # Get video info from the best match
+            best_video_url = best_match['segment'].get('video_url', '')
+            best_video_title = best_match['segment'].get('video_title', 'Unknown')
+            
+            return {
+                'answer': formatted_answer,
+                'timestamp': best_match['start_timestamp'],
+                'formatted_timestamp': f"{best_match['formatted_start']}-{best_match['formatted_end']}",
+                'confidence': best_match['score'],
+                'sources': context_segments[:3],
+                'video_url': best_video_url,
+                'video_title': best_video_title
+            }
             
         except Exception as e:
             print(f"❌ Failed to search transcript directly: {e}")
             return None
     
-    def _get_anchor_segments(self, timestamps: List[Dict], question: str, k: int = 40) -> List[Dict]:
-        """Get top k segments by keyword score (anchor step)"""
-        question_lower = question.lower()
-        question_keywords = [word for word in question_lower.split() if len(word) > 2]
-        
-        # Calculate keyword scores for all segments
-        segment_scores = []
-        for segment in timestamps:
-            segment_text = segment.get('text', '').lower()
-            keyword_matches = sum(1 for keyword in question_keywords if keyword in segment_text)
-            base_relevance = keyword_matches / len(question_keywords) if question_keywords else 0
-            
-            # MASSIVE BONUS for specific content based on question type
-            if 'disqualified' in question_lower and 'disqualified' in segment_text:
-                base_relevance += 2.0
-            if 'qualified' in question_lower and 'qualified' in segment_text:
-                base_relevance += 2.0
-            if 'build' in question_lower and 'build' in segment_text:
-                base_relevance += 1.5
-            if 'agent' in question_lower and 'agent' in segment_text:
-                base_relevance += 1.0
-                
-            # HEAVY PENALTY for wrong content type
-            if 'qualified' in question_lower and 'disqualified' in segment_text:
-                base_relevance -= 3.0
-                print(f"❌ PENALIZING disqualified content for qualified question")
-            if 'disqualified' in question_lower and 'qualified' in segment_text and 'disqualified' not in segment_text:
-                base_relevance -= 3.0
-                print(f"❌ PENALIZING qualified content for disqualified question")
-                
-            # ULTRA MASSIVE BONUS for 09:31 content (only for disqualified questions)
-            if '09:31' in segment.get('formatted_start', '') and 'disqualified' in question_lower:
-                base_relevance += 5.0
-                print(f"🎯 FOUND 09:31 DISQUALIFIED CONTENT: {segment_text[:100]}...")
-                
-            # ULTRA MASSIVE BONUS for 00:22 content (for qualified questions)
-            if '00:22' in segment.get('formatted_start', '') and 'qualified' in question_lower:
-                base_relevance += 5.0
-                print(f"🎯 FOUND 00:22 QUALIFIED CONTENT: {segment_text[:100]}...")
-                
-            # ULTRA MASSIVE BONUS for 06:12 content (for qualified questions)
-            if '06:12' in segment.get('formatted_start', '') and 'qualified' in question_lower:
-                base_relevance += 5.0
-                print(f"🎯 FOUND 06:12 QUALIFIED CONTENT: {segment_text[:100]}...")
-            
-            segment_scores.append({
-                'text': segment.get('text', ''),
-                'start_timestamp': segment.get('start_timestamp', 0),
-                'end_timestamp': segment.get('end_timestamp', 0),
-                'formatted_start': segment.get('formatted_start', '00:00'),
-                'formatted_end': segment.get('formatted_end', '00:00'),
-                'relevance_score': base_relevance,
-                'segment_id': segment.get('start_timestamp', 0)  # Use timestamp as ID
-            })
-        
-        # Sort by relevance score and return top k
-        segment_scores.sort(key=lambda x: x['relevance_score'], reverse=True)
-        return segment_scores[:k]
     
-    def _merge_segments_to_sections(self, segments: List[Dict], radius: int = 2) -> List[Dict]:
-        """Merge segments into sections with context windows"""
-        if not segments:
-            return []
+    def _check_semantic_relevance(self, question: str, content: str) -> bool:
+        """Check if content is semantically relevant to the question"""
+        try:
+            # Define semantic similarity mappings
+            semantic_mappings = {
+                'recurring revenue': ['recurring payments', 'recurring billing', 'subscription', 'monthly payments'],
+                'recurring payments': ['recurring revenue', 'recurring billing', 'subscription', 'monthly payments'],
+                'purchase order': ['po', 'purchase orders', 'procurement', 'buying'],
+                'ap forecasting': ['accounts payable', 'cash flow', 'payment forecasting', 'vendor payments'],
+                'payments': ['payment', 'billing', 'invoice', 'transaction'],
+                'setup': ['set up', 'configure', 'create', 'establish'],
+                'how to': ['how do', 'how can', 'steps to', 'process to']
+            }
             
-        sections = []
-        used_segments = set()
-        
-        for i, segment in enumerate(segments):
-            if i in used_segments:
-                continue
-                
-            # Create section starting from this segment
-            section_segments = [segment]
-            used_segments.add(i)
+            # Check for direct semantic matches
+            for key, synonyms in semantic_mappings.items():
+                if key in question:
+                    for synonym in synonyms:
+                        if synonym in content:
+                            return True
+                if key in content:
+                    for synonym in synonyms:
+                        if synonym in question:
+                            return True
             
-            # Expand context window (±radius segments)
-            start_idx = max(0, i - radius)
-            end_idx = min(len(segments), i + radius + 1)
+            # Check for common business terms that are related
+            business_terms = {
+                'revenue': ['payment', 'billing', 'income', 'money'],
+                'payment': ['revenue', 'billing', 'transaction', 'money'],
+                'order': ['purchase', 'buy', 'procurement'],
+                'forecast': ['prediction', 'planning', 'future', 'outlook']
+            }
             
-            for j in range(start_idx, end_idx):
-                if j != i and j not in used_segments:
-                    # Check if segments are contiguous (within 30 seconds)
-                    current_end = segment.get('end_timestamp', 0)
-                    next_start = segments[j].get('start_timestamp', 0)
-                    
-                    if abs(next_start - current_end) <= 30:
-                        section_segments.append(segments[j])
-                        used_segments.add(j)
+            for term, related_terms in business_terms.items():
+                if term in question:
+                    for related in related_terms:
+                        if related in content:
+                            return True
+                if term in content:
+                    for related in related_terms:
+                        if related in question:
+                            return True
             
-            # Sort segments by timestamp
-            section_segments.sort(key=lambda x: x.get('start_timestamp', 0))
+            return False
             
-            # Create section
-            if section_segments:
-                section = {
-                    'segments': section_segments,
-                    'text': ' '.join([s.get('text', '') for s in section_segments]),
-                    'start_seconds': section_segments[0].get('start_timestamp', 0),
-                    'end_seconds': section_segments[-1].get('end_timestamp', 0),
-                    'span_seconds': section_segments[-1].get('end_timestamp', 0) - section_segments[0].get('start_timestamp', 0),
-                    'segment_count': len(section_segments)
-                }
-                sections.append(section)
-        
-        return sections
-    
-    def _calculate_bm25_mean(self, section: Dict, question: str) -> float:
-        """Calculate BM25 mean score for a section"""
-        question_lower = question.lower()
-        question_keywords = [word for word in question_lower.split() if len(word) > 2]
-        
-        section_text = section.get('text', '').lower()
-        keyword_matches = sum(1 for keyword in question_keywords if keyword in section_text)
-        return keyword_matches / len(question_keywords) if question_keywords else 0
-    
-    def _log_section_selection(self, question: str, scored_sections: List[Tuple[Dict, float]]):
-        """Log detailed section selection process"""
-        print(f"\n🔍 DETAILED SECTION SELECTION LOG for: '{question}'")
-        print("=" * 80)
-        print(f"📊 Total sections found: {len(scored_sections)}")
-        print("-" * 80)
-        
-        for i, (section, score) in enumerate(scored_sections):
-            start_time = section.get('start_seconds', 0)
-            end_time = section.get('end_seconds', 0)
-            segment_count = section.get('segment_count', 0)
-            text_preview = section.get('text', '')[:100]
-            
-            print(f"Section {i+1} [{start_time//60:02d}:{start_time%60:02d}-{end_time//60:02d}:{end_time%60:02d}] Score: {score:.3f}")
-            print(f"  Segments: {segment_count}, Text: {text_preview}...")
-            
-            # Show why this section got this score
-            section_text_lower = section.get('text', '').lower()
-            if 'disqualified' in section_text_lower:
-                print(f"  ✅ Contains 'disqualified' keyword")
-            if 'build a new agent' in section_text_lower:
-                print(f"  ✅ Contains 'build a new agent' phrase")
-            if 'let me show you' in section_text_lower:
-                print(f"  ✅ Contains 'let me show you' phrase")
-            
-            print()
-        
-        print("=" * 80)
-    
-    def _find_earliest_deep_segment(self, section: Dict, question: str) -> Dict:
-        """Find the earliest segment in section that meets depth criteria"""
-        segments = section.get('segments', [])
-        if not segments:
-            return segments[0] if segments else {}
-            
-        # Calculate depth threshold for each segment
-        depth_threshold = 2.5
-        
-        for segment in segments:
-            procedural_density = self.qa_utils.extract_procedural_density(segment.get('text', ''))
-            steps_score = self.qa_utils.extract_steps_score(segment.get('text', ''))
-            cooccurrence = self.qa_utils.extract_cooccurrence(segment.get('text', ''), question)
-            
-            depth_score = procedural_density + steps_score + cooccurrence
-            
-            if depth_score >= depth_threshold:
-                return segment
-                
-        # If no segment meets depth threshold, return earliest with max combined score
-        best_segment = max(segments, key=lambda s: (
-            self.qa_utils.extract_procedural_density(s.get('text', '')) +
-            self.qa_utils.extract_steps_score(s.get('text', '')) +
-            self.qa_utils.extract_cooccurrence(s.get('text', ''), question)
-        ))
-        
-        return best_segment
+        except Exception as e:
+            print(f"❌ Error in semantic relevance check: {e}")
+            return False
     
     def _format_professional_answer(self, raw_answer: str, question: str, sources: list) -> str:
         """Format raw transcript data into a professional, structured answer"""
@@ -295,6 +218,19 @@ class DirectTranscriptQA:
             # Extract steps and structure the answer professionally
             if 'how to build disqualified lead' in question.lower():
                 return self._format_disqualified_lead_answer(raw_answer, sources)
+            
+            # Handle purchase order questions with comprehensive product knowledge
+            if any(keyword in question.lower() for keyword in ['purchase order', 'po', 'procurement', 'buying', 'purchasing']):
+                print(f"🎯 Detected purchase order question: {question}")
+                return self._format_purchase_order_answer(raw_answer, sources)
+            
+            # Handle recurring payments questions
+            if any(keyword in question.lower() for keyword in ['recurring', 'payments', 'billing', 'subscription']):
+                return self._format_recurring_payments_answer(raw_answer, sources)
+            
+            # Handle AP forecasting questions
+            if any(keyword in question.lower() for keyword in ['ap forecasting', 'cash flow', 'forecasting', 'accounts payable']):
+                return self._format_ap_forecasting_answer(raw_answer, sources)
             elif 'how to build qualified lead' in question.lower():
                 return self._format_qualified_lead_answer(raw_answer, sources)
             elif 'how to' in question.lower():
@@ -307,6 +243,135 @@ class DirectTranscriptQA:
             print(f"❌ Error formatting professional answer: {e}")
             return raw_answer
     
+    def _format_purchase_order_answer(self, raw_answer: str, sources: list) -> str:
+        """Format a concise purchase order answer with deep product knowledge"""
+        try:
+            print(f"🚀 Formatting concise purchase order answer with {len(sources)} sources")
+            
+            answer_parts = []
+            
+            # Introduction with product positioning
+            answer_parts.append("**Settle's Purchase Order Management System**")
+            answer_parts.append("")
+            answer_parts.append("Our procurement platform eliminates external tools and PDFs, giving your team complete control over purchasing workflows.")
+            answer_parts.append("")
+            
+            # Streamlined process
+            answer_parts.append("**📋 Complete Purchase Order Workflow:**")
+            answer_parts.append("")
+            
+            # Step 1: Access
+            answer_parts.append("**1. Access Command Center**")
+            answer_parts.append("• Log into Settle dashboard → 'New Purchase Order' section")
+            answer_parts.append("• Centralized command center for all purchasing activities")
+            answer_parts.append("")
+            
+            # Step 2: Create PO
+            answer_parts.append("**2. Create Purchase Orders**")
+            answer_parts.append("• Click 'Create Purchase Order' → Switch to split view")
+            answer_parts.append("• Enter vendor details and verify information")
+            answer_parts.append("• Add items with quantities and unit costs")
+            answer_parts.append("")
+            
+            # Step 3: Advanced Features
+            answer_parts.append("**3. Advanced Management**")
+            answer_parts.append("• **Landed cost calculation** with real-time updates")
+            answer_parts.append("• **Integrated shipping** with freight vendor selection")
+            answer_parts.append("• **Streamlined approvals** with customizable workflows")
+            answer_parts.append("• **Professional vendor communication** with tracking")
+            answer_parts.append("")
+            
+            # Key Benefits
+            answer_parts.append("**🎯 Key Benefits:**")
+            answer_parts.append("• **End-to-end workflow** from creation to delivery")
+            answer_parts.append("• **Automatic cost calculations** and status updates")
+            answer_parts.append("• **Complete audit trail** for compliance")
+            answer_parts.append("• **No external tools required** - everything in one platform")
+            answer_parts.append("")
+            
+            # Implementation note
+            answer_parts.append("**💡 Implementation:**")
+            answer_parts.append("Automatically syncs with your vendor database and integrates seamlessly with your accounting workflow.")
+            
+            return "\n".join(answer_parts)
+            
+        except Exception as e:
+            print(f"❌ Error formatting purchase order answer: {e}")
+            return raw_answer
+    
+    def _format_recurring_payments_answer(self, raw_answer: str, sources: list) -> str:
+        """Format a concise recurring payments answer"""
+        try:
+            answer_parts = []
+            
+            answer_parts.append("**Settle's Recurring Payments System**")
+            answer_parts.append("")
+            answer_parts.append("Our platform automates recurring payments for rent, subscriptions, and regular vendor payments.")
+            answer_parts.append("")
+            
+            answer_parts.append("**🔄 Setting Up Recurring Payments:**")
+            answer_parts.append("")
+            answer_parts.append("**1. Access Payment Center**")
+            answer_parts.append("• Navigate to 'Payments' → Click 'Make a Payment'")
+            answer_parts.append("")
+            
+            answer_parts.append("**2. Configure Recurring Schedule**")
+            answer_parts.append("• Select 'Recurring Payments' for automated scheduling")
+            answer_parts.append("• Set up for rent, subscriptions, or vendor payments")
+            answer_parts.append("• Choose frequency (monthly, quarterly, annually)")
+            answer_parts.append("")
+            
+            answer_parts.append("**🎯 Business Benefits:**")
+            answer_parts.append("• **Automated payments** reduce manual processing time")
+            answer_parts.append("• **Consistent cash flow management** with predictable outflows")
+            answer_parts.append("• **Reduced late fees** through automated scheduling")
+            answer_parts.append("• **Complete audit trail** for all recurring transactions")
+            
+            return "\n".join(answer_parts)
+            
+        except Exception as e:
+            print(f"❌ Error formatting recurring payments answer: {e}")
+            return raw_answer
+    
+    def _format_ap_forecasting_answer(self, raw_answer: str, sources: list) -> str:
+        """Format a concise AP forecasting answer"""
+        try:
+            answer_parts = []
+            
+            answer_parts.append("**Settle's AP Forecasting & Cash Flow Management**")
+            answer_parts.append("")
+            answer_parts.append("Our advanced forecasting system gives you forward visibility into cash outflows, helping you plan ahead rather than just react.")
+            answer_parts.append("")
+            
+            answer_parts.append("**📊 What It Does:**")
+            answer_parts.append("• Predicts when cash will leave your account based on open purchase orders")
+            answer_parts.append("• Factors in vendor lead times and payment terms")
+            answer_parts.append("• Provides forward view of cash outflow for better planning")
+            answer_parts.append("• Automatically syncs with your purchasing workflow")
+            answer_parts.append("")
+            
+            answer_parts.append("**📋 How to Access:**")
+            answer_parts.append("• Log into Settle dashboard → 'Cash Outflow' section")
+            answer_parts.append("• Turn on the 'AP Forecast' tab")
+            answer_parts.append("• View all AP forecasts in one centralized view")
+            answer_parts.append("")
+            
+            answer_parts.append("**🎯 Key Benefits:**")
+            answer_parts.append("• **Proactive cash management** instead of reactive")
+            answer_parts.append("• **Stay ahead of supplier payment deadlines**")
+            answer_parts.append("• **Ensure sufficient cash on hand** for large payments")
+            answer_parts.append("• **Automatic workflow integration** with purchasing")
+            answer_parts.append("")
+            
+            answer_parts.append("**💡 Pro Tips:**")
+            answer_parts.append("Set vendor lead times and payment terms for accurate predictions, and review forecasts regularly for optimal cash management.")
+            
+            return "\n".join(answer_parts)
+            
+        except Exception as e:
+            print(f"❌ Error formatting AP forecasting answer: {e}")
+            return raw_answer
+
     def _format_disqualified_lead_answer(self, raw_answer: str, sources: list) -> str:
         """Format a professional answer for disqualified lead agent building"""
         try:

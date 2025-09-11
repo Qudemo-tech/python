@@ -280,6 +280,148 @@ class GeminiTranscriptionProcessor:
                     logger.info(f"    #{i+1}: [NO TIMESTAMP] {t}")
         except Exception:
             pass
+
+    def _log_raw_gemini_data(self, video_url: str, raw_response: dict, transcription_text: str):
+        """Log raw data from Gemini API response before processing"""
+        try:
+            logger.info("=" * 80)
+            logger.info("🔍 RAW GEMINI DATA LOGGING - BEFORE CHUNKING")
+            logger.info("=" * 80)
+            logger.info(f"📹 Video URL: {video_url}")
+            logger.info(f"📊 Raw Response Keys: {list(raw_response.keys())}")
+            
+            # Log response structure
+            if "candidates" in raw_response:
+                candidates = raw_response["candidates"]
+                logger.info(f"📝 Number of candidates: {len(candidates)}")
+                
+                for i, candidate in enumerate(candidates):
+                    logger.info(f"  Candidate {i+1}:")
+                    if "content" in candidate:
+                        content = candidate["content"]
+                        logger.info(f"    Content keys: {list(content.keys())}")
+                        
+                        if "parts" in content:
+                            parts = content["parts"]
+                            logger.info(f"    Number of parts: {len(parts)}")
+                            
+                            for j, part in enumerate(parts):
+                                logger.info(f"      Part {j+1} keys: {list(part.keys())}")
+                                if "text" in part:
+                                    text_length = len(part["text"])
+                                    logger.info(f"      Text length: {text_length} characters")
+                                    
+                                    # Log first 500 characters of raw text
+                                    raw_text_preview = part["text"][:500]
+                                    logger.info(f"      Raw text preview (first 500 chars):")
+                                    logger.info(f"      {raw_text_preview}")
+                                    
+                                    # Log last 500 characters of raw text
+                                    if text_length > 500:
+                                        raw_text_end = part["text"][-500:]
+                                        logger.info(f"      Raw text preview (last 500 chars):")
+                                        logger.info(f"      {raw_text_end}")
+            
+            # Log transcription text details
+            logger.info(f"📝 Processed Transcription Length: {len(transcription_text)} characters")
+            logger.info(f"📝 Word Count: {len(transcription_text.split())}")
+            
+            # Log transcription preview
+            transcription_preview = transcription_text[:1000]
+            logger.info(f"📝 Transcription preview (first 1000 chars):")
+            logger.info(f"{transcription_preview}")
+            
+            if len(transcription_text) > 1000:
+                transcription_end = transcription_text[-1000:]
+                logger.info(f"📝 Transcription preview (last 1000 chars):")
+                logger.info(f"{transcription_end}")
+            
+            # Log any metadata from response
+            if "usageMetadata" in raw_response:
+                usage = raw_response["usageMetadata"]
+                logger.info(f"📊 Usage Metadata: {usage}")
+            
+            logger.info("=" * 80)
+            logger.info("✅ RAW GEMINI DATA LOGGING COMPLETE")
+            logger.info("=" * 80)
+            
+        except Exception as e:
+            logger.error(f"❌ Error logging raw Gemini data: {e}")
+
+    def _log_chunked_data(self, video_url: str, chunks: List[Dict], transcription_text: str):
+        """Log processed chunks after chunking"""
+        try:
+            logger.info("=" * 80)
+            logger.info("🔍 CHUNKED DATA LOGGING - AFTER CHUNKING")
+            logger.info("=" * 80)
+            logger.info(f"📹 Video URL: {video_url}")
+            logger.info(f"📊 Total Chunks Created: {len(chunks)}")
+            logger.info(f"📝 Original Transcription Length: {len(transcription_text)} characters")
+            
+            # Log chunk statistics
+            total_chunk_text_length = sum(len(chunk.get('text', '')) for chunk in chunks)
+            avg_chunk_length = total_chunk_text_length / len(chunks) if chunks else 0
+            
+            logger.info(f"📊 Chunk Statistics:")
+            logger.info(f"  Total chunk text length: {total_chunk_text_length} characters")
+            logger.info(f"  Average chunk length: {avg_chunk_length:.1f} characters")
+            logger.info(f"  Text coverage: {(total_chunk_text_length / len(transcription_text) * 100):.1f}%")
+            
+            # Log timestamp information
+            chunks_with_timestamps = [c for c in chunks if c.get('start', 0) > 0 or c.get('end', 0) > 0]
+            logger.info(f"📊 Timestamp Information:")
+            logger.info(f"  Chunks with timestamps: {len(chunks_with_timestamps)}/{len(chunks)}")
+            
+            if chunks_with_timestamps:
+                min_start = min(c.get('start', 0) for c in chunks_with_timestamps)
+                max_end = max(c.get('end', 0) for c in chunks_with_timestamps)
+                logger.info(f"  Time range: {min_start:.2f}s - {max_end:.2f}s")
+                logger.info(f"  Total duration: {max_end - min_start:.2f}s")
+            
+            # Log detailed chunk information
+            logger.info(f"📝 Detailed Chunk Information:")
+            for i, chunk in enumerate(chunks[:10]):  # Log first 10 chunks
+                text = chunk.get('text', '')
+                start = chunk.get('start', 0)
+                end = chunk.get('end', 0)
+                duration = end - start
+                
+                logger.info(f"  Chunk {i+1}:")
+                logger.info(f"    Text length: {len(text)} characters")
+                logger.info(f"    Word count: {len(text.split())}")
+                logger.info(f"    Time range: {start:.2f}s - {end:.2f}s (duration: {duration:.2f}s)")
+                logger.info(f"    Text preview: {text[:200]}...")
+                
+                if i < len(chunks) - 1:
+                    logger.info("    ---")
+            
+            if len(chunks) > 10:
+                logger.info(f"  ... and {len(chunks) - 10} more chunks")
+            
+            # Log chunk quality metrics
+            logger.info(f"📊 Chunk Quality Metrics:")
+            chunk_lengths = [len(chunk.get('text', '')) for chunk in chunks]
+            if chunk_lengths:
+                min_length = min(chunk_lengths)
+                max_length = max(chunk_lengths)
+                logger.info(f"  Min chunk length: {min_length} characters")
+                logger.info(f"  Max chunk length: {max_length} characters")
+                
+                # Check for very short or very long chunks
+                short_chunks = [c for c in chunks if len(c.get('text', '')) < 100]
+                long_chunks = [c for c in chunks if len(c.get('text', '')) > 1000]
+                
+                if short_chunks:
+                    logger.warning(f"  ⚠️ {len(short_chunks)} chunks are very short (<100 chars)")
+                if long_chunks:
+                    logger.warning(f"  ⚠️ {len(long_chunks)} chunks are very long (>1000 chars)")
+            
+            logger.info("=" * 80)
+            logger.info("✅ CHUNKED DATA LOGGING COMPLETE")
+            logger.info("=" * 80)
+            
+        except Exception as e:
+            logger.error(f"❌ Error logging chunked data: {e}")
     
     def is_youtube_url(self, url: str) -> bool:
         """Check if URL is a YouTube URL"""
@@ -639,6 +781,9 @@ class GeminiTranscriptionProcessor:
                 if "candidates" in result and len(result["candidates"]) > 0:
                     transcription_text = result["candidates"][0]["content"]["parts"][0]["text"]
                     logger.info("✅ Gemini API successful - Direct approach")
+                    
+                    # Log raw Gemini data before processing
+                    self._log_raw_gemini_data(video_url, result, transcription_text)
                     
                     result_dict = {
                         "title": "YouTube Video",
@@ -1051,6 +1196,7 @@ class GeminiTranscriptionProcessor:
         chunk_size: int = 300,   # Unified chunk size for Q&A optimization
         overlap: int = 50,       # Minimal overlap for cleaner boundaries
         max_chunk_duration: int = 10,  # Unified max duration for optimal timestamp precision
+        video_url: str = "",     # Video URL for logging purposes
     ) -> List[Dict]:
         """
         Create timestamped chunks from transcription with configurable precision.
@@ -1163,6 +1309,10 @@ class GeminiTranscriptionProcessor:
                         logger.warning(f"⚠️ First chunk is small ({len(chunk['text'])} chars)")
             
             logger.info(f"📄 Created {len(filtered_chunks)} substantial chunks from {len(chunks)} original chunks")
+            
+            # Log chunked data after processing
+            self._log_chunked_data(video_url, filtered_chunks, transcription)
+            
             return filtered_chunks
 
         # Fallback: simple text chunking without timestamps
@@ -1262,6 +1412,10 @@ class GeminiTranscriptionProcessor:
                 })
         
         logger.info(f"📄 Created {len(final_chunks)} chunks from transcription")
+        
+        # Log chunked data after processing
+        self._log_chunked_data(video_url, final_chunks, transcription)
+        
         return final_chunks
     
     def create_embeddings(self, texts: List[str]) -> List[List[float]]:
@@ -1545,7 +1699,7 @@ class GeminiTranscriptionProcessor:
             logger.info(f"✅ Transcription extracted: {len(transcription_data.get('transcription', ''))} characters")
             
             # Create chunks from transcription
-            chunks = self.chunk_transcription(transcription_data.get('transcription', ''), segments=None)
+            chunks = self.chunk_transcription(transcription_data.get('transcription', ''), segments=None, video_url=video_url)
             if not chunks:
                 logger.error("❌ Failed to create chunks from transcription")
                 return {

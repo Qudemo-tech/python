@@ -275,6 +275,9 @@ class EnhancedVideoChunkingProcessor:
             
             logger.info(f"✅ Created {len(chunks)} segment-safe chunks")
             
+            # Log chunked data after processing
+            self._log_chunked_data(video_url, chunks, topic_segments)
+            
             # Phase 3: Store Chunks in Pinecone
             phase_start = time.time()
             logger.info("💾 Phase 3: Store Chunks in Pinecone")
@@ -382,6 +385,9 @@ class EnhancedVideoChunkingProcessor:
                     topics_json = result["candidates"][0]["content"]["parts"][0]["text"]
                     topics = json.loads(topics_json)
                     
+                    # Log raw Gemini response data before processing
+                    self._log_raw_gemini_data(video_url, result, topics_json)
+                    
                     logger.info(f"✅ Extracted {len(topics)} topics from full video")
                     return topics
                 else:
@@ -394,6 +400,124 @@ class EnhancedVideoChunkingProcessor:
         except Exception as e:
             logger.error(f"❌ Direct topic analysis failed: {e}")
             return []
+    
+    def _log_raw_gemini_data(self, video_url: str, raw_response: dict, topics_json: str):
+        """
+        Log raw Gemini API response data before chunking
+        
+        Args:
+            video_url: Video URL being processed
+            raw_response: Complete Gemini API response
+            topics_json: Raw topics JSON string
+        """
+        try:
+            logger.info("=" * 80)
+            logger.info("🔍 RAW GEMINI API RESPONSE DATA (BEFORE CHUNKING)")
+            logger.info("=" * 80)
+            logger.info(f"📹 Video URL: {video_url}")
+            logger.info(f"📊 Response Status: {raw_response.get('status', 'Unknown')}")
+            
+            # Log response structure
+            logger.info(f"📋 Response Keys: {list(raw_response.keys())}")
+            
+            # Log candidates info
+            if "candidates" in raw_response:
+                candidates = raw_response["candidates"]
+                logger.info(f"🎯 Candidates Count: {len(candidates)}")
+                
+                if len(candidates) > 0:
+                    candidate = candidates[0]
+                    logger.info(f"📝 Candidate Keys: {list(candidate.keys())}")
+                    
+                    if "content" in candidate:
+                        content = candidate["content"]
+                        logger.info(f"📄 Content Keys: {list(content.keys())}")
+                        
+                        if "parts" in content and len(content["parts"]) > 0:
+                            part = content["parts"][0]
+                            logger.info(f"🔤 Part Keys: {list(part.keys())}")
+                            
+                            if "text" in part:
+                                text_length = len(part["text"])
+                                logger.info(f"📏 Raw Text Length: {text_length} characters")
+                                logger.info(f"📊 Raw Text Word Count: {len(part['text'].split())} words")
+                                
+                                # Log first and last 500 characters
+                                text = part["text"]
+                                if len(text) > 1000:
+                                    logger.info(f"🔤 Raw Text Preview (First 500 chars): {text[:500]}...")
+                                    logger.info(f"🔤 Raw Text Preview (Last 500 chars): ...{text[-500:]}")
+                                else:
+                                    logger.info(f"🔤 Raw Text: {text}")
+            
+            # Log usage information if available
+            if "usageMetadata" in raw_response:
+                usage = raw_response["usageMetadata"]
+                logger.info(f"📈 Usage Metadata: {usage}")
+            
+            # Log topics JSON structure
+            logger.info(f"📋 Topics JSON Length: {len(topics_json)} characters")
+            logger.info(f"📊 Topics JSON Preview (First 500 chars): {topics_json[:500]}...")
+            
+            logger.info("=" * 80)
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to log raw Gemini data: {e}")
+    
+    def _log_chunked_data(self, video_url: str, chunks: List[Dict], topics_data: List[Dict]):
+        """
+        Log processed chunks data after chunking
+        
+        Args:
+            video_url: Video URL being processed
+            chunks: List of processed chunks
+            topics_data: Original topics data from Gemini
+        """
+        try:
+            logger.info("=" * 80)
+            logger.info("🔍 PROCESSED CHUNKS DATA (AFTER CHUNKING)")
+            logger.info("=" * 80)
+            logger.info(f"📹 Video URL: {video_url}")
+            logger.info(f"📊 Total Chunks Created: {len(chunks)}")
+            logger.info(f"📊 Original Topics Count: {len(topics_data)}")
+            
+            if chunks:
+                # Calculate chunk statistics
+                chunk_lengths = [len(chunk.get('text', '')) for chunk in chunks]
+                min_length = min(chunk_lengths) if chunk_lengths else 0
+                max_length = max(chunk_lengths) if chunk_lengths else 0
+                avg_length = sum(chunk_lengths) / len(chunk_lengths) if chunk_lengths else 0
+                
+                logger.info(f"📏 Chunk Length Stats: Min={min_length}, Max={max_length}, Avg={avg_length:.1f}")
+                
+                # Count chunks with timestamps
+                chunks_with_timestamps = sum(1 for chunk in chunks if chunk.get('start', 0) > 0 or chunk.get('end', 0) > 0)
+                logger.info(f"⏰ Chunks with Timestamps: {chunks_with_timestamps}/{len(chunks)}")
+                
+                # Log first 10 chunks as preview
+                logger.info("📋 Chunk Preview (First 10 chunks):")
+                for i, chunk in enumerate(chunks[:10]):
+                    start = chunk.get('start', 0)
+                    end = chunk.get('end', 0)
+                    text_preview = chunk.get('text', '')[:100].replace('\n', ' ')
+                    logger.info(f"  #{i+1}: [{start:.1f}s-{end:.1f}s] {text_preview}...")
+                
+                if len(chunks) > 10:
+                    logger.info(f"  ... and {len(chunks) - 10} more chunks")
+            
+            # Log topics data structure
+            if topics_data:
+                logger.info("📋 Topics Data Structure:")
+                for i, topic in enumerate(topics_data[:5]):  # First 5 topics
+                    logger.info(f"  Topic #{i+1}: {topic.get('topic', 'Unknown')} ({topic.get('start', 0)}s-{topic.get('end', 0)}s)")
+                
+                if len(topics_data) > 5:
+                    logger.info(f"  ... and {len(topics_data) - 5} more topics")
+            
+            logger.info("=" * 80)
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to log chunked data: {e}")
     
     def _get_full_video_topic_analysis_prompt(self) -> str:
         """

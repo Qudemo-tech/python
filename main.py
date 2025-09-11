@@ -1344,6 +1344,51 @@ def _generate_processing_status_message(successful_content: Dict, processing_err
     
     return "\n".join(messages)
 
+# Debug endpoint to examine stored chunks
+@app.get("/debug-chunks/{company_name}/{qudemo_id}")
+async def debug_chunks(company_name: str, qudemo_id: str):
+    """Debug endpoint to examine what chunks are stored for a qudemo"""
+    try:
+        if not enhanced_qa_processor:
+            return {"success": False, "error": "Enhanced Q&A processor not initialized"}
+        
+        # Get the Pinecone index
+        namespace = f"{company_name}-{qudemo_id}"
+        index = enhanced_qa_processor.pc.Index(enhanced_qa_processor.indexes['video'])
+        
+        # Query all chunks in the namespace
+        query_response = index.query(
+            namespace=namespace,
+            vector=[0.0] * 1536,  # Dummy vector
+            top_k=100,
+            include_metadata=True
+        )
+        
+        chunks_info = []
+        for match in query_response.matches:
+            metadata = match.metadata
+            chunks_info.append({
+                'id': match.id,
+                'score': match.score,
+                'segment_topic': metadata.get('segment_topic', 'Unknown'),
+                'segment_summary': metadata.get('segment_summary', ''),
+                'start_timestamp': metadata.get('start_timestamp', 0),
+                'end_timestamp': metadata.get('end_timestamp', 0),
+                'quality_score': metadata.get('quality_score', 0),
+                'text_preview': metadata.get('text', '')[:200] + '...' if metadata.get('text') else ''
+            })
+        
+        return {
+            "success": True,
+            "namespace": namespace,
+            "total_chunks": len(chunks_info),
+            "chunks": chunks_info
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Debug chunks error: {e}")
+        return {"success": False, "error": str(e)}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=5001)

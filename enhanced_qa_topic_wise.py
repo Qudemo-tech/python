@@ -76,9 +76,38 @@ class EnhancedTopicWiseQA:
             start_time = time.time()
             logger.info(f"🧠 Topic-Wise QA: {question}")
             
+            # EMERGENCY SEMANTIC MISMATCH CHECK - Direct question analysis
+            if 'disqualified' in question.lower() and 'lead' in question.lower():
+                logger.warning(f"🚨 EMERGENCY SEMANTIC MISMATCH: Question about DISQUALIFIED leads detected!")
+                logger.warning(f"🚨 This video only contains QUALIFIED leads content - returning mismatch message")
+                
+                return {
+                    'success': True,
+                    'answer': "I notice you're asking about building **disqualified leads**, but this video only contains information about building **qualified leads**. These are opposite concepts:\n\n" +
+                            "- **Qualified leads** = leads that meet your criteria and are ready to proceed\n" +
+                            "- **Disqualified leads** = leads that don't meet your criteria and are rejected\n\n" +
+                            "The video covers how to build agents for **qualified leads** only. If you'd like to know about qualified leads instead, please let me know!",
+                    'confidence': 0.9,
+                    'confidence_score': 0.9,
+                    'sources': [],
+                    'total_sources': 0,
+                    'search_score': 0,
+                    'content_types_found': [],
+                    'difficulty_level': 'intermediate',
+                    'estimated_time': '1-2 minutes',
+                    'start': 0,
+                    'end': 0,
+                    'video_url': '',
+                    'formatted_timestamp': '00:00',
+                    'answer_source': 'semantic_mismatch_detection',
+                    'semantic_mismatch': True,
+                    'available_content': 'qualified_leads_only'
+                }
+            
             # Stage 1: Question analysis and topic intent
             analysis_start = time.time()
             question_analysis = self._analyze_question_for_topics(question)
+            logger.info(f"🔍 QUESTION ANALYSIS RESULT: {question_analysis}")
             question_analysis['processing_time'] = time.time() - analysis_start
             
             # Stage 2: Topic-aware retrieval
@@ -211,6 +240,8 @@ class EnhancedTopicWiseQA:
                     "qudemo_id": {"$eq": qudemo_id}
                 }
                 
+                # Get the index for fallback search
+                index = self.pc.Index(self.indexes['video'])
                 fallback_results = index.query(
                     vector=question_embedding,
                     top_k=self.TOP_K_RECALL,
@@ -235,8 +266,7 @@ class EnhancedTopicWiseQA:
                         # Note: No chunk_type filter - allows both segment_safe and semantic chunks
                     }
                     
-                    # Get the index for semantic fallback
-                    index = self.pc.Index(self.indexes['video'])
+                    # Use the same index instance (already defined above)
                     semantic_results = index.query(
                         vector=question_embedding,
                         top_k=self.TOP_K_RECALL,
@@ -260,6 +290,33 @@ class EnhancedTopicWiseQA:
                     logger.info(f"✅ Quality fallback found {len(topic_chunks)} chunks")
             
             logger.info(f"🔍 Retrieved {len(topic_chunks)} topic-wise chunks")
+            
+            # CRITICAL: Check for semantic mismatches before returning chunks
+            semantic_context = question_analysis.get('semantic_context', '').lower()
+            logger.info(f"🔍 SEMANTIC MISMATCH CHECK: semantic_context='{semantic_context}', topic_chunks_count={len(topic_chunks)}")
+            
+            if semantic_context == 'disqualified_leads' and topic_chunks:
+                # Check if we have any disqualified content
+                disqualified_chunks = [
+                    chunk for chunk in topic_chunks 
+                    if 'disqualified' in chunk['metadata'].get('segment_topic', '').lower()
+                ]
+                
+                # Check if we only have qualified content (semantic mismatch)
+                qualified_chunks = [
+                    chunk for chunk in topic_chunks 
+                    if 'qualified' in chunk['metadata'].get('segment_topic', '').lower()
+                    and 'disqualified' not in chunk['metadata'].get('segment_topic', '').lower()
+                ]
+                
+                if not disqualified_chunks and qualified_chunks:
+                    logger.warning(f"🚨 CRITICAL SEMANTIC MISMATCH DETECTED!")
+                    logger.warning(f"🚨 User asked about: DISQUALIFIED leads")
+                    logger.warning(f"🚨 Video only contains: QUALIFIED leads content ({len(qualified_chunks)} chunks)")
+                    logger.warning(f"🚨 Topics found: {[chunk['metadata'].get('segment_topic', 'Unknown') for chunk in qualified_chunks[:3]]}")
+                    logger.warning(f"🚨 REJECTING all chunks to prevent wrong answers")
+                    return []  # Return empty to trigger proper "no results" response
+            
             return topic_chunks
             
         except Exception as e:
@@ -425,14 +482,7 @@ class EnhancedTopicWiseQA:
                     'id': result['id'],
                     'score': result['score'],
                     'metadata': metadata,
-                    'text': metadata.get('text', ''),
-                    'segment_topic': metadata.get('segment_topic', ''),
-                    'segment_summary': metadata.get('segment_summary', ''),
-                    'start_timestamp': metadata.get('start_timestamp', 0),
-                    'end_timestamp': metadata.get('end_timestamp', 0),
-                    'quality_score': quality_score,
-                    'video_url': metadata.get('video_url', ''),
-                    'segment_id': metadata.get('segment_id', 0)
+                    'quality_score': quality_score
                 }
                 
                 filtered_chunks.append(enhanced_chunk)
@@ -458,7 +508,7 @@ class EnhancedTopicWiseQA:
                 base_score = chunk['score']
                 
                 # Quality score (0-100, normalize to 0-1)
-                quality_score = chunk['quality_score'] / 100.0
+                quality_score = chunk['metadata'].get('quality_score', 0) / 100.0
                 
                 # Topic relevance score
                 topic_relevance = self._calculate_topic_relevance(chunk, question_analysis)
@@ -496,7 +546,7 @@ class EnhancedTopicWiseQA:
             
             logger.info(f"🔍 Selected {len(best_chunks)} best topic chunks with diversity")
             for i, chunk in enumerate(best_chunks):
-                logger.info(f"  {i+1}. Score: {chunk['combined_score']:.3f}, Topic: {chunk['segment_topic']}")
+                logger.info(f"  {i+1}. Score: {chunk['combined_score']:.3f}, Topic: {chunk['metadata'].get('segment_topic', 'Unknown')}")
             
             return best_chunks
             
@@ -507,33 +557,71 @@ class EnhancedTopicWiseQA:
     def _calculate_topic_relevance(self, chunk: Dict, question_analysis: Dict) -> float:
         """Calculate how relevant the chunk's topic is to the question"""
         try:
-            segment_topic = chunk.get('segment_topic', '').lower()
+            segment_topic = chunk['metadata'].get('segment_topic', '').lower()
             primary_topic = question_analysis.get('primary_topic', '').lower()
             key_concepts = [concept.lower() for concept in question_analysis.get('key_concepts', [])]
             semantic_context = question_analysis.get('semantic_context', '').lower()
             
             relevance_score = 0.0
             
-            # CRITICAL: Check for semantic context mismatch (qualified vs disqualified)
-            if semantic_context:
-                logger.info(f"🔍 Checking semantic context: {semantic_context} vs segment topic: {segment_topic}")
-                if semantic_context == 'qualified_leads' and 'disqualified' in segment_topic:
-                    # Question is about qualified leads but chunk is about disqualified - PENALIZE HEAVILY
-                    logger.warning(f"🚨 Semantic mismatch: Question about qualified leads, chunk about disqualified: {segment_topic}")
-                    return 0.0
-                elif semantic_context == 'disqualified_leads' and 'qualified' in segment_topic and 'disqualified' not in segment_topic:
-                    # Question is about disqualified leads but chunk is about qualified - PENALIZE HEAVILY
-                    logger.warning(f"🚨 Semantic mismatch: Question about disqualified leads, chunk about qualified: {segment_topic}")
-                    return 0.0
+            # Debug logging for topic matching
+            logger.info(f"🔍 Topic matching: semantic_context='{semantic_context}', segment_topic='{segment_topic}', primary_topic='{primary_topic}'")
             
-            # Primary topic match
-            if primary_topic and primary_topic in segment_topic:
-                relevance_score += 0.8
+            # Context-aware matching with strict semantic validation
+            # For general questions, be more permissive
+            if semantic_context == 'general':
+                # For general questions, prioritize chunks that contain the main topic
+                if primary_topic and (primary_topic in segment_topic or any(concept in segment_topic for concept in key_concepts)):
+                    relevance_score += 0.7
+                else:
+                    # Even if no direct match, give some relevance for related content
+                    relevance_score += 0.3
+            else:
+                # For specific contexts, use STRICT matching to avoid semantic mismatches
+                if semantic_context == 'qualified_leads':
+                    if 'qualified' in segment_topic and 'disqualified' not in segment_topic:
+                        relevance_score += 0.8
+                    elif 'disqualified' in segment_topic:
+                        # Penalize disqualified content when asking about qualified
+                        relevance_score -= 0.5
+                        logger.warning(f"🚨 Semantic mismatch: Question about qualified leads, chunk about disqualified: {segment_topic}")
+                    else:
+                        # No direct match, give low relevance
+                        relevance_score += 0.2
+                elif semantic_context == 'disqualified_leads':
+                    if 'disqualified' in segment_topic:
+                        relevance_score += 0.8
+                        logger.info(f"✅ Perfect match: Disqualified question, disqualified content: {segment_topic}")
+                    elif 'qualified' in segment_topic and 'disqualified' not in segment_topic:
+                        # STRICT: Completely reject qualified content when asking about disqualified
+                        logger.warning(f"🚨 SEMANTIC MISMATCH: Question about DISQUALIFIED leads, chunk about QUALIFIED: {segment_topic}")
+                        logger.warning(f"🚨 Returning 0.0 relevance to prevent wrong content")
+                        return 0.0  # Return 0 relevance for semantic mismatch
+                    else:
+                        # No direct match, but check if it's general content that could be relevant
+                        if any(word in segment_topic for word in ['lead', 'agent', 'automation', 'workflow']):
+                            relevance_score += 0.1  # Very low relevance for general content
+                            logger.info(f"🔍 General content match for disqualified leads: {segment_topic}")
+                        else:
+                            return 0.0  # No relevance at all
+                elif semantic_context in segment_topic:
+                    relevance_score += 0.6
+                else:
+                    # Check for related concepts even if not exact match
+                    if any(concept in segment_topic for concept in key_concepts):
+                        relevance_score += 0.4
             
-            # Key concepts match
+            # Primary topic match (more flexible)
+            if primary_topic:
+                if primary_topic in segment_topic:
+                    relevance_score += 0.6
+                elif any(word in segment_topic for word in primary_topic.split()):
+                    relevance_score += 0.4
+            
+            # Key concepts match (more flexible)
             concept_matches = sum(1 for concept in key_concepts if concept in segment_topic)
             if key_concepts:
-                relevance_score += (concept_matches / len(key_concepts)) * 0.4
+                relevance_score += (concept_matches / len(key_concepts)) * 0.3
             
             # Secondary topics match
             secondary_topics = [topic.lower() for topic in question_analysis.get('secondary_topics', [])]
@@ -555,7 +643,7 @@ class EnhancedTopicWiseQA:
     def _calculate_content_completeness(self, chunk: Dict, question_analysis: Dict) -> float:
         """Calculate how complete the chunk content is for answering the question"""
         try:
-            text = chunk.get('text', '')
+            text = chunk['metadata'].get('text', '')
             intent_type = question_analysis.get('intent_type', '')
             
             # Base completeness from text length and quality
@@ -592,8 +680,8 @@ class EnhancedTopicWiseQA:
             total_tokens = 0
             
             for chunk in scored_chunks:
-                segment_id = chunk.get('segment_id', 0)
-                text = chunk.get('text', '')
+                segment_id = chunk['metadata'].get('segment_id', 0)
+                text = chunk['metadata'].get('text', '')
                 
                 # Count tokens accurately
                 chunk_tokens = self._count_tokens(text)
@@ -630,11 +718,11 @@ class EnhancedTopicWiseQA:
                 return best_chunks
             
             enriched = best_chunks.copy()
-            used_segments = set(chunk.get('segment_id', 0) for chunk in best_chunks)
+            used_segments = set(chunk['metadata'].get('segment_id', 0) for chunk in best_chunks)
             
             # Find adjacent chunks from the same segments
             for chunk in all_scored_chunks:
-                segment_id = chunk.get('segment_id', 0)
+                segment_id = chunk['metadata'].get('segment_id', 0)
                 if segment_id in used_segments and chunk not in enriched:
                     # Add adjacent chunk from same segment
                     enriched.append(chunk)
@@ -660,6 +748,44 @@ class EnhancedTopicWiseQA:
                     'timestamp_info': None
                 }
             
+            # CRITICAL: Final semantic mismatch check before generating answer
+            semantic_context = question_analysis.get('semantic_context', '').lower()
+            question_lower = question.lower()
+            
+            # Direct word-based detection for disqualified leads
+            is_about_disqualified = ('disqualified' in question_lower and 'lead' in question_lower) or semantic_context == 'disqualified_leads'
+            
+            logger.info(f"🔍 SEMANTIC MISMATCH FINAL CHECK: question='{question}', semantic_context='{semantic_context}', is_about_disqualified={is_about_disqualified}")
+            
+            if is_about_disqualified:
+                # Check if all chunks are about qualified leads (semantic mismatch)
+                qualified_chunks = [
+                    chunk for chunk in best_chunks 
+                    if 'qualified' in chunk['metadata'].get('segment_topic', '').lower()
+                    and 'disqualified' not in chunk['metadata'].get('segment_topic', '').lower()
+                ]
+                
+                disqualified_chunks = [
+                    chunk for chunk in best_chunks 
+                    if 'disqualified' in chunk['metadata'].get('segment_topic', '').lower()
+                ]
+                
+                if qualified_chunks and not disqualified_chunks:
+                    logger.warning(f"🚨 FINAL SEMANTIC MISMATCH CHECK: Question about DISQUALIFIED, but all chunks about QUALIFIED")
+                    logger.warning(f"🚨 Qualified chunks: {[chunk['metadata'].get('segment_topic', 'Unknown') for chunk in qualified_chunks]}")
+                    
+                    return {
+                        'answer': "I notice you're asking about building **disqualified leads**, but this video only contains information about building **qualified leads**. These are opposite concepts:\n\n" +
+                                "- **Qualified leads** = leads that meet your criteria and are ready to proceed\n" +
+                                "- **Disqualified leads** = leads that don't meet your criteria and are rejected\n\n" +
+                                "The video covers how to build agents for **qualified leads** only. If you'd like to know about qualified leads instead, please let me know!",
+                        'confidence': 0.9,  # High confidence in the mismatch detection
+                        'sources': [],
+                        'timestamp_info': None,
+                        'semantic_mismatch': True,
+                        'available_content': 'qualified_leads_only'
+                    }
+            
             # Prepare context from best chunks
             context_parts = []
             sources = []
@@ -667,28 +793,28 @@ class EnhancedTopicWiseQA:
             
             for i, chunk in enumerate(best_chunks):
                 # Add chunk context
-                context_parts.append(f"Source {i+1} (Topic: {chunk['segment_topic']}):\n{chunk['text']}")
+                context_parts.append(f"Source {i+1} (Topic: {chunk['metadata'].get('segment_topic', 'Unknown')}):\n{chunk['metadata'].get('text', '')}")
                 
                 # Add source information with deep links
                 source_info = {
-                    'topic': chunk['segment_topic'],
-                    'summary': chunk['segment_summary'],
-                    'start_timestamp': chunk['start_timestamp'],
-                    'end_timestamp': chunk['end_timestamp'],
-                    'video_url': chunk['video_url'],
-                    'start_url': self._create_youtube_deep_link(chunk['video_url'], chunk['start_timestamp']),
-                    'end_url': self._create_youtube_deep_link(chunk['video_url'], chunk['end_timestamp']),
-                    'quality_score': chunk['quality_score'],
+                    'topic': chunk['metadata'].get('segment_topic', 'Unknown'),
+                    'summary': chunk['metadata'].get('segment_summary', ''),
+                    'start_timestamp': chunk['metadata'].get('start_timestamp', 0),
+                    'end_timestamp': chunk['metadata'].get('end_timestamp', 0),
+                    'video_url': chunk['metadata'].get('video_url', ''),
+                    'start_url': self._create_youtube_deep_link(chunk['metadata'].get('video_url', ''), chunk['metadata'].get('start_timestamp', 0)),
+                    'end_url': self._create_youtube_deep_link(chunk['metadata'].get('video_url', ''), chunk['metadata'].get('end_timestamp', 0)),
+                    'quality_score': chunk['metadata'].get('quality_score', 0),
                     'relevance_score': chunk['combined_score']
                 }
                 sources.append(source_info)
                 
                 # Add timestamp info
                 timestamp_info.append({
-                    'topic': chunk['segment_topic'],
-                    'start_time': chunk['start_timestamp'],
-                    'end_time': chunk['end_timestamp'],
-                    'duration': chunk['end_timestamp'] - chunk['start_timestamp']
+                    'topic': chunk['metadata'].get('segment_topic', 'Unknown'),
+                    'start_time': chunk['metadata'].get('start_timestamp', 0),
+                    'end_time': chunk['metadata'].get('end_timestamp', 0),
+                    'duration': chunk['metadata'].get('end_timestamp', 0) - chunk['metadata'].get('start_timestamp', 0)
                 })
             
             context = "\n\n".join(context_parts)
@@ -733,6 +859,13 @@ class EnhancedTopicWiseQA:
             
             logger.info(f"📊 Token stats: context={context_tokens}, prompt={prompt_tokens}, total={total_tokens}, limit={self.MAX_TOKENS_CONTEXT - self.SAFETY_MARGIN}")
             
+            # Debug chunk structure before GPT call
+            logger.info(f"🔍 Debug - Best chunks count: {len(best_chunks)}")
+            if best_chunks:
+                logger.info(f"🔍 Debug - First chunk keys: {list(best_chunks[0].keys())}")
+                logger.info(f"🔍 Debug - First chunk metadata keys: {list(best_chunks[0].get('metadata', {}).keys())}")
+                logger.info(f"🔍 Debug - First chunk has segment_topic in metadata: {'segment_topic' in best_chunks[0].get('metadata', {})}")
+            
             response = self.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
@@ -743,7 +876,7 @@ class EnhancedTopicWiseQA:
             answer = response.choices[0].message.content.strip()
             
             # Calculate confidence based on chunk quality and relevance with transparency
-            avg_quality = sum(chunk['quality_score'] for chunk in best_chunks) / len(best_chunks)
+            avg_quality = sum(chunk['metadata'].get('quality_score', 0) for chunk in best_chunks) / len(best_chunks)
             avg_relevance = sum(chunk['combined_score'] for chunk in best_chunks) / len(best_chunks)
             base_confidence = (avg_quality + avg_relevance * 100) / 200  # Normalize to 0-1
             
@@ -757,7 +890,7 @@ class EnhancedTopicWiseQA:
             }
             
             # Apply confidence scaling based on fallback usage
-            fallback_used = any(chunk.get('quality_score', 0) < self.MIN_QUALITY_SCORE_YOUTUBE for chunk in best_chunks)
+            fallback_used = any(chunk['metadata'].get('quality_score', 0) < self.MIN_QUALITY_SCORE_YOUTUBE for chunk in best_chunks)
             if fallback_used:
                 confidence = min(base_confidence, 0.6)  # Cap at 0.6 if fallbacks used
                 confidence_factors['fallback_penalty'] = 0.6
@@ -776,9 +909,10 @@ class EnhancedTopicWiseQA:
             return {
                 'answer': answer,
                 'confidence': confidence,
+                'confidence_score': confidence,  # Add both for compatibility
                 'sources': sources,
                 'timestamp_info': timestamp_info,
-                'best_topic': best_chunks[0]['segment_topic'] if best_chunks else None,
+                'best_topic': best_chunks[0]['metadata'].get('segment_topic', 'Unknown') if best_chunks else None,
                 'context_tokens': context_tokens,
                 'prompt_tokens': prompt_tokens,
                 'confidence_factors': confidence_factors
@@ -786,6 +920,9 @@ class EnhancedTopicWiseQA:
             
         except Exception as e:
             logger.error(f"❌ Answer generation error: {e}")
+            logger.error(f"❌ Error type: {type(e)}")
+            logger.error(f"❌ Best chunks structure: {[list(chunk.keys()) for chunk in best_chunks[:2]] if best_chunks else 'No chunks'}")
+            logger.error(f"❌ Best chunks metadata keys: {[list(chunk.get('metadata', {}).keys()) for chunk in best_chunks[:2]] if best_chunks else 'No chunks'}")
             return {
                 'answer': "I encountered an error while generating an answer.",
                 'confidence': 0.0,

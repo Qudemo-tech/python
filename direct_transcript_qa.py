@@ -126,8 +126,7 @@ class DirectTranscriptQA:
             client = openai.OpenAI(api_key=openai_api_key)
             
             # Create the prompt for multi-video support
-            prompt = f"""You are given transcripts from multiple videos.  
-Your task: find the closest timestamp where any transcript addresses the user's question, and provide the COMPLETE answer text with video information.
+            prompt = f"""You are given a transcript. Your task: find the closest timestamp where the transcript addresses the user's question, and provide a detailed answer text as if you are a representative of the company. Return ONLY valid JSON in the format: {{ "closest_timestamp": "<timestamp or 'not found'>", "answer": "<answer text or 'not found'>" }} Rules: - If no timestamp is relevant, return "not found". - Do not include explanations or commentary outside JSON. - Ensure JSON is syntactically valid.
 
 Return ONLY valid JSON in the format:
 {{
@@ -145,6 +144,8 @@ Rules:
 - Use the exact video URL and title from the transcript headers.
 - Provide the COMPLETE answer - include all relevant information from the transcript.
 - Do not truncate or summarize the answer - give the full response.
+
+
 
 transcript:
 {transcript}

@@ -296,28 +296,20 @@ question: {question}"""
             return content
     
     def _extract_main_topic_from_content(self, content: str, question: str) -> str:
-        """Extract and format the main topic professionally"""
-        if 'recurring payments' in content.lower():
-            return "🔄 Recurring Payments Management"
-        elif 'purchase order' in content.lower():
-            return "📋 Purchase Order Creation"
-        elif 'ap forecasting' in content.lower():
-            return "📊 AP Forecasting & Cash Flow Management"
-        elif 'payment' in content.lower():
-            return "💳 Payment Management System"
-        else:
-            return "🎯 Feature Overview"
+        """Extract and format the main topic from transcript content"""
+        # Extract the first meaningful sentence as the main topic
+        sentences = [s.strip() for s in content.split('.') if s.strip() and len(s.strip()) > 20]
+        if sentences:
+            first_sentence = sentences[0]
+            # Clean up the sentence
+            first_sentence = first_sentence.replace('Hey there, I wanted to show you the ability to ', '')
+            first_sentence = first_sentence.replace('As we discussed this yesterday on the call, but ', '')
+            return first_sentence[:100] + "..." if len(first_sentence) > 100 else first_sentence
+        return "Feature Overview"
     
     def _create_feature_intro(self, main_topic: str, branding: Dict[str, str]) -> str:
-        """Create a company-specific feature introduction"""
-        if 'recurring payments' in main_topic.lower():
-            return f"This powerful {branding['possessive']} feature streamlines your payment management and ensures you never miss important recurring expenses."
-        elif 'purchase order' in main_topic.lower():
-            return f"This {branding['possessive']} feature simplifies procurement management and helps you maintain better vendor relationships."
-        elif 'ap forecasting' in main_topic.lower():
-            return f"This {branding['possessive']} feature provides intelligent cash flow forecasting to help you make better financial decisions."
-        else:
-            return f"This {branding['possessive']} feature enhances your business operations and improves efficiency."
+        """Create a feature introduction based on transcript content"""
+        return f"This {branding['possessive']} feature enhances your business operations and improves efficiency."
     
     def _extract_benefits(self, content: str, question: str, branding: Dict[str, str] = None) -> list:
         """Extract key benefits from the transcript content ONLY"""
@@ -326,31 +318,23 @@ question: {question}"""
         if not branding:
             branding = {'possessive': 'our', 'product': 'our platform'}
         
-        # Extract benefits from the actual transcript content
-        if 'recurring payments' in content.lower():
-            # Base benefits that can be inferred from transcript content
-            benefits = [
-                f"Set up recurring payments for rent and monthly expenses using {branding['product']}",
-                f"Choose between paying from a bill, without a bill, or standalone payments",
-                f"Automate monthly payments for consistent amounts using {branding['possessive']} system",
-                f"Manage recurring expenses directly in {branding['possessive']} payment system"
-            ]
-        elif 'purchase order' in content.lower():
-            benefits = [
-                f"Create and manage purchase orders using {branding['product']}",
-                f"Track vendor information and order details with {branding['possessive']} system",
-                f"Process purchase orders efficiently through {branding['product']}",
-                f"Manage procurement workflow with {branding['possessive']} tools"
-            ]
-        elif 'ap forecasting' in content.lower():
-            benefits = [
-                f"View cash outflow forecasts using {branding['product']}",
-                f"Plan ahead for upcoming payments with {branding['possessive']} forecasting",
-                f"Manage vendor payment schedules through {branding['product']}",
-                f"Optimize cash flow planning with {branding['possessive']} insights"
-            ]
+        # Extract benefits directly from transcript content by looking for key phrases
+        sentences = [s.strip() for s in content.split('.') if s.strip() and len(s.strip()) > 20]
         
-        return benefits
+        for sentence in sentences:
+            # Look for sentences that describe capabilities or benefits
+            if any(word in sentence.lower() for word in ['can', 'able to', 'allows', 'enables', 'helps', 'provides', 'offers']):
+                # Clean up the sentence
+                clean_sentence = sentence.replace('Hey there, I wanted to show you the ability to ', '')
+                clean_sentence = clean_sentence.replace('So if you have a rent or anything like that that you know it\'s going to be the same amount every month, ', '')
+                clean_sentence = clean_sentence.replace('And then you\'d come up to here, ', '')
+                clean_sentence = clean_sentence.replace('and then in here you can be able to ', '')
+                
+                if clean_sentence and len(clean_sentence.strip()) > 15:
+                    benefits.append(clean_sentence.strip())
+        
+        # Limit to reasonable number of benefits
+        return benefits[:5]
     
     def _extract_process_steps(self, content: str, question: str) -> list:
         """Extract and clean up process steps from content"""
@@ -396,39 +380,21 @@ question: {question}"""
         """Extract relevant use cases from transcript content ONLY"""
         use_cases = []
         
-        # Extract use cases directly from transcript content
-        if 'recurring payments' in content.lower():
-            # Extract specific use cases mentioned in the transcript
-            if 'rent' in content.lower():
-                use_cases.append("Monthly rent payments")
-            if 'monthly' in content.lower():
-                use_cases.append("Monthly recurring expenses")
-            if 'same amount' in content.lower():
-                use_cases.append("Fixed amount recurring payments")
-            
-            # Add general use cases that can be inferred from the content
-            use_cases.extend([
-                "Regular monthly business expenses",
-                "Consistent payment amounts"
-            ])
-            
-        elif 'purchase order' in content.lower():
-            # Extract from transcript content
-            use_cases = [
-                "Creating purchase orders for vendors",
-                "Managing procurement processes",
-                "Tracking order details and vendor information"
-            ]
-            
-        elif 'ap forecasting' in content.lower():
-            # Extract from transcript content
-            use_cases = [
-                "Viewing cash outflow forecasts",
-                "Planning for upcoming payments",
-                "Managing vendor payment schedules"
-            ]
+        # Extract use cases directly from transcript content by looking for specific examples
+        sentences = [s.strip() for s in content.split('.') if s.strip() and len(s.strip()) > 20]
         
-        return use_cases
+        for sentence in sentences:
+            # Look for sentences that mention specific examples or use cases
+            if any(word in sentence.lower() for word in ['for', 'when', 'example', 'like', 'such as', 'including']):
+                # Clean up the sentence
+                clean_sentence = sentence.replace('Hey there, I wanted to show you the ability to ', '')
+                clean_sentence = clean_sentence.replace('So if you have a rent or anything like that that you know it\'s going to be the same amount every month, ', '')
+                
+                if clean_sentence and len(clean_sentence.strip()) > 15:
+                    use_cases.append(clean_sentence.strip())
+        
+        # Limit to reasonable number of use cases
+        return use_cases[:5]
     
     def _extract_company_name(self, transcript_data: Dict[str, Any]) -> str:
         """Extract company name from transcript data ONLY"""
@@ -445,41 +411,11 @@ question: {question}"""
                         # Extract company name from "Video for [CompanyName]"
                         return video_title.replace('Video for ', '').strip()
             
-            # Try to extract from transcript content itself
-            company_from_content = self._extract_company_from_transcript_content(transcript_data)
-            if company_from_content:
-                return company_from_content
-            
             return 'our company'  # Fallback
         except Exception as e:
             print(f"❌ Error extracting company name: {e}")
             return 'our company'
     
-    def _extract_company_from_transcript_content(self, transcript_data: Dict[str, Any]) -> str:
-        """Extract company name from transcript content only"""
-        try:
-            # Look through all video transcripts for company mentions
-            if 'videos' in transcript_data and transcript_data['videos']:
-                for video in transcript_data['videos']:
-                    transcript_content = video.get('transcript', '')
-                    if transcript_content:
-                        # Look for company mentions in the transcript
-                        # This is a simple approach - could be enhanced with more sophisticated parsing
-                        content_lower = transcript_content.lower()
-                        
-                        # Look for common company mention patterns
-                        if 'settle' in content_lower:
-                            return 'Settle'
-                        elif 'upsolve' in content_lower:
-                            return 'Upsolve'
-                        elif 'qudemo' in content_lower:
-                            return 'QuDemo'
-                        # Add more company patterns as needed
-                        
-            return None
-        except Exception as e:
-            print(f"❌ Error extracting company from transcript content: {e}")
-            return None
     
     def _create_company_greeting(self, company_name: str = None) -> str:
         """Create a company-specific greeting"""
@@ -523,17 +459,6 @@ question: {question}"""
     def _extract_main_topic(self, sentences: list, question: str) -> str:
         """Extract the main topic from sentences"""
         try:
-            # Look for key phrases that indicate the main topic
-            for sentence in sentences:
-                if 'recurring payments' in sentence.lower():
-                    return "Setting Up Recurring Payments"
-                elif 'purchase order' in sentence.lower():
-                    return "Creating Purchase Orders"
-                elif 'ap forecasting' in sentence.lower():
-                    return "AP Forecasting Feature"
-                elif 'payment' in sentence.lower():
-                    return "Payment Management"
-            
             # Fallback to first meaningful sentence
             for sentence in sentences:
                 if len(sentence) > 20 and not sentence.startswith('Hey there'):

@@ -263,12 +263,17 @@ question: {question}"""
                 for benefit in benefits:
                     response_parts.append(f"• {benefit}")
             
-            # Add step-by-step process
+            # Add step-by-step process with proper formatting
             if any(word in question.lower() for word in ['how', 'step', 'process', 'setup', 'create', 'do']):
                 response_parts.append("**How It Works:**")
                 steps = self._extract_process_steps(content, question)
                 for i, step in enumerate(steps, 1):
-                    response_parts.append(f"**Step {i}:** {step}")
+                    # Clean up step formatting
+                    clean_step = step.replace('Step ', '').replace(f'{i}:', '').strip()
+                    if clean_step.startswith('Step '):
+                        clean_step = clean_step[5:].strip()
+                    # Add HTML line breaks for better formatting
+                    response_parts.append(f"**Step {i}:** {clean_step}")
             
             # Add use cases
             use_cases = self._extract_use_cases(content, question)
@@ -277,7 +282,14 @@ question: {question}"""
                 for use_case in use_cases:
                     response_parts.append(f"• {use_case}")
             
-            return "\n\n".join(response_parts)
+            # Join with proper line breaks and add HTML formatting
+            full_response = "\n\n".join(response_parts)
+            
+            # Convert line breaks to HTML for better rendering
+            full_response = full_response.replace('\n\n', '<br><br>')
+            full_response = full_response.replace('\n', '<br>')
+            
+            return full_response
             
         except Exception as e:
             print(f"❌ Error structuring sales response: {e}")
@@ -361,10 +373,24 @@ question: {question}"""
                 clean_sentence = clean_sentence.replace('and then in here you can be able to ', '')
                 clean_sentence = clean_sentence.replace('or, aka, ', 'or ')
                 
+                # Remove redundant "Step" prefixes
+                clean_sentence = clean_sentence.replace('Step 1: ', '').replace('Step 2: ', '').replace('Step 3: ', '')
+                clean_sentence = clean_sentence.replace('Step 4: ', '').replace('Step 5: ', '').replace('Step 6: ', '')
+                clean_sentence = clean_sentence.replace('Step 7: ', '').replace('Step 8: ', '').replace('Step 9: ', '')
+                clean_sentence = clean_sentence.replace('Step 10: ', '').replace('Step 11: ', '').replace('Step 12: ', '')
+                
+                # Clean up any remaining step references
+                clean_sentence = re.sub(r'Step \d+:\s*', '', clean_sentence)
+                
                 if clean_sentence and len(clean_sentence.strip()) > 10:
+                    # Ensure each step is properly formatted
+                    clean_sentence = clean_sentence.strip()
+                    if not clean_sentence.endswith('.'):
+                        clean_sentence += '.'
                     steps.append(clean_sentence)
         
-        return steps
+        # Limit to reasonable number of steps to avoid overwhelming response
+        return steps[:15]  # Max 15 steps
     
     def _extract_use_cases(self, content: str, question: str) -> list:
         """Extract relevant use cases from transcript content ONLY"""
@@ -530,11 +556,15 @@ question: {question}"""
             content = content.replace(' uh ', ' ').replace(' um ', ' ')
             content = content.replace(' you know ', ' ').replace(' like ', ' ')
             
-            # Add proper sentence breaks
+            # Add proper sentence breaks for better readability
             content = re.sub(r'([.!?])\s*([A-Z])', r'\1\n\n\2', content)
             
             # Clean up any remaining formatting issues
             content = re.sub(r'\n\s*\n\s*\n', '\n\n', content)
+            
+            # Ensure proper spacing around bullet points and steps
+            content = re.sub(r'(\w)\s*(\d+\.)\s*', r'\1\n\n\2 ', content)
+            content = re.sub(r'(\w)\s*(•)\s*', r'\1\n\n\2 ', content)
             
             return content.strip()
         except Exception as e:

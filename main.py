@@ -274,23 +274,47 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
                 'answer_source': 'gcs_transcript_search' if gcs_qa_service else ('enhanced_topic_wise' if enhanced_topic_wise_qa_system else 'enhanced_semantic')
             }
         else:
-            return {
-                'success': False,
-                'error': answer_result.get('error', 'Unknown error'),
-                'answer': answer_result.get('answer', ''),
-                'start': 0,
-                'end': 0,
-                'video_url': None,
-                'sources': [],
-                'total_sources': 0,
-                'search_score': 0,
-                'confidence_score': 0,
-                'content_types_found': [],
-                'difficulty_level': 'unknown',
-                'estimated_time': 'unknown',
-                'formatted_timestamp': '',
-                'answer_source': 'enhanced_semantic_qa'
-            }
+            # Check if this is a "no relevant content" case vs actual error
+            error_message = answer_result.get('error', 'Unknown error')
+            is_no_content = 'no relevant content found' in error_message.lower() or 'no relevant information' in error_message.lower()
+            
+            if is_no_content:
+                return {
+                    'success': False,
+                    'error': 'No relevant information found',
+                    'answer': 'No relevant information found',
+                    'start': 0,
+                    'end': 0,
+                    'video_url': None,
+                    'sources': [],
+                    'total_sources': 0,
+                    'search_score': 0,
+                    'confidence_score': 0,
+                    'content_types_found': [],
+                    'difficulty_level': 'unknown',
+                    'estimated_time': 'unknown',
+                    'formatted_timestamp': '',
+                    'answer_source': 'gcs_transcript_search'
+                }
+            else:
+                # This is an actual error, show the error message
+                return {
+                    'success': False,
+                    'error': error_message,
+                    'answer': answer_result.get('answer', ''),
+                    'start': 0,
+                    'end': 0,
+                    'video_url': None,
+                    'sources': [],
+                    'total_sources': 0,
+                    'search_score': 0,
+                    'confidence_score': 0,
+                    'content_types_found': [],
+                    'difficulty_level': 'unknown',
+                    'estimated_time': 'unknown',
+                    'formatted_timestamp': '',
+                    'answer_source': 'gcs_transcript_search'
+                }
             
     except Exception as e:
         logger.error(f"❌ Error processing question: {e}")

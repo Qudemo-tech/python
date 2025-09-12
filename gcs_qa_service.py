@@ -48,8 +48,8 @@ class GCSQAService:
             if not answer_data:
                 return {
                     'success': False,
-                    'error': 'No relevant content found for this question',
-                    'answer': 'I could not find relevant information to answer your question. The available video content does not contain information about this topic.',
+                    'error': 'No relevant information found',
+                    'answer': 'No relevant information found',
                     'timestamp': 0,
                     'formatted_timestamp': '00:00',
                     'confidence': 0.0,

@@ -1106,148 +1106,39 @@ Video Information:
             return content
     
     def _format_with_intent_awareness(self, question: str, context: str, answer_type: str, question_analysis: Dict) -> str:
-        """Format answer with intent awareness and conversational tone"""
+        """Format answer using ONLY the provided context without LLM generation"""
         try:
-            intent_type = question_analysis.get('intent_type', '')
-            main_action = question_analysis.get('main_action', '')
+            # Clean and format the context content without using LLM
+            cleaned_context = self._clean_context_content(context)
             
-            # Enhanced prompt for better formatting
-            if answer_type == 'knowledge':
-                if intent_type == 'create':
-                    prompt = f"""You are a helpful AI assistant. The user wants to CREATE something. Based on the following knowledge base content, provide a clear, conversational, and well-formatted response.
-
-Question: {question}
-Main Action: {main_action}
-
-Knowledge Base Content:
-{context}
-
-Instructions:
-1. Write in a conversational, helpful tone
-2. Structure your response with clear sections
-3. Use bullet points or numbered steps where appropriate
-4. Make it easy to read and follow
-5. Don't just copy the content - synthesize and explain it clearly
-6. Start with a brief introduction, then provide the steps/instructions
-7. End with a helpful tip or summary
-
-Format your response like a helpful bot would:"""
-                elif intent_type == 'how_to':
-                    prompt = f"""You are a helpful AI assistant. The user is asking HOW TO do something. Based on the following knowledge base content, provide a clear, step-by-step guide.
-
-Question: {question}
-Main Action: {main_action}
-
-Knowledge Base Content:
-{context}
-
-Instructions:
-1. Write in a conversational, helpful tone
-2. Structure your response with clear sections
-3. Use numbered steps for procedures
-4. Make it easy to read and follow
-5. Don't just copy the content - synthesize and explain it clearly
-6. Start with a brief introduction, then provide the steps
-7. End with a helpful tip or summary
-
-Format your response like a helpful bot would:"""
-                else:
-                    prompt = f"""You are a helpful AI assistant. Based on the following knowledge base content, provide a clear, conversational answer to the user's question.
-
-Question: {question}
-
-Knowledge Base Content:
-{context}
-
-Instructions:
-1. Write in a conversational, helpful tone
-2. Structure your response with clear sections
-3. Use bullet points or formatting where appropriate
-4. Make it easy to read and follow
-5. Don't just copy the content - synthesize and explain it clearly
-6. Start with a brief introduction, then provide the main information
-7. End with a helpful summary or next steps
-
-Format your response like a helpful bot would:"""
-            
-            elif answer_type == 'video':
-                if intent_type == 'create':
-                    prompt = f"""You are a knowledgeable sales manager. The user wants to CREATE something. Give them a short, actionable response under 700 characters.
-
-Question: {question}
-Main Action: {main_action}
-
-Information:
-{context}
-
-Instructions:
-1. Keep your answer UNDER 700 CHARACTERS
-2. Focus on the key steps they need to take
-3. Write in a confident, professional tone
-4. Don't reference "video" or "transcript" - just explain directly
-5. Be concise and actionable
-6. One or two sentences maximum
-
-Answer:"""
-                elif intent_type == 'how_to':
-                    prompt = f"""You are a helpful AI assistant. The user is asking HOW TO do something. Based on the following video transcript, provide a clear, step-by-step guide.
-
-Question: {question}
-Main Action: {main_action}
-
-Video Transcript:
-{context}
-
-Instructions:
-1. Write in a conversational, helpful tone
-2. Structure your response with clear sections
-3. Use numbered steps for procedures
-4. Make it easy to read and follow
-5. Don't just copy the transcript - synthesize and explain it clearly
-6. Start with a brief introduction, then provide the steps
-7. End with a helpful tip or summary
-8. Mention that this information comes from a video
-
-Format your response like a helpful bot would:"""
-                else:
-                    prompt = f"""You are a knowledgeable sales manager. Answer the user's question with a well-structured, detailed response.
-
-Question: {question}
-
-Information:
-{context}
-
-Instructions:
-1. Write a comprehensive answer (3-5 sentences, 600-800 characters)
-2. Write in a confident, professional tone
-3. Don't reference "video" or "transcript" - just explain directly
-4. Structure your answer with clear points
-5. Be conversational and informative
-6. Provide actionable insights
-7. Keep your answer between 600-800 characters for optimal readability
-
-Answer:"""
-            
+            # Structure the answer professionally but use ONLY the provided context
+            if 'how to' in question.lower():
+                return f"Here's how to {question.replace('how to ', '').replace('?', '')} based on the available content:\n\n{cleaned_context}"
+            elif 'what is' in question.lower():
+                return f"Here's what {question.replace('what is ', '').replace('?', '')} is according to the content:\n\n{cleaned_context}"
             else:
-                return context  # Fallback to raw content
-            
-            response = self.openai_client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=800  # Increased for better formatting
-            )
-            
-            formatted_answer = response.choices[0].message.content.strip()
-            
-            # Post-process to ensure good formatting
-            formatted_answer = self._post_process_answer(formatted_answer, answer_type)
-            
-            return formatted_answer
+                return f"Here's the answer to your question about {question} from the available content:\n\n{cleaned_context}"
             
         except Exception as e:
-            print(f"❌ Intent-aware formatting error: {e}")
-            return self._create_fallback_formatted_answer(context, answer_type)
+            print(f"❌ Error formatting answer: {e}")
+            return context
+    
+    def _clean_context_content(self, content: str) -> str:
+        """Clean and format context content for better readability"""
+        try:
+            # Remove excessive whitespace
+            content = re.sub(r'\s+', ' ', content.strip())
+            
+            # Add proper sentence breaks
+            content = re.sub(r'([.!?])\s*([A-Z])', r'\1\n\n\2', content)
+            
+            # Clean up any remaining formatting issues
+            content = re.sub(r'\n\s*\n\s*\n', '\n\n', content)
+            
+            return content.strip()
+        except Exception as e:
+            print(f"❌ Error cleaning context content: {e}")
+            return content
     
     def _post_process_answer(self, answer: str, answer_type: str) -> str:
         """Post-process the answer to ensure good formatting"""

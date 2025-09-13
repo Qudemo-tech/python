@@ -51,6 +51,14 @@ class DirectTranscriptQA:
             # The LLM already provides a complete, accurate answer
             formatted_answer = llm_result['answer']
             
+            # Post-process to ensure no raw transcript content
+            if self._contains_raw_transcript_content(formatted_answer):
+                print("⚠️ Detected raw transcript content, requesting reprocessing...")
+                # Try to get a better answer by being more specific
+                reprocessed_result = self._ask_llm_for_answer_reprocessed(raw_transcript, question)
+                if reprocessed_result and reprocessed_result.get('answer') != 'not found':
+                    formatted_answer = reprocessed_result['answer']
+            
             return {
                 'answer': formatted_answer,
                 'timestamp': self._parse_timestamp(llm_result.get('closest_timestamp', '00:00')),
@@ -130,6 +138,13 @@ class DirectTranscriptQA:
 
 CRITICAL: Your answer must be COMPREHENSIVE but CONCISE - 2-3 sentences maximum. Think like ChatGPT - intelligent, insightful, and comprehensive.
 
+MANDATORY REQUIREMENTS:
+- NEVER include raw transcript quotes like "Hey there" or "Great question"
+- NEVER include step-by-step instructions from the transcript
+- ALWAYS provide processed, intelligent analysis
+- ALWAYS use professional, business-ready language
+- ALWAYS focus on the core essence and business value
+
 YOUR ANSWER MUST:
 - Be 2-3 sentences maximum
 - Be intelligent and insightful (like ChatGPT)
@@ -139,6 +154,8 @@ YOUR ANSWER MUST:
 - Be immediately valuable and actionable
 - Demonstrate consciousness and completeness
 - Focus on the core essence and business value
+- Interpret and analyze the content, don't just quote it
+- Provide processed insights, not raw transcript text
 
 Return ONLY valid JSON in the format:
 {{
@@ -230,3 +247,116 @@ question: {question}"""
         except Exception as e:
             print(f"❌ Error parsing timestamp '{timestamp_str}': {e}")
             return 0.0
+    
+    def _contains_raw_transcript_content(self, answer: str) -> bool:
+        """Check if answer contains raw transcript content that should be processed"""
+        raw_indicators = [
+            "Hey there",
+            "Great question",
+            "Let me walk you through",
+            "Step 1:",
+            "Step 2:",
+            "As we discussed",
+            "I wanted to show you",
+            "you would go to",
+            "and then you'd come up here",
+            "click",
+            "in here you can"
+        ]
+        
+        answer_lower = answer.lower()
+        for indicator in raw_indicators:
+            if indicator.lower() in answer_lower:
+                return True
+        return False
+    
+    def _ask_llm_for_answer_reprocessed(self, transcript: str, question: str) -> Optional[Dict[str, str]]:
+        """Reprocess with stricter prompt to avoid raw transcript content"""
+        try:
+            import openai
+            import os
+            import json
+            
+            # Get OpenAI API key
+            openai_api_key = os.getenv('OPENAI_API_KEY')
+            if not openai_api_key:
+                return None
+            
+            # Initialize OpenAI client
+            client = openai.OpenAI(api_key=openai_api_key)
+            
+            # Stricter prompt for reprocessing
+            prompt = f"""You are an expert at analyzing video transcripts to answer questions. Your task is to find the most relevant information in the transcript and provide a HIGH-QUALITY, INTELLIGENT answer.
+
+CRITICAL: Your answer must be COMPREHENSIVE but CONCISE - 2-3 sentences maximum. Think like ChatGPT - intelligent, insightful, and comprehensive.
+
+ABSOLUTELY FORBIDDEN:
+- NEVER include raw transcript quotes like "Hey there" or "Great question"
+- NEVER include step-by-step instructions from the transcript
+- NEVER include casual conversation starters
+- NEVER include "click here" or "go to" instructions
+
+MANDATORY REQUIREMENTS:
+- ALWAYS provide processed, intelligent analysis
+- ALWAYS use professional, business-ready language
+- ALWAYS focus on the core essence and business value
+- ALWAYS interpret and analyze, never quote directly
+
+YOUR ANSWER MUST:
+- Be 2-3 sentences maximum
+- Be intelligent and insightful (like ChatGPT)
+- Show deep understanding of the concepts
+- Use professional, business-ready language
+- Provide clear comparisons and contrasts
+- Be immediately valuable and actionable
+- Demonstrate consciousness and completeness
+- Focus on the core essence and business value
+
+Return ONLY valid JSON in the format:
+{{
+  "closest_timestamp": "<timestamp or 'not found'>",
+  "answer": "<PROCESSED high-quality answer or 'not found'>",
+  "video_url": "<video URL or 'not found'>",
+  "video_title": "<video title or 'not found'>"
+}}
+
+transcript:
+{transcript}
+
+question: {question}"""
+
+            # Call OpenAI API
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=300,
+                top_p=0.95,
+                frequency_penalty=0.2,
+                presence_penalty=0.1
+            )
+            
+            # Parse the response
+            response_text = response.choices[0].message.content.strip()
+            
+            # Clean up the response - remove markdown code blocks if present
+            if response_text.startswith("```json"):
+                response_text = response_text[7:]
+            if response_text.startswith("```"):
+                response_text = response_text[3:]
+            if response_text.endswith("```"):
+                response_text = response_text[:-3]
+            
+            response_text = response_text.strip()
+            
+            # Try to parse JSON
+            try:
+                result = json.loads(response_text)
+                return result
+            except json.JSONDecodeError as e:
+                print(f"❌ Failed to parse reprocessed LLM JSON response: {e}")
+                return None
+            
+        except Exception as e:
+            print(f"❌ Error in reprocessing LLM call: {e}")
+            return None

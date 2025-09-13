@@ -11,7 +11,6 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 from google.cloud import storage
 from google.oauth2 import service_account
-from qa_retrieval_utils import QARetrievalUtils
 from direct_transcript_qa import DirectTranscriptQA
 
 logger = logging.getLogger(__name__)
@@ -26,8 +25,7 @@ class GoogleCloudStorageService:
         self.service_account_path = service_account_path or os.getenv('GOOGLE_APPLICATION_CREDENTIALS', 'service-account-key.json')
         self.bucket = None  # Will be set when we create/access a company bucket
         
-        # Initialize Q&A retrieval utilities
-        self.qa_utils = QARetrievalUtils()
+        # Initialize direct transcript Q&A system
         self.direct_qa = DirectTranscriptQA()
         
         # Initialize Google Cloud Storage client
@@ -210,93 +208,6 @@ class GoogleCloudStorageService:
             logger.error(f"❌ Failed to retrieve Q&A answers: {e}")
             return None
     
-    def search_transcript_for_question(self, company_name: str, qudemo_id: str, 
-                                     question: str) -> Optional[Dict[str, Any]]:
-        """Search transcript for relevant content to answer a question using chunks"""
-        try:
-            # Get transcript data
-            transcript_data = self.get_video_transcript(company_name, qudemo_id)
-            if not transcript_data:
-                return None
-            
-            # Get chunks from transcript data
-            chunks = transcript_data.get('chunks', [])
-            if not chunks:
-                return None
-            
-            logger.info(f"🔍 Searching through {len(chunks)} chunks for question: {question}")
-            
-            # Get intro text for novelty calculation
-            intro_text = ""
-            for chunk in chunks[:3]:  # First 3 chunks likely contain intro
-                if 'building two browser agents' in chunk.get('text', '').lower():
-                    intro_text = chunk.get('text', '')
-                    break
-            
-            # Step A: Anchor (high-recall, quick) - Get top 60 chunks by keyword score
-            anchors = self._get_anchor_chunks(chunks, question, k=60)
-            
-            # Step B: Expand (local context sweep) - Merge chunks into sections
-            sections = self.qa_utils.merge_chunks_to_sections(anchors, radius=3)
-            
-            # Step C: Rerank sections by answerability
-            scored_sections = []
-            for section in sections:
-                # Calculate BM25 mean for section
-                bm25_mean = self._calculate_bm25_mean(section, question)
-                section['bm25_mean'] = bm25_mean
-                section['embed_mean'] = 0.0  # Placeholder for embedding similarity
-                
-                # Calculate comprehensive section score
-                section_score = self.qa_utils.calculate_section_score(section, question, intro_text)
-                scored_sections.append((section, section_score))
-            
-            # Sort sections by score
-            scored_sections.sort(key=lambda x: x[1], reverse=True)
-            
-            # Log detailed selection process
-            self._log_section_selection(question, scored_sections[:5])
-            
-            if scored_sections:
-                # Get the best section
-                best_section, best_score = scored_sections[0]
-                
-                # Find the earliest deep chunk within the best section
-                chosen_chunk = self.qa_utils.find_earliest_deep_chunk(best_section, question)
-                
-                # Get timestamp from chosen chunk
-                timestamp_seconds = chosen_chunk.get('timestamp', 0)
-                formatted_timestamp = chosen_chunk.get('formatted_timestamp', '00:00-00:00')
-                
-                # Combine chunks from the best section for comprehensive answer
-                section_chunks = best_section.get('chunks', [])
-                combined_answer = " ".join([chunk.get('text', '') for chunk in section_chunks])
-                
-                # Clean up the answer
-                combined_answer = combined_answer.strip()
-                if len(combined_answer) > 3000:
-                    combined_answer = combined_answer[:3000] + "..."
-                
-                logger.info(f"✅ Best section found at {formatted_timestamp} with score {best_score:.2f}")
-                logger.info(f"📝 Selected {len(section_chunks)} chunks for answer (total length: {len(combined_answer)} chars)")
-                
-                # Format the answer professionally
-                formatted_answer = self._format_professional_answer(combined_answer, question, section_chunks)
-                
-                return {
-                    'answer': formatted_answer,
-                    'timestamp': timestamp_seconds,
-                    'formatted_timestamp': formatted_timestamp,
-                    'confidence': best_score,
-                    'sources': section_chunks[:3]  # Top 3 chunks from section
-                }
-            
-            logger.warning(f"⚠️ No relevant sections found for question: {question}")
-            return None
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to search transcript: {e}")
-            return None
     
     def search_transcript_directly(self, company_name: str, qudemo_id: str, 
                                  question: str) -> Optional[Dict[str, Any]]:
@@ -529,143 +440,28 @@ class GoogleCloudStorageService:
             return {}
     
     def _format_professional_answer(self, raw_answer: str, question: str, sources: list) -> str:
-        """Format raw transcript data into a professional, structured answer"""
-        try:
-            # Clean up the raw answer
-            cleaned_answer = raw_answer.strip()
-            
-            # Detect if this is a step-by-step process
-            step_indicators = [
-                'first', 'next', 'then', 'after that', 'finally', 'step by step',
-                '1.', '2.', '3.', '4.', '5.', '6.', '7.', '8.', '9.',
-                'first we', 'next we', 'then we', 'after that we'
-            ]
-            
-            has_steps = any(indicator in cleaned_answer.lower() for indicator in step_indicators)
-            
-            # Format based on question type and content
-            if 'how to build' in question.lower() or 'how to create' in question.lower():
-                return self._format_how_to_answer(cleaned_answer, question, has_steps)
-            elif 'how to test' in question.lower():
-                return self._format_testing_answer(cleaned_answer, question)
-            elif 'what is' in question.lower() or 'what are' in question.lower():
-                return self._format_explanation_answer(cleaned_answer, question)
-            else:
-                return self._format_general_answer(cleaned_answer, question, has_steps)
-                
-        except Exception as e:
-            logger.error(f"❌ Error formatting professional answer: {e}")
-            return raw_answer  # Fallback to raw answer
+        """Return raw answer directly without template overwriting"""
+        return raw_answer
     
     def _format_how_to_answer(self, content: str, question: str, has_steps: bool) -> str:
-        """Format a 'how to' answer professionally"""
-        if has_steps:
-            # Extract and structure the steps
-            steps = self._extract_steps(content)
-            if steps and len(steps) > 1:  # Only use if we have multiple good steps
-                formatted = f"Here's how to {question.replace('how to ', '').replace('?', '')}:\n\n"
-                for i, step in enumerate(steps, 1):
-                    formatted += f"{i}. {step}\n"
-                formatted += f"\nThis process will help you efficiently {question.replace('how to ', '').replace('?', '')} using our automation tools."
-                return formatted
-        
-        # Fallback to structured explanation with manual step extraction
-        return self._format_manual_steps(content, question)
+        """Return content directly without template overwriting"""
+        return content
     
     def _format_manual_steps(self, content: str, question: str) -> str:
-        """Manually format steps from content with comprehensive step extraction"""
-        steps = []
-        
-        # More comprehensive step extraction
-        content_lower = content.lower()
-        
-        # Step 1: Build/Configure Agent
-        if any(phrase in content_lower for phrase in ['build a new agent', 'new agent', 'handle a disqualified lead', 'disqualified lead agent']):
-            steps.append("Create a new automation agent specifically designed to handle disqualified leads")
-        
-        # Step 2: Configure Lead Status
-        if any(phrase in content_lower for phrase in ['set her lead status', 'lead status to disqualified', 'set the lead status']):
-            steps.append("Configure the agent to automatically set lead status to 'disqualified' when criteria are met")
-        
-        # Step 3: Set Up Contact Management
-        if any(phrase in content_lower for phrase in ['find', 'contact record', 'click on her name', 'click on their name']):
-            steps.append("Set up automatic contact record identification and management")
-        
-        # Step 4: Configure Information Capture
-        if any(phrase in content_lower for phrase in ['enter in some information', 'enter information', 'sidebar where we']):
-            steps.append("Configure the agent to capture and enter relevant disqualification information")
-        
-        # Step 5: Set Up Follow-up Automation
-        if any(phrase in content_lower for phrase in ['create a task', 'follow-up task', 'account executive', 'follow up with him']):
-            steps.append("Set up automated follow-up task creation for account executives")
-        
-        # Step 6: Configure Note Creation
-        if any(phrase in content_lower for phrase in ['creates a note', 'contact record with our notes', 'note on the contact']):
-            steps.append("Configure automatic note creation with call details and disqualification reasons")
-        
-        # Step 7: Set Up Transcript Processing
-        if any(phrase in content_lower for phrase in ['hit run', 'run on a transcript', 'tango agent is going to click']):
-            steps.append("Configure the agent to automatically process call transcripts and extract key information")
-        
-        # Step 8: Configure Data Extraction
-        if any(phrase in content_lower for phrase in ['extract all', 'necessary information', 'extract information']):
-            steps.append("Set up intelligent data extraction to identify disqualification criteria and relevant details")
-        
-        # Step 9: Test and Validate
-        if any(phrase in content_lower for phrase in ['test it', 'test the agent', 'now we get to test']):
-            steps.append("Test the complete agent workflow to ensure all processes work correctly")
-        
-        # Step 10: Deploy and Monitor
-        if any(phrase in content_lower for phrase in ['automated our follow-up', 'completely automated', 'follow-up as a BDR']):
-            steps.append("Deploy the agent and monitor its performance for continuous optimization")
-        
-        # If we have steps, format them
-        if steps:
-            # Remove duplicates while preserving order
-            unique_steps = []
-            for step in steps:
-                if step not in unique_steps:
-                    unique_steps.append(step)
-            
-            # Create a professional, client-ready answer
-            topic = question.replace('how to ', '').replace('?', '')
-            
-            formatted = f"## How to {topic.title()}\n\n"
-            formatted += f"Our platform enables you to {topic} through intelligent automation. Here's the complete process:\n\n"
-            
-            for i, step in enumerate(unique_steps, 1):
-                formatted += f"**{i}. {step}**\n"
-            
-            formatted += f"\n### Business Benefits:\n"
-            formatted += f"• **Time Savings**: Automate repetitive tasks, saving 15+ minutes per call\n"
-            formatted += f"• **Consistency**: Ensure every disqualified lead is processed uniformly\n"
-            formatted += f"• **Accuracy**: Reduce human error in data entry and follow-up tasks\n"
-            formatted += f"• **Scalability**: Handle increased call volume without additional staff\n\n"
-            formatted += f"This comprehensive solution streamlines your lead qualification process and improves team efficiency."
-            return formatted
-        
-        # If no specific steps found, create a comprehensive explanation
-        return f"Here's how to {question.replace('how to ', '').replace('?', '')}:\n\n{content}\n\nThis comprehensive approach ensures you can effectively {question.replace('how to ', '').replace('?', '')} with our platform's automation capabilities."
+        """Return content directly without template overwriting"""
+        return content
     
     def _format_testing_answer(self, content: str, question: str) -> str:
-        """Format a testing answer professionally"""
-        return f"Here's how to test your {question.replace('how to test ', '').replace('?', '')}:\n\n{content}\n\nThis testing process will validate that your setup is working correctly and ready for production use."
+        """Return content directly without template overwriting"""
+        return content
     
     def _format_explanation_answer(self, content: str, question: str) -> str:
-        """Format an explanation answer professionally"""
-        return f"{question.replace('?', '')}:\n\n{content}\n\nThis provides you with a comprehensive understanding of the feature and its capabilities."
+        """Return content directly without template overwriting"""
+        return content
     
     def _format_general_answer(self, content: str, question: str, has_steps: bool) -> str:
-        """Format a general answer professionally"""
-        if has_steps:
-            steps = self._extract_steps(content)
-            if steps:
-                formatted = f"Here's the process for {question.replace('?', '')}:\n\n"
-                for i, step in enumerate(steps, 1):
-                    formatted += f"{i}. {step}\n"
-                return formatted
-        
-        return f"Here's what you need to know about {question.replace('?', '')}:\n\n{content}"
+        """Return content directly without template overwriting"""
+        return content
     
     def _extract_steps(self, content: str) -> list:
         """Extract step-by-step instructions from content"""

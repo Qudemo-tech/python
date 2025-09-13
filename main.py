@@ -19,8 +19,6 @@ import tempfile
 import shutil
 
 # Enhanced components
-from enhanced_qa_semantic import initialize_enhanced_semantic_qa, get_enhanced_semantic_qa
-from enhanced_qa_hybrid import initialize_enhanced_hybrid_qa, get_enhanced_hybrid_qa
 from final_gemini_scraper import FinalGeminiScraper
 from gcs_qa_service import GCSQAService
 from simple_gemini_transcriber import SimpleGeminiTranscriber
@@ -43,8 +41,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Global instances
-enhanced_semantic_qa_system = None
-enhanced_hybrid_qa_system = None
 loom_processor_gcs = None
 gcs_qa_service = None
 simple_transcriber = None
@@ -53,30 +49,11 @@ company_bucket_service = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for FastAPI"""
-    global enhanced_semantic_qa_system, enhanced_hybrid_qa_system, loom_processor_gcs, gcs_qa_service, simple_transcriber, company_bucket_service
+    global loom_processor_gcs, gcs_qa_service, simple_transcriber, company_bucket_service
     
     try:
         logger.info("🚀 Starting Enhanced QuDemo Python Backend (GCS-based)...")
         
-        # Initialize Enhanced Semantic Q&A System
-        if initialize_enhanced_semantic_qa():
-            enhanced_semantic_qa_system = get_enhanced_semantic_qa()
-            logger.info("✅ Enhanced Semantic Q&A System initialized")
-        else:
-            logger.error("❌ Failed to initialize Enhanced Semantic Q&A System")
-            return
-        
-        # Initialize Enhanced Hybrid Q&A System (NEW - Combines semantic and GCS)
-        try:
-            if initialize_enhanced_hybrid_qa():
-                enhanced_hybrid_qa_system = get_enhanced_hybrid_qa()
-                logger.info("✅ Enhanced Hybrid Q&A System initialized (Combines semantic and GCS)")
-            else:
-                logger.warning("⚠️ Enhanced Hybrid Q&A System initialization failed, will use fallback")
-                enhanced_hybrid_qa_system = None
-        except Exception as e:
-            logger.warning(f"⚠️ Enhanced Hybrid Q&A System initialization failed: {e}, will use fallback")
-            enhanced_hybrid_qa_system = None
         
         # Initialize GCS Q&A Service (NEW - Google Cloud Storage based)
         try:
@@ -214,8 +191,6 @@ async def health_check():
     """Health check endpoint"""
     try:
         components_status = {
-            "semantic_qa_system": enhanced_semantic_qa_system is not None,
-            "hybrid_qa_system": enhanced_hybrid_qa_system is not None,
             "loom_processor_gcs": loom_processor_gcs is not None,
             "gcs_qa_service": gcs_qa_service is not None,
             "simple_transcriber": simple_transcriber is not None,
@@ -271,7 +246,7 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
                 'video_title': answer_result.get('video_title', '') if gcs_qa_service else (answer_result.get('sources', [{}])[0].get('video_title', '') if answer_result.get('sources') else ''),
                 'timestamp': answer_result.get('timestamp', 0) if gcs_qa_service else (answer_result.get('timestamp', {}).get('start_time', 0) if answer_result.get('timestamp') else (answer_result.get('sources', [{}])[0].get('start_timestamp', 0) if answer_result.get('sources') else 0)),
                 'formatted_timestamp': answer_result.get('formatted_timestamp', '') if gcs_qa_service else (answer_result.get('timestamp', {}).get('formatted_start', '') if answer_result.get('timestamp') else ''),
-                'answer_source': 'gcs_transcript_search' if gcs_qa_service else ('enhanced_topic_wise' if enhanced_topic_wise_qa_system else 'enhanced_semantic')
+                'answer_source': 'gcs_transcript_search'
             }
         else:
             # Check if this is a "no relevant content" case vs actual error
@@ -320,182 +295,9 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
         logger.error(f"❌ Error processing question: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/ask-semantic/{company_name}/{qudemo_id}")
-async def ask_question_semantic(company_name: str, qudemo_id: str, request: QuestionRequest):
-    """Ask a question using enhanced semantic QA system with intent understanding and strict quality control"""
-    try:
-        if not enhanced_semantic_qa_system:
-            raise HTTPException(status_code=500, detail="Enhanced Semantic Q&A System not initialized")
-        
-        logger.info(f"🧠 Enhanced Semantic QA: {request.question} for {company_name} qudemo {qudemo_id}")
-        
-        # Use enhanced semantic Q&A system to get answer
-        answer_result = enhanced_semantic_qa_system.ask_question(
-            question=request.question,
-            company_name=company_name,
-            qudemo_id=qudemo_id
-        )
-        
-        if answer_result['success']:
-            return {
-                'success': True,
-                'answer': answer_result['answer'],
-                'sources': answer_result['sources'],
-                'total_sources': answer_result['total_sources'],
-                'search_score': answer_result['search_score'],
-                'content_types_found': answer_result['content_types_found'],
-                'difficulty_level': answer_result['difficulty_level'],
-                'estimated_time': answer_result['estimated_time'],
-                'start': answer_result.get('start', 0),
-                'end': answer_result.get('end', 0),
-                'video_url': answer_result.get('video_url'),
-                'formatted_timestamp': answer_result.get('formatted_timestamp'),
-                'answer_source': 'enhanced_topic_wise' if enhanced_topic_wise_qa_system else 'enhanced_semantic'
-            }
-        else:
-            return {
-                'success': False,
-                'error': answer_result.get('error', 'Unknown error'),
-                'answer': answer_result.get('answer', ''),
-                'sources': []
-            }
-            
-    except Exception as e:
-        logger.error(f"❌ Error processing question: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/ask-topic-wise/{company_name}/{qudemo_id}")
-async def ask_question_topic_wise(company_name: str, qudemo_id: str, request: QuestionRequest):
-    """Ask a question using enhanced topic-wise QA system (Primary for topic-wise chunks)"""
-    try:
-        if not enhanced_topic_wise_qa_system:
-            raise HTTPException(status_code=500, detail="Enhanced Topic-Wise Q&A System not initialized")
-        
-        logger.info(f"🧠 Enhanced Topic-Wise QA: {request.question} for {company_name} qudemo {qudemo_id}")
-        
-        # Use enhanced topic-wise Q&A system to get answer
-        answer_result = enhanced_topic_wise_qa_system.ask_question(
-            question=request.question,
-            company_name=company_name,
-            qudemo_id=qudemo_id
-        )
-        
-        if answer_result.get('confidence', 0) > 0.3:  # Confidence threshold
-            return {
-                'success': True,
-                'answer': answer_result['answer'],
-                'confidence': answer_result['confidence'],
-                'sources': answer_result.get('sources', []),
-                'timestamp': answer_result.get('timestamp'),
-                'topic_context': answer_result.get('topic_context', {}),
-                'metadata': answer_result.get('metadata', {}),
-                'method': 'enhanced_topic_wise_qa'
-            }
-        else:
-            return {
-                'success': False,
-                'answer': answer_result.get('answer', 'I couldn\'t find a confident answer to your question.'),
-                'confidence': answer_result.get('confidence', 0),
-                'sources': answer_result.get('sources', []),
-                'timestamp': answer_result.get('timestamp'),
-                'topic_context': answer_result.get('topic_context', {}),
-                'metadata': answer_result.get('metadata', {}),
-                'method': 'enhanced_topic_wise_qa'
-            }
-            
-    except Exception as e:
-        logger.error(f"❌ Error processing topic-wise question: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/ask-context/{company_name}/{qudemo_id}")
-async def ask_question_context_first(company_name: str, qudemo_id: str, request: QuestionRequest):
-    """Ask a question using context-first QA system with semantic retrieval and neural re-ranking"""
-    try:
-        if not context_first_qa_system:
-            raise HTTPException(status_code=500, detail="Context-First Q&A System not initialized")
-        
-        logger.info(f"🧠 Context-First QA: {request.question} for {company_name} qudemo {qudemo_id}")
-        
-        # Use context-first Q&A system to get answer
-        answer_result = context_first_qa_system.ask_question(
-            question=request.question,
-            company_name=company_name,
-            qudemo_id=qudemo_id
-        )
-        
-        if answer_result['success']:
-            return {
-                'success': True,
-                'answer': answer_result['answer'],
-                'sources': answer_result['sources'],
-                'total_sources': answer_result['total_sources'],
-                'search_score': answer_result['search_score'],
-                'content_types_found': answer_result['content_types_found'],
-                'difficulty_level': answer_result['difficulty_level'],
-                'estimated_time': answer_result['estimated_time'],
-                'start': answer_result.get('start', 0),
-                'end': answer_result.get('end', 0),
-                'video_url': answer_result.get('video_url'),
-                'formatted_timestamp': answer_result.get('formatted_timestamp'),
-                'answer_source': 'context_first'
-            }
-        else:
-            return {
-                'success': False,
-                'error': answer_result.get('error', 'Unknown error'),
-                'answer': answer_result.get('answer', ''),
-                'sources': []
-            }
-            
-    except Exception as e:
-        logger.error(f"❌ Error processing question: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/ask-hybrid/{company_name}/{qudemo_id}")
-async def ask_question_hybrid(company_name: str, qudemo_id: str, request: QuestionRequest):
-    """Ask a question using enhanced hybrid QA system (combines semantic and GCS search)"""
-    try:
-        if not enhanced_hybrid_qa_system:
-            raise HTTPException(status_code=500, detail="Enhanced Hybrid Q&A System not initialized")
-        
-        logger.info(f"🔀 Hybrid QA: {request.question} for {company_name} qudemo {qudemo_id}")
-        
-        # Use hybrid Q&A system to get answer
-        answer_result = await enhanced_hybrid_qa_system.ask_question(
-            question=request.question,
-            company_name=company_name,
-            qudemo_id=qudemo_id
-        )
-        
-        if answer_result['success']:
-            return {
-                'success': True,
-                'answer': answer_result['answer'],
-                'sources': answer_result.get('sources', []),
-                'total_sources': answer_result.get('total_sources', 0),
-                'search_score': answer_result.get('search_score', 0),
-                'content_types_found': answer_result.get('content_types_found', []),
-                'difficulty_level': answer_result.get('difficulty_level', 'intermediate'),
-                'estimated_time': answer_result.get('estimated_time', '2-3 minutes'),
-                'start': answer_result.get('start', 0),
-                'end': answer_result.get('end', 0),
-                'video_url': answer_result.get('video_url'),
-                'formatted_timestamp': answer_result.get('formatted_timestamp'),
-                'answer_source': 'enhanced_hybrid_qa',
-                'processing_method': answer_result.get('processing_method', 'hybrid_semantic_gcs')
-            }
-        else:
-            return {
-                'success': False,
-                'error': answer_result.get('error', 'Unknown error'),
-                'answer': answer_result.get('answer', ''),
-                'sources': [],
-                'fallback_reason': answer_result.get('fallback_reason', 'unknown')
-            }
-            
-    except Exception as e:
-        logger.error(f"❌ Error processing hybrid question: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/knowledge/sources/{company_name}")
 async def get_knowledge_sources_company(company_name: str):

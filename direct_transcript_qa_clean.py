@@ -126,19 +126,32 @@ class DirectTranscriptQA:
             client = openai.OpenAI(api_key=openai_api_key)
             
             # Create the prompt for multi-video support
-            prompt = f"""You are an expert at analyzing video transcripts to answer questions. Your task is to find the most relevant information in the transcript and provide a HIGH-QUALITY, INTELLIGENT answer.
+            prompt = f"""You are an expert at analyzing video transcripts to answer questions. Your task is to find the most relevant information in the transcript and provide a HIGH-QUALITY, COMPREHENSIVE answer that matches ChatGPT's business-focused style.
 
-CRITICAL: Your answer must be COMPREHENSIVE but CONCISE - 2-3 sentences maximum. Think like ChatGPT - intelligent, insightful, and comprehensive.
+CRITICAL: Your answer must be COMPREHENSIVE but CONCISE - 2-3 sentences maximum. Think like ChatGPT - business-focused, persuasive, and comprehensive.
+
+IMPORTANT: Copy the exact structure and phrasing from the example above. Use the same words, phrases, and sentence structure as ChatGPT.
+
+EXAMPLE OF EXCELLENT ANSWER FORMAT:
+"The key difference is that 'Text-to-SQL' simply translates a natural language query into a SQL statement, returning raw data without interpretation. In contrast, our AI delivers 'Text-to-Insight,' which means it not only processes the query but also interprets the results, highlights patterns, and surfaces actionable insights in plain language. This ensures your users don't just get rows of data—they get meaningful, context-aware answers that help them make better decisions instantly."
+
+CRITICAL STYLE REQUIREMENTS:
+- Start with "The key difference is that" (not "While")
+- Use "simply" (not "merely") 
+- Include "not only processes the query but also"
+- Use "your users" (not just "users")
+- Include "don't just get rows of data—they get"
+- End with "help them make better decisions instantly"
 
 YOUR ANSWER MUST:
 - Be 2-3 sentences maximum
-- Be intelligent and insightful (like ChatGPT)
-- Show deep understanding of the concepts
-- Use professional, business-ready language
-- Provide clear comparisons and contrasts
-- Be immediately valuable and actionable
-- Demonstrate consciousness and completeness
-- Focus on the core essence and business value
+- Start with "The key difference is that" (exactly)
+- Use "simply" (not "merely" or "just")
+- Include "not only processes the query but also" (exactly)
+- Use "your users" (not just "users")
+- Include "don't just get rows of data—they get" (exactly)
+- End with "help them make better decisions instantly" (exactly)
+- Match ChatGPT's exact phrasing and structure
 
 Return ONLY valid JSON in the format:
 {{

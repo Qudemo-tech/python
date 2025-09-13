@@ -46,10 +46,9 @@ class DirectTranscriptQA:
                 video_url = video_info['video_url']
                 video_title = video_info['video_title']
             
-            # Format the answer professionally like a sales bot
-            # Extract company name from transcript data if available
-            company_name = self._extract_company_name(transcript_data)
-            formatted_answer = self._format_professional_answer(llm_result['answer'], question, [], company_name)
+            # Use the LLM's answer directly without overwriting it
+            # The LLM already provides a complete, accurate answer
+            formatted_answer = llm_result['answer']
             
             return {
                 'answer': formatted_answer,

@@ -1,25 +1,11 @@
-# Production configuration for Render deployment
 services:
   - type: web
-    name: qudemo-python-backend
+    name: qudemo-python-backend-2
     env: python
-    plan: starter
-    buildCommand: |
-      pip install --upgrade pip
-      pip install -r requirements-python312.txt
-    startCommand: python start_production.py
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
     envVars:
-      - key: PYTHON_ENV
-        value: production
+      - key: PYTHON_VERSION
+        value: 3.12.0
       - key: PORT
-        value: 5001
-      - key: HOST
-        value: 0.0.0.0
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: PINECONE_API_KEY
-        sync: false
-      - key: GEMINI_API_KEY
-        sync: false
-    healthCheckPath: /health
-    autoDeploy: true
+        value: 10000

@@ -30,7 +30,7 @@ from company_bucket_service import initialize_company_bucket_service, get_compan
 # from universal_help_scraper import UniversalScraperIntegration
 
 # Video processing imports
-from loom_processor_gcs import LoomVideoProcessorGCS
+from loom_processor import LoomVideoProcessorGCS
 
 # Load environment variables
 from dotenv import load_dotenv

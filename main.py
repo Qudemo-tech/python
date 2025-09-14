@@ -110,8 +110,7 @@ async def lifespan(app: FastAPI):
             openai_api_key = os.getenv('OPENAI_API_KEY')
             if openai_api_key:
                 loom_processor_gcs = LoomVideoProcessorGCS(
-                    openai_api_key=openai_api_key,
-                    gcs_bucket_name='qudemo-video-transcripts'
+                    openai_api_key=openai_api_key
                 )
                 logger.info("✅ GCS-based Loom Video Processor initialized")
             else:

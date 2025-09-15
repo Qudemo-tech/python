@@ -75,4 +75,13 @@ class SimpleTranscriptionService:
             
         except Exception as e:
             logger.error(f"❌ Transcription failed: {e}")
+            
+            # Log additional error details for debugging
+            if hasattr(e, 'response'):
+                logger.error(f"❌ API Response: {e.response}")
+            if hasattr(e, 'status_code'):
+                logger.error(f"❌ Status Code: {e.status_code}")
+            if hasattr(e, 'body'):
+                logger.error(f"❌ Response Body: {e.body}")
+            
             return None

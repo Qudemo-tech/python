@@ -300,19 +300,29 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
 
 @app.get("/knowledge/sources/{company_name}")
 async def get_knowledge_sources_company(company_name: str):
-    """Get knowledge sources for a company using GCS"""
+    """Get knowledge sources for a company using GCS (optimized to avoid excessive logging)"""
     try:
         logger.info(f"📚 Getting knowledge sources for company {company_name}")
         
         # Use GCS service to get company data
         gcs_service = gcs_qa_service.gcs_service
         if gcs_service:
-            # Get list of qudemos for the company
+            # Get list of qudemos for the company (without individual processing)
             qudemos = gcs_service.list_qudemos(company_name)
             
+            # Return a simplified response without processing each QuDemo individually
+            # This prevents excessive logging and improves performance
             knowledge_sources = []
-            for qudemo_id in qudemos:
+            
+            # Only process a limited number of QuDemos to avoid excessive logging
+            max_qudemos_to_process = 5  # Limit to prevent excessive API calls
+            qudemos_to_process = qudemos[:max_qudemos_to_process]
+            
+            logger.info(f"📊 Found {len(qudemos)} QuDemos for company {company_name}, processing {len(qudemos_to_process)} for knowledge sources")
+            
+            for qudemo_id in qudemos_to_process:
                 try:
+                    # Get basic transcript data without detailed logging
                     transcript_data = gcs_service.get_video_transcript(
                         company_name=company_name,
                         qudemo_id=qudemo_id
@@ -332,14 +342,33 @@ async def get_knowledge_sources_company(company_name: str):
                             'company_name': company_name
                         })
                 except Exception as e:
-                    logger.warning(f"⚠️ Could not get transcript for {qudemo_id}: {e}")
+                    # Reduce logging verbosity for company-level endpoint
+                    logger.debug(f"⚠️ Could not get transcript for {qudemo_id}: {e}")
                     continue
+            
+            # Add summary for remaining QuDemos without processing them
+            remaining_qudemos = len(qudemos) - len(qudemos_to_process)
+            if remaining_qudemos > 0:
+                knowledge_sources.append({
+                    'type': 'summary',
+                    'url': '',
+                    'title': f'... and {remaining_qudemos} more QuDemos',
+                    'chunks_count': 0,
+                    'qudemo_id': 'summary',
+                    'company_name': company_name,
+                    'is_summary': True
+                })
+            
+            logger.info(f"✅ Retrieved {len(knowledge_sources)} knowledge sources for company {company_name}")
             
             return {
                 "success": True,
                 "data": {
                     "sources": knowledge_sources,
-                    "total_sources": len(knowledge_sources)
+                    "total_sources": len(knowledge_sources),
+                    "total_qudemos": len(qudemos),
+                    "processed_qudemos": len(qudemos_to_process),
+                    "remaining_qudemos": remaining_qudemos
                 }
             }
         else:

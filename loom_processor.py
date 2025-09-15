@@ -70,6 +70,107 @@ class LoomVideoProcessorGCS:
             formatted_segments.append(formatted_segment)
         return formatted_segments
     
+    def compress_video_for_whisper(self, input_path: str) -> Optional[str]:
+        """Compress video to under 25MB for Whisper API"""
+        try:
+            # Check if file is already small enough
+            file_size_mb = os.path.getsize(input_path) / (1024 * 1024)
+            if file_size_mb <= 25:
+                logger.info(f"✅ Video already under 25MB: {file_size_mb:.1f} MB")
+                return input_path
+            
+            # Create compressed file path
+            temp_dir = tempfile.gettempdir()
+            compressed_path = os.path.join(temp_dir, f"loom_compressed_{int(time.time())}.mp4")
+            
+            logger.info(f"🗜️ Compressing video from {file_size_mb:.1f} MB to under 25MB...")
+            
+            # Use ffmpeg to compress video
+            # Target: 20MB max (leave some buffer)
+            # More aggressive compression for large files
+            if file_size_mb > 100:
+                target_bitrate = "200k"  # Very aggressive for large files
+                audio_bitrate = "32k"
+            elif file_size_mb > 50:
+                target_bitrate = "300k"  # Aggressive for medium files
+                audio_bitrate = "48k"
+            else:
+                target_bitrate = "500k"  # Conservative for smaller files
+                audio_bitrate = "64k"
+            
+            cmd = [
+                'ffmpeg',
+                '-i', input_path,
+                '-c:v', 'libx264',
+                '-b:v', target_bitrate,
+                '-c:a', 'aac',
+                '-b:a', audio_bitrate,
+                '-movflags', '+faststart',
+                '-preset', 'fast',  # Faster encoding
+                '-crf', '28',  # Constant rate factor for quality
+                '-y',  # Overwrite output file
+                compressed_path
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            
+            if result.returncode == 0 and os.path.exists(compressed_path):
+                compressed_size_mb = os.path.getsize(compressed_path) / (1024 * 1024)
+                logger.info(f"✅ Video compressed successfully: {compressed_size_mb:.1f} MB")
+                
+                # If still too large, try more aggressive compression
+                if compressed_size_mb > 25:
+                    logger.warning(f"⚠️ Compressed video still too large ({compressed_size_mb:.1f} MB), trying ultra-aggressive compression...")
+                    
+                    # Ultra-aggressive compression
+                    ultra_compressed_path = os.path.join(temp_dir, f"loom_ultra_compressed_{int(time.time())}.mp4")
+                    ultra_cmd = [
+                        'ffmpeg',
+                        '-i', compressed_path,
+                        '-c:v', 'libx264',
+                        '-b:v', '100k',  # Ultra-low bitrate
+                        '-c:a', 'aac',
+                        '-b:a', '16k',   # Ultra-low audio bitrate
+                        '-movflags', '+faststart',
+                        '-preset', 'ultrafast',
+                        '-crf', '35',    # Very high compression
+                        '-y',
+                        ultra_compressed_path
+                    ]
+                    
+                    ultra_result = subprocess.run(ultra_cmd, capture_output=True, text=True, timeout=300)
+                    
+                    if ultra_result.returncode == 0 and os.path.exists(ultra_compressed_path):
+                        ultra_size_mb = os.path.getsize(ultra_compressed_path) / (1024 * 1024)
+                        logger.info(f"✅ Ultra-compressed video: {ultra_size_mb:.1f} MB")
+                        
+                        # Clean up intermediate file
+                        try:
+                            os.unlink(compressed_path)
+                        except:
+                            pass
+                        
+                        compressed_path = ultra_compressed_path
+                        compressed_size_mb = ultra_size_mb
+                    else:
+                        logger.warning(f"⚠️ Ultra-compression failed, using regular compression: {compressed_size_mb:.1f} MB")
+                
+                # Clean up original file
+                try:
+                    os.unlink(input_path)
+                    logger.info("🧹 Cleaned up original video file")
+                except:
+                    pass
+                
+                return compressed_path
+            else:
+                logger.error(f"❌ Video compression failed: {result.stderr}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Video compression error: {e}")
+            return None
+
     def download_loom_video(self, video_url: str) -> Optional[str]:
         """Download Loom video using yt-dlp with quality fallback"""
         try:
@@ -103,7 +204,10 @@ class LoomVideoProcessorGCS:
                     if result.returncode == 0 and os.path.exists(temp_video_path) and os.path.getsize(temp_video_path) > 1000:
                         file_size_mb = os.path.getsize(temp_video_path) / (1024 * 1024)
                         logger.info(f"✅ Successfully downloaded {quality} quality video: {file_size_mb:.1f} MB")
-                        return temp_video_path
+                        
+                        # Compress video if too large for Whisper
+                        compressed_path = self.compress_video_for_whisper(temp_video_path)
+                        return compressed_path
                     else:
                         logger.warning(f"⚠️ {quality} quality download failed: {result.stderr}")
                         # Clean up failed file
@@ -227,7 +331,7 @@ class LoomVideoProcessorGCS:
             if not transcription_data:
                 raise Exception("Failed to transcribe video")
             
-            # Clean up video file
+            # Clean up video file (could be original or compressed)
             try:
                 os.unlink(video_path)
                 logger.info("🧹 Cleaned up temporary video file")

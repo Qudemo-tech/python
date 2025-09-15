@@ -132,6 +132,83 @@ class LoomVideoProcessorGCS:
         except:
             return "Loom Video"
     
+    def _log_raw_loom_data(self, video_url: str, raw_transcript: str, segments: List[Dict]):
+        """Log raw data from Loom video processing like Gemini does"""
+        try:
+            logger.info("=" * 80)
+            logger.info("🔍 RAW LOOM DATA LOGGING - BEFORE CHUNKING")
+            logger.info("=" * 80)
+            logger.info(f"📹 Video URL: {video_url}")
+            logger.info(f"📊 Raw Transcript Length: {len(raw_transcript)} characters")
+            logger.info(f"📊 Word Count: {len(raw_transcript.split())}")
+            logger.info(f"📊 Segments Count: {len(segments)}")
+            
+            # Log raw transcript preview
+            transcript_preview = raw_transcript[:1000]
+            logger.info(f"📝 Raw transcript preview (first 1000 chars):")
+            logger.info(f"{transcript_preview}")
+            
+            if len(raw_transcript) > 1000:
+                transcript_end = raw_transcript[-1000:]
+                logger.info(f"📝 Raw transcript preview (last 1000 chars):")
+                logger.info(f"{transcript_end}")
+            
+            # Log segment details with timestamps
+            logger.info(f"📊 Segment Details:")
+            for i, segment in enumerate(segments[:10]):  # Log first 10 segments
+                start_time = segment.get('start', 0)
+                end_time = segment.get('end', 0)
+                text = segment.get('text', '')
+                duration = end_time - start_time
+                
+                logger.info(f"  Segment {i+1}:")
+                logger.info(f"    Time range: {start_time:.2f}s - {end_time:.2f}s (duration: {duration:.2f}s)")
+                logger.info(f"    Text length: {len(text)} characters")
+                logger.info(f"    Word count: {len(text.split())}")
+                logger.info(f"    Text preview: {text[:200]}...")
+                
+                if i < len(segments) - 1 and i < 9:
+                    logger.info("    ---")
+            
+            if len(segments) > 10:
+                logger.info(f"  ... and {len(segments) - 10} more segments")
+            
+            # Log timestamp statistics
+            if segments:
+                start_times = [s.get('start', 0) for s in segments]
+                end_times = [s.get('end', 0) for s in segments]
+                min_start = min(start_times)
+                max_end = max(end_times)
+                total_duration = max_end - min_start
+                
+                logger.info(f"📊 Timestamp Statistics:")
+                logger.info(f"  Time range: {min_start:.2f}s - {max_end:.2f}s")
+                logger.info(f"  Total duration: {total_duration:.2f}s")
+                logger.info(f"  Average segment duration: {total_duration/len(segments):.2f}s")
+                
+                # Check for gaps or overlaps
+                gaps = []
+                overlaps = []
+                for i in range(len(segments) - 1):
+                    current_end = segments[i].get('end', 0)
+                    next_start = segments[i + 1].get('start', 0)
+                    if next_start > current_end:
+                        gaps.append(next_start - current_end)
+                    elif next_start < current_end:
+                        overlaps.append(current_end - next_start)
+                
+                if gaps:
+                    logger.info(f"  Gaps detected: {len(gaps)} gaps, avg: {sum(gaps)/len(gaps):.2f}s")
+                if overlaps:
+                    logger.info(f"  Overlaps detected: {len(overlaps)} overlaps, avg: {sum(overlaps)/len(overlaps):.2f}s")
+            
+            logger.info("=" * 80)
+            logger.info("✅ RAW LOOM DATA LOGGING COMPLETE")
+            logger.info("=" * 80)
+            
+        except Exception as e:
+            logger.error(f"❌ Error logging raw Loom data: {e}")
+    
     def process_video(self, video_url: str, company_name: str, qudemo_id: str = None) -> Optional[Dict]:
         """Process Loom video and store in GCS with YouTube format"""
         try:
@@ -207,6 +284,9 @@ class LoomVideoProcessorGCS:
             logger.info(f"✅ Loom video processing completed successfully")
             logger.info(f"📊 Transcript: {len(raw_transcript)} chars, {len(segments)} segments")
             logger.info(f"💾 Stored in GCS: {company_name}/{qudemo_id}")
+            
+            # Log timestamp and raw transcript data like Gemini does
+            self._log_raw_loom_data(video_url, raw_transcript, segments)
             
             return result
             

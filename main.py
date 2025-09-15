@@ -461,8 +461,8 @@ async def upload_loom_media(
         
         # Process with media file using GCS-based Loom processor
         if loom_processor_gcs:
-            result = loom_processor_gcs.process_loom_video(
-                video_url, company_name, qudemo_id, temp_file_path
+            result = loom_processor_gcs.process_video(
+                video_url, company_name, qudemo_id
             )
         else:
             raise HTTPException(status_code=500, detail="GCS-based Loom processor not available")
@@ -690,7 +690,7 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                     # Process video using GCS-based Loom processor
                     if loom_processor_gcs:
                         logger.info(f"🎥 Processing Loom video with GCS: {video_url}")
-                        result = loom_processor_gcs.process_loom_video(
+                        result = loom_processor_gcs.process_video(
                             video_url, company_name, qudemo_id
                         )
                         
@@ -698,7 +698,7 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                         if result and result.get('success'):
                             result = {
                                 'success': True,
-                                'chunks_stored': result.get('chunks_created', 0),
+                                'chunks_stored': result.get('segments_count', 0),  # Use segments_count as chunks
                                 'video_type': 'loom',
                                 'company_name': company_name,
                                 'qudemo_id': qudemo_id,

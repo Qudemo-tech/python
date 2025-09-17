@@ -522,3 +522,34 @@ class GoogleCloudStorageService:
                     steps.append(sentence)
         
         return steps[:4]  # Limit to 4 steps for better readability
+    
+    def delete_company_bucket(self, company_name: str) -> bool:
+        """Delete entire company bucket and all its contents"""
+        try:
+            # Get company-specific bucket name
+            bucket_name = f"qudemo-{company_name.lower().replace(' ', '-')}"
+            
+            # Check if bucket exists
+            bucket = self.client.bucket(bucket_name)
+            if not bucket.exists():
+                logger.warning(f"⚠️ Bucket {bucket_name} does not exist")
+                return True  # Consider it successful if bucket doesn't exist
+            
+            # Delete all blobs in the bucket first
+            blobs = self.client.list_blobs(bucket_name)
+            deleted_count = 0
+            for blob in blobs:
+                blob.delete()
+                deleted_count += 1
+            
+            logger.info(f"🗑️ Deleted {deleted_count} files from bucket {bucket_name}")
+            
+            # Delete the bucket itself
+            bucket.delete()
+            logger.info(f"✅ Successfully deleted bucket {bucket_name}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to delete company bucket {company_name}: {e}")
+            return False

@@ -1256,6 +1256,44 @@ async def debug_gcs_structure():
         logger.error(f"❌ Debug GCS structure error: {e}")
         return {"success": False, "error": str(e)}
 
+@app.post("/delete-company-bucket")
+async def delete_company_bucket(request: dict):
+    """Delete entire company bucket and all its contents"""
+    try:
+        company_name = request.get("company_name")
+        if not company_name:
+            raise HTTPException(status_code=400, detail="company_name is required")
+        
+        logger.info(f"🗑️ Deleting company bucket for: {company_name}")
+        
+        # Check if GCS service is available
+        if not gcs_qa_service:
+            error_msg = "GCS service not initialized"
+            logger.error(f"❌ {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+        
+        # Delete the company bucket
+        success = gcs_qa_service.gcs_service.delete_company_bucket(company_name)
+        
+        if success:
+            logger.info(f"✅ Successfully deleted bucket for company: {company_name}")
+            return {
+                "success": True,
+                "message": f"Successfully deleted bucket for company: {company_name}",
+                "company_name": company_name
+            }
+        else:
+            logger.error(f"❌ Failed to delete bucket for company: {company_name}")
+            return {
+                "success": False,
+                "error": f"Failed to delete bucket for company: {company_name}",
+                "company_name": company_name
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Delete company bucket error: {e}")
+        return {"success": False, "error": str(e)}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=5001)

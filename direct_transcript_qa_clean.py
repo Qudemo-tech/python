@@ -128,7 +128,7 @@ class DirectTranscriptQA:
             # Create the prompt for multi-video support
             prompt = f"""You are an expert at analyzing video transcripts to answer questions. Your task is to find the most relevant information in the transcript and provide a HIGH-QUALITY, COMPREHENSIVE answer that matches ChatGPT's business-focused style.
 
-CRITICAL: Your answer must be COMPREHENSIVE but CONCISE - 2-3 sentences maximum. Think like ChatGPT - business-focused, persuasive, and comprehensive.
+CRITICAL: Your answer must be COMPREHENSIVE but CONCISE - 4-5 sentences maximum. Think like ChatGPT - business-focused, persuasive, and comprehensive.
 
 IMPORTANT: Copy the exact structure and phrasing from the example above. Use the same words, phrases, and sentence structure as ChatGPT.
 

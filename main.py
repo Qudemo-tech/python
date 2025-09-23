@@ -131,6 +131,13 @@ async def lifespan(app: FastAPI):
     # Cleanup on shutdown
     logger.info("🔄 Shutting down GCS-based QuDemo Python Backend...")
     try:
+        # Graceful shutdown - close any active connections
+        import asyncio
+        import signal
+        
+        # Give some time for active requests to complete
+        await asyncio.sleep(1)
+        
         logger.info("✅ Shutdown completed successfully")
     except Exception as e:
         logger.error(f"❌ Error during shutdown: {e}")
@@ -209,6 +216,44 @@ async def health_check():
         return {
             "status": "unhealthy",
             "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
+@app.get("/memory-status")
+async def memory_status():
+    """Memory status endpoint for health checks"""
+    try:
+        import psutil
+        memory = psutil.virtual_memory()
+        return {
+            "success": True,
+            "memory": {
+                "total": memory.total,
+                "available": memory.available,
+                "used": memory.used,
+                "percentage": memory.percent
+            },
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat()
+        }
+    except ImportError:
+        return {
+            "success": True,
+            "memory": {
+                "total": "N/A",
+                "available": "N/A", 
+                "used": "N/A",
+                "percentage": "N/A"
+            },
+            "status": "psutil_not_available",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"❌ Memory status check failed: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "status": "error",
             "timestamp": datetime.now().isoformat()
         }
 

@@ -171,60 +171,227 @@ class LoomVideoProcessorGCS:
             logger.error(f"❌ Video compression error: {e}")
             return None
 
+    def get_available_formats(self, video_url: str) -> List[str]:
+        """Get available formats for a Loom video"""
+        try:
+            cmd = [
+                'python', '-m', 'yt_dlp',
+                '--list-formats',
+                '--no-warnings',
+                video_url
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            
+            if result.returncode == 0:
+                formats = []
+                lines = result.stdout.split('\n')
+                for line in lines:
+                    if 'mp4' in line.lower() or 'webm' in line.lower():
+                        # Extract format ID (usually first column)
+                        parts = line.split()
+                        if parts and parts[0].isdigit():
+                            formats.append(parts[0])
+                logger.info(f"📋 Available formats: {formats}")
+                return formats
+            else:
+                logger.warning(f"⚠️ Could not list formats: {result.stderr}")
+                return []
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Error listing formats: {e}")
+            return []
+
     def download_loom_video(self, video_url: str) -> Optional[str]:
-        """Download Loom video using yt-dlp with quality fallback"""
+        """Download Loom video using yt-dlp with comprehensive fallback strategies"""
         try:
             # Create temporary file path
             temp_dir = tempfile.gettempdir()
             temp_video_path = os.path.join(temp_dir, f"loom_video_{int(time.time())}.mp4")
             
-            # Try different quality options
-            quality_options = [
-                'best[height<=720]',  # 720p
-                'best[height<=480]',  # 480p
-                'best'                # Any quality
+            # Strategy 1: Try to get available formats first
+            logger.info("🔍 Checking available formats...")
+            available_formats = self.get_available_formats(video_url)
+            
+            # Strategy 2: Try different download approaches
+            download_strategies = [
+                # Strategy 1: Use available formats if found
+                {
+                    'name': 'Available Formats',
+                    'formats': available_formats[:3] if available_formats else [],  # Try top 3 formats
+                    'extra_args': ['--no-warnings', '--retries', '3', '--fragment-retries', '3']
+                },
+                # Strategy 2: Standard quality fallback
+                {
+                    'name': 'Standard Quality',
+                    'formats': ['best[height<=720]', 'best[height<=480]', 'best'],
+                    'extra_args': ['--no-warnings', '--retries', '2', '--fragment-retries', '2']
+                },
+                # Strategy 3: Any available format
+                {
+                    'name': 'Any Format',
+                    'formats': ['best'],
+                    'extra_args': ['--no-warnings', '--retries', '1', '--fragment-retries', '1', '--format', 'best']
+                },
+                # Strategy 4: Force specific formats
+                {
+                    'name': 'Force Formats',
+                    'formats': ['worst', 'best[ext=mp4]', 'best[ext=webm]'],
+                    'extra_args': ['--no-warnings', '--retries', '1']
+                },
+                # Strategy 5: Use cookies and headers (for private videos)
+                {
+                    'name': 'With Headers',
+                    'formats': ['best'],
+                    'extra_args': [
+                        '--no-warnings', 
+                        '--retries', '2',
+                        '--add-header', 'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        '--add-header', 'Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+                    ]
+                }
             ]
             
-            for i, quality in enumerate(quality_options):
-                try:
-                    logger.info(f"Attempting download with {quality} quality (attempt {i+1}/{len(quality_options)})")
-                    
-                    cmd = [
-                        'python', '-m', 'yt_dlp',
-                        '--no-warnings',
-                        '--retries', '2',
-                        '--fragment-retries', '2',
-                        '--format', quality,
-                        '--output', temp_video_path,
-                        video_url
-                    ]
-                    
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-                    
-                    if result.returncode == 0 and os.path.exists(temp_video_path) and os.path.getsize(temp_video_path) > 1000:
-                        file_size_mb = os.path.getsize(temp_video_path) / (1024 * 1024)
-                        logger.info(f"✅ Successfully downloaded {quality} quality video: {file_size_mb:.1f} MB")
-                        
-                        # Compress video if too large for Whisper
-                        compressed_path = self.compress_video_for_whisper(temp_video_path)
-                        return compressed_path
-                    else:
-                        logger.warning(f"⚠️ {quality} quality download failed: {result.stderr}")
-                        # Clean up failed file
-                        if os.path.exists(temp_video_path):
-                            os.remove(temp_video_path)
-                        
-                except Exception as e:
-                    logger.warning(f"⚠️ {quality} quality download error: {e}")
+            for strategy_idx, strategy in enumerate(download_strategies):
+                logger.info(f"🎯 Strategy {strategy_idx + 1}: {strategy['name']}")
+                
+                formats_to_try = strategy['formats']
+                if not formats_to_try:
+                    logger.info("⏭️ No formats to try in this strategy, skipping...")
                     continue
+                
+                for format_idx, format_id in enumerate(formats_to_try):
+                    try:
+                        logger.info(f"📥 Attempting download with format '{format_id}' (strategy {strategy_idx + 1}, attempt {format_idx + 1})")
+                        
+                        # Build command
+                        cmd = ['python', '-m', 'yt_dlp']
+                        cmd.extend(strategy['extra_args'])
+                        
+                        # Add format if not already in extra_args
+                        if '--format' not in ' '.join(strategy['extra_args']):
+                            cmd.extend(['--format', format_id])
+                        
+                        cmd.extend(['--output', temp_video_path, video_url])
+                        
+                        # Run download with timeout
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                        
+                        # Check if download was successful
+                        if result.returncode == 0 and os.path.exists(temp_video_path) and os.path.getsize(temp_video_path) > 1000:
+                            file_size_mb = os.path.getsize(temp_video_path) / (1024 * 1024)
+                            logger.info(f"✅ Successfully downloaded with format '{format_id}': {file_size_mb:.1f} MB")
+                            
+                            # Compress video if too large for Whisper
+                            compressed_path = self.compress_video_for_whisper(temp_video_path)
+                            return compressed_path
+                        else:
+                            logger.warning(f"⚠️ Format '{format_id}' download failed: {result.stderr}")
+                            # Clean up failed file
+                            if os.path.exists(temp_video_path):
+                                try:
+                                    os.remove(temp_video_path)
+                                except:
+                                    pass
+                            
+                    except subprocess.TimeoutExpired:
+                        logger.warning(f"⚠️ Format '{format_id}' download timed out")
+                        if os.path.exists(temp_video_path):
+                            try:
+                                os.remove(temp_video_path)
+                            except:
+                                pass
+                        continue
+                    except Exception as e:
+                        logger.warning(f"⚠️ Format '{format_id}' download error: {e}")
+                        if os.path.exists(temp_video_path):
+                            try:
+                                os.remove(temp_video_path)
+                            except:
+                                pass
+                        continue
+                
+                # If we've tried all formats in this strategy and none worked, continue to next strategy
+                logger.info(f"❌ Strategy {strategy_idx + 1} ({strategy['name']}) failed, trying next strategy...")
             
-            logger.error("❌ All download attempts failed")
+            # Strategy 6: Last resort - try with different yt-dlp options
+            logger.info("🆘 Last resort: Trying with minimal options...")
+            try:
+                minimal_cmd = [
+                    'python', '-m', 'yt_dlp',
+                    '--format', 'worst',
+                    '--output', temp_video_path,
+                    '--no-warnings',
+                    video_url
+                ]
+                
+                result = subprocess.run(minimal_cmd, capture_output=True, text=True, timeout=300)
+                
+                if result.returncode == 0 and os.path.exists(temp_video_path) and os.path.getsize(temp_video_path) > 1000:
+                    file_size_mb = os.path.getsize(temp_video_path) / (1024 * 1024)
+                    logger.info(f"✅ Last resort download successful: {file_size_mb:.1f} MB")
+                    
+                    compressed_path = self.compress_video_for_whisper(temp_video_path)
+                    return compressed_path
+                else:
+                    logger.error(f"❌ Last resort download failed: {result.stderr}")
+                    
+            except Exception as e:
+                logger.error(f"❌ Last resort download error: {e}")
+            
+            logger.error("❌ All download strategies failed")
             return None
                 
         except Exception as e:
             logger.error(f"❌ Download error: {e}")
             return None
     
+    def normalize_loom_url(self, video_url: str) -> str:
+        """Normalize Loom URL to handle different formats"""
+        try:
+            # Remove any extra parameters that might cause issues
+            if 'loom.com/share/' in video_url:
+                # Extract the base URL with video ID
+                base_url = video_url.split('?')[0]  # Remove query parameters
+                
+                # Ensure it has the proper format
+                if not base_url.endswith('/'):
+                    base_url += '/'
+                
+                logger.info(f"🔄 Normalized Loom URL: {base_url}")
+                return base_url
+            
+            return video_url
+        except Exception as e:
+            logger.warning(f"⚠️ Error normalizing URL: {e}")
+            return video_url
+
+    def validate_loom_url(self, video_url: str) -> bool:
+        """Validate if the URL is a proper Loom URL"""
+        try:
+            # Check if it's a Loom URL
+            if 'loom.com/share/' not in video_url:
+                return False
+            
+            # Extract video ID
+            video_id = video_url.split('loom.com/share/')[1].split('?')[0].split('/')[0]
+            
+            # Check if video ID looks valid (alphanumeric, reasonable length)
+            if len(video_id) < 10 or len(video_id) > 50:
+                return False
+            
+            # Check if it contains only valid characters
+            import re
+            if not re.match(r'^[a-zA-Z0-9_-]+$', video_id):
+                return False
+            
+            logger.info(f"✅ Valid Loom URL detected: {video_id}")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error validating Loom URL: {e}")
+            return False
+
     def extract_video_title(self, video_url: str) -> str:
         """Extract video title from Loom URL"""
         try:
@@ -319,9 +486,17 @@ class LoomVideoProcessorGCS:
             logger.info(f"🎬 Processing Loom video: {video_url}")
             logger.info(f"🏢 Company: {company_name}, Qudemo ID: {qudemo_id}")
             
+            # Step 0: Validate and normalize URL
+            logger.info("🔍 Validating Loom URL...")
+            if not self.validate_loom_url(video_url):
+                raise Exception(f"Invalid Loom URL format: {video_url}")
+            
+            normalized_url = self.normalize_loom_url(video_url)
+            logger.info(f"✅ Using normalized URL: {normalized_url}")
+            
             # Step 1: Download video
             logger.info("🎥 Downloading Loom video...")
-            video_path = self.download_loom_video(video_url)
+            video_path = self.download_loom_video(normalized_url)
             if not video_path:
                 raise Exception("Failed to download Loom video")
             
@@ -375,13 +550,14 @@ class LoomVideoProcessorGCS:
             # Step 7: Return success result
             result = {
                 'success': True,
-                'video_url': video_url,
+                'video_url': video_url,  # Use original URL for consistency
+                'normalized_url': normalized_url,  # Include normalized URL for debugging
                 'company_name': company_name,
                 'qudemo_id': qudemo_id,
                 'title': video_title,
                 'transcript_length': len(raw_transcript),
                 'segments_count': len(segments),
-                'method': 'loom_whisper_gcs',
+                'method': 'loom_whisper_gcs_enhanced',
                 'storage': 'gcs'
             }
             
@@ -405,7 +581,7 @@ class LoomVideoProcessorGCS:
             }
 
 def main():
-    """Test the Loom processor"""
+    """Test the Loom processor with multiple URLs"""
     from dotenv import load_dotenv
     load_dotenv()
     
@@ -416,23 +592,43 @@ def main():
     
     processor = LoomVideoProcessorGCS(openai_key)
     
-    # Test with Loom video
-    loom_url = "https://www.loom.com/share/cdca2f74fedc4a119df8219a8c86cd8c?sid=f3dae5d3-90c0-4ffb-9f85-c57ee7cd0a02"
+    # Test with multiple Loom videos including the problematic one
+    test_urls = [
+        "https://www.loom.com/share/cdca2f74fedc4a119df8219a8c86cd8c?sid=f3dae5d3-90c0-4ffb-9f85-c57ee7cd0a02",  # Working URL
+        "https://www.loom.com/share/473fad25ebd24b5ea8091503253dfecf",  # Problematic URL
+        "https://www.loom.com/share/473fad25ebd24b5ea8091503253dfecf?sid=test123",  # With session ID
+    ]
     
-    print("🎬 Testing Loom Video Processor GCS")
-    print(f"📹 Video: {loom_url}")
+    print("🎬 Testing Enhanced Loom Video Processor GCS")
     
-    result = processor.process_video(loom_url, 'test_company', 'test_qudemo')
-    
-    if result and result.get('success'):
-        print("✅ Processing successful!")
-        print(f"📊 Transcript: {result.get('transcript_length', 0)} chars")
-        print(f"📊 Segments: {result.get('segments_count', 0)}")
-        print(f"💾 Storage: {result.get('storage', 'Unknown')}")
-    else:
-        print("❌ Processing failed")
-        if result:
-            print(f"Error: {result.get('error', 'Unknown error')}")
+    for i, loom_url in enumerate(test_urls, 1):
+        print(f"\n{'='*60}")
+        print(f"🧪 Test {i}: {loom_url}")
+        print(f"{'='*60}")
+        
+        # Test URL validation first
+        is_valid = processor.validate_loom_url(loom_url)
+        print(f"🔍 URL Validation: {'✅ Valid' if is_valid else '❌ Invalid'}")
+        
+        if is_valid:
+            normalized = processor.normalize_loom_url(loom_url)
+            print(f"🔄 Normalized URL: {normalized}")
+        
+        # Test processing
+        result = processor.process_video(loom_url, 'test_company', f'test_qudemo_{i}')
+        
+        if result and result.get('success'):
+            print("✅ Processing successful!")
+            print(f"📊 Transcript: {result.get('transcript_length', 0)} chars")
+            print(f"📊 Segments: {result.get('segments_count', 0)}")
+            print(f"💾 Storage: {result.get('storage', 'Unknown')}")
+            print(f"🔧 Method: {result.get('method', 'Unknown')}")
+        else:
+            print("❌ Processing failed")
+            if result:
+                print(f"Error: {result.get('error', 'Unknown error')}")
+        
+        print(f"{'='*60}")
 
 if __name__ == "__main__":
     main()

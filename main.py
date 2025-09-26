@@ -343,6 +343,53 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
 
 
 
+@app.post("/generate-suggested-questions/{company_name}/{qudemo_id}")
+async def generate_suggested_questions(company_name: str, qudemo_id: str):
+    """Generate and store suggested questions for a QuDemo"""
+    try:
+        if not gcs_qa_service:
+            raise HTTPException(status_code=500, detail="GCS Q&A service not available")
+        
+        logger.info(f"🤖 Generating suggested questions for {company_name}/{qudemo_id}")
+        
+        # Generate and store suggested questions
+        suggested_questions = gcs_qa_service.generate_and_store_suggested_questions(company_name, qudemo_id)
+        
+        return {
+            'success': True,
+            'suggested_questions': suggested_questions,
+            'total_questions': len(suggested_questions),
+            'company_name': company_name,
+            'qudemo_id': qudemo_id,
+            'generated_at': datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error generating suggested questions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/suggested-questions/{company_name}/{qudemo_id}")
+async def get_suggested_questions(company_name: str, qudemo_id: str):
+    """Get suggested questions for a QuDemo"""
+    try:
+        if not gcs_qa_service:
+            raise HTTPException(status_code=500, detail="GCS Q&A service not available")
+        
+        # Get suggested questions
+        suggested_questions = gcs_qa_service.get_suggested_questions(company_name, qudemo_id)
+        
+        return {
+            'success': True,
+            'suggested_questions': suggested_questions,
+            'total_questions': len(suggested_questions),
+            'company_name': company_name,
+            'qudemo_id': qudemo_id
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error getting suggested questions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/knowledge/sources/{company_name}")
 async def get_knowledge_sources_company(company_name: str):
     """Get knowledge sources for a company using GCS (optimized to avoid excessive logging)"""

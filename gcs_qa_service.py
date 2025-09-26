@@ -9,6 +9,7 @@ import json
 import logging
 from typing import Dict, List, Optional, Any
 from google_cloud_storage_service import GoogleCloudStorageService
+from direct_transcript_qa import DirectTranscriptQA
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ class GCSQAService:
             bucket_name=gcs_bucket_name,
             service_account_path='service-account-key.json'
         )
+        self.direct_qa = DirectTranscriptQA()
     
     async def ask_question(self, question: str, company_name: str, qudemo_id: str) -> Dict[str, Any]:
         """
@@ -165,3 +167,51 @@ class GCSQAService:
     def delete_qudemo(self, company_name: str, qudemo_id: str) -> bool:
         """Delete all data for a specific qudemo"""
         return self.gcs_service.delete_qudemo_data(company_name, qudemo_id)
+    
+    def generate_and_store_suggested_questions(self, company_name: str, qudemo_id: str) -> List[str]:
+        """Generate and store suggested questions for a QuDemo"""
+        try:
+            logger.info(f"🤖 Generating suggested questions for {company_name}/{qudemo_id}")
+            
+            # Get transcript data
+            transcript_data = self.gcs_service.get_video_transcript(company_name, qudemo_id)
+            if not transcript_data:
+                logger.warning(f"⚠️ No transcript found for {company_name}/{qudemo_id}")
+                return []
+            
+            # Generate suggested questions using the direct QA system
+            suggested_questions = self.direct_qa.generate_suggested_questions(transcript_data)
+            
+            if suggested_questions:
+                # Store suggested questions in GCS
+                success = self.gcs_service.store_suggested_questions(
+                    company_name=company_name,
+                    qudemo_id=qudemo_id,
+                    suggested_questions=suggested_questions
+                )
+                
+                if success:
+                    logger.info(f"✅ Generated and stored {len(suggested_questions)} suggested questions for {company_name}/{qudemo_id}")
+                    return suggested_questions
+                else:
+                    logger.error(f"❌ Failed to store suggested questions for {company_name}/{qudemo_id}")
+                    return []
+            else:
+                logger.warning(f"⚠️ No suggested questions generated for {company_name}/{qudemo_id}")
+                return []
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to generate suggested questions: {e}")
+            return []
+    
+    def get_suggested_questions(self, company_name: str, qudemo_id: str) -> List[str]:
+        """Get suggested questions for a QuDemo"""
+        try:
+            suggested_questions_data = self.gcs_service.get_suggested_questions(company_name, qudemo_id)
+            if suggested_questions_data:
+                return suggested_questions_data.get('suggested_questions', [])
+            else:
+                return []
+        except Exception as e:
+            logger.error(f"❌ Failed to get suggested questions: {e}")
+            return []

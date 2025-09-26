@@ -42,7 +42,7 @@ class SimpleGeminiTranscriber:
     def transcribe_video(
         self,
         video_url: str,
-        model: str = "gemini-1.5-flash",
+        model: str = "gemini-pro-latest",
         mime_type: str = "video/mp4",
         timeout: int = 600,  # Increased to 10 minutes for video processing
     ) -> Optional[str]:
@@ -82,12 +82,15 @@ class SimpleGeminiTranscriber:
             for attempt in range(max_retries):
                 try:
                     logger.info(f"🔄 Attempt {attempt + 1}/{max_retries} - Processing video (this may take 5-10 minutes)...")
-                    logger.info(f"📡 Making request to: {endpoint}?key={self.api_key[:10]}...")
+                    logger.info(f"📡 Making request to: {endpoint}")
                     logger.info(f"📦 Payload structure: {list(payload.keys())}")
                     
                     r = requests.post(
-                        f"{endpoint}?key={self.api_key}",
-                        headers={"Content-Type": "application/json"},
+                        endpoint,
+                        headers={
+                            "Content-Type": "application/json",
+                            "x-goog-api-key": self.api_key
+                        },
                         json=payload,
                         timeout=timeout,
                     )

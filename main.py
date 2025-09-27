@@ -22,6 +22,7 @@ import shutil
 from final_gemini_scraper import FinalGeminiScraper
 from gcs_qa_service import GCSQAService
 from simple_gemini_transcriber import SimpleGeminiTranscriber
+from document_processor import DocumentProcessor
 from company_api import router as company_router
 from company_bucket_service import initialize_company_bucket_service, get_company_bucket_service
 # from enhanced_scraper_with_failure_handling import initialize_enhanced_scraper, get_enhanced_scraper
@@ -45,11 +46,12 @@ loom_processor_gcs = None
 gcs_qa_service = None
 simple_transcriber = None
 company_bucket_service = None
+document_processor = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for FastAPI"""
-    global loom_processor_gcs, gcs_qa_service, simple_transcriber, company_bucket_service
+    global loom_processor_gcs, gcs_qa_service, simple_transcriber, company_bucket_service, document_processor
     
     try:
         logger.info("🚀 Starting Enhanced QuDemo Python Backend (GCS-based)...")
@@ -62,7 +64,9 @@ async def lifespan(app: FastAPI):
             if os.path.exists(service_account_path):
                 logger.info(f"🔍 Service account file found: {service_account_path}")
                 gcs_qa_service = GCSQAService()
+                document_processor = DocumentProcessor()
                 logger.info("✅ GCS Q&A Service initialized (Google Cloud Storage based)")
+                logger.info("✅ Document Processor initialized")
             else:
                 logger.warning("⚠️ Service account key not found, GCS Q&A Service disabled")
                 gcs_qa_service = None
@@ -342,6 +346,53 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
 
 
 
+
+@app.post("/generate-suggested-questions/{company_name}/{qudemo_id}")
+async def generate_suggested_questions(company_name: str, qudemo_id: str):
+    """Generate and store suggested questions for a QuDemo"""
+    try:
+        if not gcs_qa_service:
+            raise HTTPException(status_code=500, detail="GCS Q&A service not available")
+        
+        logger.info(f"🤖 Generating suggested questions for {company_name}/{qudemo_id}")
+        
+        # Generate and store suggested questions
+        suggested_questions = gcs_qa_service.generate_and_store_suggested_questions(company_name, qudemo_id)
+        
+        return {
+            'success': True,
+            'suggested_questions': suggested_questions,
+            'total_questions': len(suggested_questions),
+            'company_name': company_name,
+            'qudemo_id': qudemo_id,
+            'generated_at': datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error generating suggested questions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/suggested-questions/{company_name}/{qudemo_id}")
+async def get_suggested_questions(company_name: str, qudemo_id: str):
+    """Get suggested questions for a QuDemo"""
+    try:
+        if not gcs_qa_service:
+            raise HTTPException(status_code=500, detail="GCS Q&A service not available")
+        
+        # Get suggested questions
+        suggested_questions = gcs_qa_service.get_suggested_questions(company_name, qudemo_id)
+        
+        return {
+            'success': True,
+            'suggested_questions': suggested_questions,
+            'total_questions': len(suggested_questions),
+            'company_name': company_name,
+            'qudemo_id': qudemo_id
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error getting suggested questions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/knowledge/sources/{company_name}")
 async def get_knowledge_sources_company(company_name: str):
@@ -1338,6 +1389,93 @@ async def delete_company_bucket(request: dict):
     except Exception as e:
         logger.error(f"❌ Delete company bucket error: {e}")
         return {"success": False, "error": str(e)}
+
+@app.post("/process-document")
+async def process_document(
+    file: UploadFile = File(...),
+    company_name: str = Form(...),
+    qudemo_id: str = Form(...),
+    document_id: str = Form(...),
+    mime_type: str = Form(...)
+):
+    """Process a document and extract text content"""
+    try:
+        if not document_processor:
+            logger.error("❌ Document processor not available")
+            return {
+                "success": False,
+                "error": "Document processor not available",
+                "document_id": document_id
+            }
+        
+        logger.info(f"📄 Processing document: {document_id} for {company_name}/{qudemo_id}")
+        
+        # Read file content
+        file_content = await file.read()
+        logger.info(f"📊 Read {len(file_content)} bytes from file: {file.filename}")
+        
+        # Process the document
+        success = document_processor.process_document_from_content(
+            company_name=company_name,
+            qudemo_id=qudemo_id,
+            document_id=document_id,
+            file_content=file_content,
+            mime_type=mime_type,
+            filename=file.filename
+        )
+        
+        if success:
+            logger.info(f"✅ Document processed successfully: {document_id}")
+            return {
+                "success": True,
+                "message": "Document processed successfully",
+                "document_id": document_id,
+                "company_name": company_name,
+                "qudemo_id": qudemo_id
+            }
+        else:
+            logger.error(f"❌ Failed to process document: {document_id}")
+            return {
+                "success": False,
+                "error": "Failed to process document",
+                "document_id": document_id
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Document processing error: {str(e)}")
+        return {
+            "success": False,
+            "error": f"Document processing failed: {str(e)}",
+            "document_id": document_id
+        }
+
+@app.get("/search-documents/{company_name}/{qudemo_id}")
+async def search_documents(company_name: str, qudemo_id: str, query: str):
+    """Search for content in documents for a QuDemo"""
+    try:
+        if not document_processor:
+            raise HTTPException(status_code=500, detail="Document processor not available")
+        
+        logger.info(f"🔍 Searching documents for: {company_name}/{qudemo_id} - Query: {query}")
+        
+        results = document_processor.search_document_content(
+            company_name=company_name,
+            qudemo_id=qudemo_id,
+            query=query
+        )
+        
+        return {
+            "success": True,
+            "results": results,
+            "total_results": len(results),
+            "query": query,
+            "company_name": company_name,
+            "qudemo_id": qudemo_id
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Document search error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

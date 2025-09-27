@@ -202,8 +202,8 @@ class GeminiTranscriptionProcessor:
         
         # Configure Gemini
         genai.configure(api_key=gemini_api_key)
-        # Use gemini-1.5-flash model for optimized speed and multimodal input
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        # Use gemini-pro-latest model for optimized speed and multimodal input
+        self.model = genai.GenerativeModel('gemini-pro-latest')
         
         # Configure OpenAI for embeddings
         openai.api_key = openai_api_key
@@ -654,7 +654,7 @@ class GeminiTranscriptionProcessor:
             Keep it under 200 words.
             """
             
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            model = genai.GenerativeModel('gemini-pro-latest')
             response = model.generate_content(prompt)
             
             if response and response.text:
@@ -730,7 +730,7 @@ class GeminiTranscriptionProcessor:
             
             self.last_api_call_time = time.time()
             
-            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-latest:generateContent"
             
             headers = {
                 "Content-Type": "application/json",
@@ -771,8 +771,11 @@ class GeminiTranscriptionProcessor:
             timeout = 120  # 2 minutes timeout to prevent long waits
             logger.info(f"Sending request to Gemini API with {timeout}s timeout... (attempt {attempt + 1}/{max_retries})")
             response = requests.post(
-                f"{url}?key={self.gemini_api_key}",
-                headers=headers,
+                url,
+                headers={
+                    **headers,
+                    "x-goog-api-key": self.gemini_api_key
+                },
                 json=data,
                 timeout=timeout
             )

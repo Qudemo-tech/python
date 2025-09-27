@@ -14,6 +14,11 @@ class DirectTranscriptQA:
     def search_transcript_directly(self, transcript_data: Dict[str, Any], question: str) -> Optional[Dict[str, Any]]:
         """Search transcript using LLM with full raw transcript data"""
         try:
+            # Check if this is a casual greeting or small talk
+            if self._is_casual_greeting(question):
+                print(f"👋 Detected casual greeting: {question}")
+                return self._handle_casual_greeting(transcript_data)
+            
             # Get the raw transcript text
             raw_transcript = self._get_raw_transcript_text(transcript_data)
             if not raw_transcript:
@@ -247,6 +252,206 @@ question: {question}"""
         except Exception as e:
             print(f"❌ Error parsing timestamp '{timestamp_str}': {e}")
             return 0.0
+    
+    def _is_casual_greeting(self, question: str) -> bool:
+        """Check if the question is a casual greeting or small talk"""
+        question_lower = question.lower().strip()
+        
+        # Common casual greetings and small talk
+        casual_greetings = [
+            "hi", "hello", "hey", "hiya", "howdy",
+            "good morning", "good afternoon", "good evening",
+            "what's up", "whats up", "sup", "wassup",
+            "how are you", "how are you doing", "how's it going",
+            "nice to meet you", "pleasure to meet you",
+            "thanks", "thank you", "thx", "ty",
+            "bye", "goodbye", "see you later", "talk to you later",
+            "ok", "okay", "alright", "sure", "yes", "no",
+            "cool", "awesome", "great", "nice", "good",
+            "lol", "haha", "hehe", "😊", "😄", "👍",
+            "how do you do", "howdy", "greetings",
+            "what's happening", "whats happening",
+            "how's everything", "hows everything",
+            "what's new", "whats new", "what's going on", "whats going on"
+        ]
+        
+        # Check for exact matches
+        if question_lower in casual_greetings:
+            return True
+        
+        # Check for partial matches (greeting + additional text)
+        for greeting in casual_greetings:
+            if question_lower.startswith(greeting + " ") or question_lower.startswith(greeting + ","):
+                return True
+        
+        # Check for very short questions (likely casual)
+        if len(question_lower.split()) <= 2 and any(word in casual_greetings for word in question_lower.split()):
+            return True
+        
+        return False
+    
+    def _handle_casual_greeting(self, transcript_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle casual greetings with a friendly response"""
+        try:
+            # Get video info for the response
+            video_info = self._get_video_info(transcript_data)
+            
+            return {
+                'answer': 'Hi! I am an AI assistant for this demo. You can ask me anything related to this video demo and I can help you with answers.',
+                'timestamp': 0,
+                'formatted_timestamp': '00:00',
+                'confidence': 1.0,
+                'sources': [],
+                'video_url': video_info['video_url'],
+                'video_title': video_info['video_title']
+            }
+        except Exception as e:
+            print(f"❌ Error handling casual greeting: {e}")
+            return {
+                'answer': 'Hi! I am an AI assistant for this demo. You can ask me anything related to this video demo and I can help you with answers.',
+                'timestamp': 0,
+                'formatted_timestamp': '00:00',
+                'confidence': 1.0,
+                'sources': [],
+                'video_url': '',
+                'video_title': 'Demo Video'
+            }
+    
+    def generate_suggested_questions(self, transcript_data: Dict[str, Any]) -> List[str]:
+        """Generate suggested questions from the transcript content"""
+        try:
+            # Get the raw transcript text
+            raw_transcript = self._get_raw_transcript_text(transcript_data)
+            if not raw_transcript:
+                print(f"❌ No raw transcript found for suggested questions generation")
+                return []
+            
+            print(f"🤖 Generating suggested questions from transcript...")
+            print(f"📄 Raw transcript length: {len(raw_transcript)} characters")
+            
+            # Use LLM to generate suggested questions
+            suggested_questions = self._ask_llm_for_suggested_questions(raw_transcript)
+            
+            if suggested_questions:
+                print(f"✅ Generated {len(suggested_questions)} suggested questions")
+                return suggested_questions
+            else:
+                print(f"⚠️ No suggested questions generated")
+                return []
+            
+        except Exception as e:
+            print(f"❌ Failed to generate suggested questions: {e}")
+            return []
+    
+    def _ask_llm_for_suggested_questions(self, transcript: str) -> List[str]:
+        """Ask LLM to generate suggested questions from the transcript"""
+        try:
+            import openai
+            import os
+            import json
+            
+            # Get OpenAI API key
+            openai_api_key = os.getenv('OPENAI_API_KEY')
+            if not openai_api_key:
+                print("❌ OPENAI_API_KEY not found")
+                return []
+            
+            # Initialize OpenAI client
+            client = openai.OpenAI(api_key=openai_api_key)
+            
+            # Create the prompt for generating suggested questions
+            prompt = f"""You are an expert at analyzing video transcripts to generate helpful suggested questions. Your task is to create 5-8 high-quality, engaging questions that viewers might want to ask about this video content.
+
+REQUIREMENTS:
+- Generate 5-8 questions maximum
+- Questions should be specific and actionable
+- Questions should cover different aspects of the content
+- Questions should be natural and conversational
+- Questions should help viewers understand key concepts, features, or processes
+- Questions should be relevant to the actual content in the transcript
+- Avoid generic questions like "What is this about?"
+- Focus on practical, useful questions that provide value
+
+QUESTION TYPES TO INCLUDE:
+- How-to questions (e.g., "How do I...")
+- What questions (e.g., "What is...", "What are...")
+- Why questions (e.g., "Why does...", "Why should I...")
+- When questions (e.g., "When should I...")
+- Where questions (e.g., "Where can I...")
+- Comparison questions (e.g., "What's the difference between...")
+- Feature questions (e.g., "What features...")
+- Process questions (e.g., "What are the steps to...")
+
+Return ONLY a JSON array of question strings:
+[
+  "Question 1?",
+  "Question 2?",
+  "Question 3?",
+  "Question 4?",
+  "Question 5?"
+]
+
+Rules:
+- Return ONLY the JSON array, no other text
+- Each question should end with a question mark
+- Questions should be 10-20 words long
+- Make questions specific to the content
+- Ensure JSON is syntactically valid
+- Do not include explanations or commentary
+
+transcript:
+{transcript}"""
+
+            # Call OpenAI API
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,  # Higher temperature for more creative questions
+                max_tokens=500,   # Enough for 5-8 questions
+                top_p=0.9,
+                frequency_penalty=0.3,  # Encourage variety
+                presence_penalty=0.2
+            )
+            
+            # Parse the response
+            response_text = response.choices[0].message.content.strip()
+            print(f"🤖 LLM Response for suggested questions: {response_text}")
+            
+            # Clean up the response - remove markdown code blocks if present
+            if response_text.startswith("```json"):
+                response_text = response_text[7:]  # Remove ```json
+            if response_text.startswith("```"):
+                response_text = response_text[3:]   # Remove ```
+            if response_text.endswith("```"):
+                response_text = response_text[:-3]  # Remove trailing ```
+            
+            response_text = response_text.strip()
+            
+            # Try to parse JSON
+            try:
+                questions = json.loads(response_text)
+                if isinstance(questions, list) and all(isinstance(q, str) for q in questions):
+                    # Filter out empty questions and ensure they end with question marks
+                    filtered_questions = []
+                    for question in questions:
+                        question = question.strip()
+                        if question and not question.endswith('?'):
+                            question += '?'
+                        if question and len(question) > 5:  # Minimum length check
+                            filtered_questions.append(question)
+                    
+                    return filtered_questions[:8]  # Limit to 8 questions max
+                else:
+                    print(f"❌ Invalid JSON format for suggested questions")
+                    return []
+            except json.JSONDecodeError as e:
+                print(f"❌ Failed to parse suggested questions JSON: {e}")
+                print(f"❌ Raw response: {response_text}")
+                return []
+            
+        except Exception as e:
+            print(f"❌ Error calling LLM for suggested questions: {e}")
+            return []
     
     def _contains_raw_transcript_content(self, answer: str) -> bool:
         """Check if answer contains raw transcript content that should be processed"""

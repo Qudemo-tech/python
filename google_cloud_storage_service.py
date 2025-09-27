@@ -186,6 +186,63 @@ class GoogleCloudStorageService:
             logger.error(f"❌ Failed to store Q&A answer: {e}")
             return False
     
+    def store_suggested_questions(self, company_name: str, qudemo_id: str, 
+                                 suggested_questions: List[str]) -> bool:
+        """Store suggested questions in Google Cloud Storage with company/qudemo structure"""
+        try:
+            # Get company-specific bucket
+            bucket = self._get_company_bucket(company_name)
+            
+            # Create file path: qudemo_id/suggested_questions.json (within company bucket)
+            file_path = f"{qudemo_id}/suggested_questions.json"
+            
+            # Create suggested questions data
+            suggested_questions_data = {
+                "qudemo_id": qudemo_id,
+                "company_name": company_name,
+                "suggested_questions": suggested_questions,
+                "generated_at": datetime.now().isoformat(),
+                "total_questions": len(suggested_questions)
+            }
+            
+            # Upload to Google Cloud Storage
+            blob = bucket.blob(file_path)
+            blob.upload_from_string(
+                json.dumps(suggested_questions_data, indent=2),
+                content_type='application/json'
+            )
+            
+            logger.info(f"✅ Stored {len(suggested_questions)} suggested questions for {company_name}/{qudemo_id} in GCS")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to store suggested questions: {e}")
+            return False
+    
+    def get_suggested_questions(self, company_name: str, qudemo_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve suggested questions from Google Cloud Storage with company/qudemo structure"""
+        try:
+            # Get company-specific bucket
+            bucket = self._get_company_bucket(company_name)
+            
+            # Create file path: qudemo_id/suggested_questions.json (within company bucket)
+            file_path = f"{qudemo_id}/suggested_questions.json"
+            blob = bucket.blob(file_path)
+            
+            if not blob.exists():
+                logger.warning(f"⚠️ Suggested questions not found: {file_path}")
+                return None
+            
+            content = blob.download_as_text()
+            suggested_questions_data = json.loads(content)
+            
+            logger.info(f"✅ Retrieved suggested questions for {company_name}/{qudemo_id} from GCS")
+            return suggested_questions_data
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to retrieve suggested questions: {e}")
+            return None
+    
     def get_qa_answers(self, company_name: str, qudemo_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve Q&A answers from Google Cloud Storage with company/qudemo structure"""
         try:
@@ -523,6 +580,78 @@ class GoogleCloudStorageService:
         
         return steps[:4]  # Limit to 4 steps for better readability
     
+    def upload_file_content(self, content: str, file_path: str, content_type: str = 'application/octet-stream') -> bool:
+        """Upload file content to Google Cloud Storage"""
+        try:
+            # Extract company name from file path (format: company_name/qudemo_id/documents/...)
+            path_parts = file_path.split('/')
+            if len(path_parts) >= 1:
+                company_name = path_parts[0]
+                # Get company-specific bucket
+                bucket = self._get_company_bucket(company_name)
+            else:
+                # Fallback to default bucket
+                bucket = self.client.bucket(self.default_bucket_name)
+            
+            # Create blob and upload content
+            blob = bucket.blob(file_path)
+            blob.upload_from_string(content, content_type=content_type)
+            
+            logger.info(f"✅ Uploaded file content to GCS: {file_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to upload file content to {file_path}: {e}")
+            return False
+
+    def list_files(self, prefix: str) -> List[str]:
+        """List files in GCS with a given prefix"""
+        try:
+            # Extract company name from prefix (format: company_name/qudemo_id/documents/)
+            path_parts = prefix.split('/')
+            if len(path_parts) >= 1:
+                company_name = path_parts[0]
+                # Get company-specific bucket
+                bucket = self._get_company_bucket(company_name)
+            else:
+                # Fallback to default bucket
+                bucket = self.client.bucket(self.default_bucket_name)
+            
+            # List blobs with prefix
+            blobs = bucket.list_blobs(prefix=prefix)
+            file_paths = [blob.name for blob in blobs]
+            
+            logger.info(f"📁 Listed {len(file_paths)} files with prefix: {prefix}")
+            return file_paths
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to list files with prefix {prefix}: {e}")
+            return []
+
+    def download_file_content(self, file_path: str) -> Optional[str]:
+        """Download file content from Google Cloud Storage"""
+        try:
+            # Extract company name from file path (format: company_name/qudemo_id/documents/...)
+            path_parts = file_path.split('/')
+            if len(path_parts) >= 1:
+                company_name = path_parts[0]
+                # Get company-specific bucket
+                bucket = self._get_company_bucket(company_name)
+            else:
+                # Fallback to default bucket
+                bucket = self.client.bucket(self.default_bucket_name)
+            
+            # Get blob and download content
+            blob = bucket.blob(file_path)
+            content = blob.download_as_text()
+            
+            logger.info(f"✅ Downloaded file content from GCS: {file_path}")
+            return content
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to download file content from {file_path}: {e}")
+            return None
+
     def delete_company_bucket(self, company_name: str) -> bool:
         """Delete entire company bucket and all its contents"""
         try:

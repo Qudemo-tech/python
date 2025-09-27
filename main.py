@@ -22,6 +22,7 @@ import shutil
 from final_gemini_scraper import FinalGeminiScraper
 from gcs_qa_service import GCSQAService
 from simple_gemini_transcriber import SimpleGeminiTranscriber
+from document_processor import DocumentProcessor
 from company_api import router as company_router
 from company_bucket_service import initialize_company_bucket_service, get_company_bucket_service
 # from enhanced_scraper_with_failure_handling import initialize_enhanced_scraper, get_enhanced_scraper
@@ -44,12 +45,13 @@ logger = logging.getLogger(__name__)
 loom_processor_gcs = None
 gcs_qa_service = None
 simple_transcriber = None
+document_processor = None
 company_bucket_service = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for FastAPI"""
-    global loom_processor_gcs, gcs_qa_service, simple_transcriber, company_bucket_service
+    global loom_processor_gcs, gcs_qa_service, simple_transcriber, document_processor, company_bucket_service
     
     try:
         logger.info("🚀 Starting Enhanced QuDemo Python Backend (GCS-based)...")
@@ -87,6 +89,14 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"❌ Simple Gemini Transcriber initialization error: {e}")
             simple_transcriber = None
+        
+        # Initialize Document Processor
+        try:
+            document_processor = DocumentProcessor()
+            logger.info("✅ Document Processor initialized")
+        except Exception as e:
+            logger.error(f"❌ Document Processor initialization error: {e}")
+            document_processor = None
         
         # Set GOOGLE_APPLICATION_CREDENTIALS if service account file exists
         if os.path.exists('service-account-key.json'):
@@ -345,15 +355,19 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
 
 @app.post("/generate-suggested-questions/{company_name}/{qudemo_id}")
 async def generate_suggested_questions(company_name: str, qudemo_id: str):
-    """Generate and store suggested questions for a QuDemo"""
+    """Generate fresh suggested questions for a QuDemo without storing them"""
     try:
         if not gcs_qa_service:
             raise HTTPException(status_code=500, detail="GCS Q&A service not available")
         
-        logger.info(f"🤖 Generating suggested questions for {company_name}/{qudemo_id}")
+        logger.info(f"🤖 GENERATING FRESH suggested questions for {company_name}/{qudemo_id}")
+        logger.info(f"🔍 Company: {company_name}, QuDemo: {qudemo_id}")
         
-        # Generate and store suggested questions
+        # Generate fresh suggested questions (no storage)
         suggested_questions = gcs_qa_service.generate_and_store_suggested_questions(company_name, qudemo_id)
+        
+        logger.info(f"🎯 Generated {len(suggested_questions)} fresh questions")
+        logger.info(f"📝 Questions: {suggested_questions}")
         
         return {
             'success': True,
@@ -361,34 +375,15 @@ async def generate_suggested_questions(company_name: str, qudemo_id: str):
             'total_questions': len(suggested_questions),
             'company_name': company_name,
             'qudemo_id': qudemo_id,
-            'generated_at': datetime.now().isoformat()
+            'generated_at': datetime.now().isoformat(),
+            'fresh_generation': True
         }
         
     except Exception as e:
         logger.error(f"❌ Error generating suggested questions: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/suggested-questions/{company_name}/{qudemo_id}")
-async def get_suggested_questions(company_name: str, qudemo_id: str):
-    """Get suggested questions for a QuDemo"""
-    try:
-        if not gcs_qa_service:
-            raise HTTPException(status_code=500, detail="GCS Q&A service not available")
-        
-        # Get suggested questions
-        suggested_questions = gcs_qa_service.get_suggested_questions(company_name, qudemo_id)
-        
-        return {
-            'success': True,
-            'suggested_questions': suggested_questions,
-            'total_questions': len(suggested_questions),
-            'company_name': company_name,
-            'qudemo_id': qudemo_id
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error getting suggested questions: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+# Note: Removed GET endpoint for suggested questions since we generate them fresh on-demand
 
 @app.get("/knowledge/sources/{company_name}")
 async def get_knowledge_sources_company(company_name: str):
@@ -663,6 +658,128 @@ async def process_video_enhanced(company_name: str, qudemo_id: str, request: QuD
     except Exception as e:
         logger.error(f"❌ Enhanced video processing failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/process-document")
+async def process_document(
+    file: UploadFile = File(...),
+    company_name: str = Form(...),
+    qudemo_id: str = Form(...),
+    document_id: str = Form(...),
+    mime_type: str = Form(...)
+):
+    """Process a document and extract text content"""
+    try:
+        if not document_processor:
+            logger.error("❌ Document processor not available")
+            return {
+                "success": False,
+                "error": "Document processor not available",
+                "document_id": document_id
+            }
+        
+        logger.info(f"📄 Processing document: {document_id} for {company_name}/{qudemo_id}")
+        
+        # Read file content
+        file_content = await file.read()
+        logger.info(f"📊 Read {len(file_content)} bytes from file: {file.filename}")
+        
+        # Process the document
+        success = document_processor.process_document_from_content(
+            company_name=company_name,
+            qudemo_id=qudemo_id,
+            document_id=document_id,
+            file_content=file_content,
+            mime_type=mime_type,
+            filename=file.filename
+        )
+        
+        if success:
+            logger.info(f"✅ Document processed successfully: {document_id}")
+            
+            # Notify Node.js backend of successful processing
+            try:
+                import requests
+                node_api_url = os.getenv('NODE_API_BASE_URL', 'http://localhost:5000')
+                notification_url = f"{node_api_url}/api/documents/{document_id}/processing-complete"
+                
+                notification_data = {
+                    "success": True,
+                    "message": "Document processed successfully"
+                }
+                
+                response = requests.post(notification_url, json=notification_data, timeout=10)
+                if response.ok:
+                    logger.info(f"✅ Successfully notified Node.js backend of document completion: {document_id}")
+                else:
+                    logger.warning(f"⚠️ Failed to notify Node.js backend: {response.status_code}")
+            except Exception as notify_error:
+                logger.warning(f"⚠️ Error notifying Node.js backend: {notify_error}")
+            
+            return {
+                "success": True,
+                "message": "Document processed successfully",
+                "document_id": document_id,
+                "company_name": company_name,
+                "qudemo_id": qudemo_id
+            }
+        else:
+            logger.error(f"❌ Failed to process document: {document_id}")
+            
+            # Notify Node.js backend of failed processing
+            try:
+                import requests
+                node_api_url = os.getenv('NODE_API_BASE_URL', 'http://localhost:5000')
+                notification_url = f"{node_api_url}/api/documents/{document_id}/processing-complete"
+                
+                notification_data = {
+                    "success": False,
+                    "error": "Failed to process document"
+                }
+                
+                response = requests.post(notification_url, json=notification_data, timeout=10)
+                if response.ok:
+                    logger.info(f"✅ Successfully notified Node.js backend of document failure: {document_id}")
+                else:
+                    logger.warning(f"⚠️ Failed to notify Node.js backend: {response.status_code}")
+            except Exception as notify_error:
+                logger.warning(f"⚠️ Error notifying Node.js backend: {notify_error}")
+            
+            return {
+                "success": False,
+                "error": "Failed to process document",
+                "document_id": document_id
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Document processing error: {str(e)}")
+        return {
+            "success": False,
+            "error": f"Document processing failed: {str(e)}",
+            "document_id": document_id
+        }
+
+@app.get("/search-documents/{company_name}/{qudemo_id}")
+async def search_documents(company_name: str, qudemo_id: str, query: str):
+    """Search for content in documents"""
+    try:
+        if not document_processor:
+            logger.error("❌ Document processor not available")
+            return {"results": [], "error": "Document processor not available"}
+        
+        logger.info(f"🔍 Searching documents for: {company_name}/{qudemo_id} - Query: {query}")
+        
+        results = document_processor.search_document_content(
+            company_name=company_name,
+            qudemo_id=qudemo_id,
+            query=query
+        )
+        
+        logger.info(f"📊 Document search completed: {len(results)} results found")
+        return {"results": results, "count": len(results)}
+        
+    except Exception as e:
+        logger.error(f"❌ Document search error: {str(e)}")
+        return {"results": [], "error": str(e)}
 
 @app.post("/process-qudemo-content/{company_name}/{qudemo_id}")
 async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuDemoContentRequest):

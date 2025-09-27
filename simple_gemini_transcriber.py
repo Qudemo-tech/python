@@ -14,6 +14,7 @@ from typing import Optional, Dict, List, Any
 from datetime import datetime
 from google_cloud_storage_service import GoogleCloudStorageService
 from dotenv import load_dotenv
+import google.generativeai as genai
 
 # Load environment variables
 load_dotenv()
@@ -42,7 +43,7 @@ class SimpleGeminiTranscriber:
     def transcribe_video(
         self,
         video_url: str,
-        model: str = "gemini-pro-latest",
+        model: str = "gemini-2.0-flash",
         mime_type: str = "video/mp4",
         timeout: int = 600,  # Increased to 10 minutes for video processing
     ) -> Optional[str]:

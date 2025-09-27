@@ -50,8 +50,8 @@ class GoogleCloudStorageService:
     def _get_company_bucket(self, company_name: str):
         """Get or create a bucket for a specific company"""
         try:
-            # Create company-specific bucket name
-            safe_company_name = company_name.lower().replace(' ', '-').replace('_', '-')
+            # Create company-specific bucket name with proper sanitization
+            safe_company_name = self._sanitize_bucket_name(company_name)
             bucket_name = f"qudemo-{safe_company_name}"
             
             # Get or create the bucket
@@ -69,6 +69,50 @@ class GoogleCloudStorageService:
         except Exception as e:
             logger.error(f"❌ Failed to get/create company bucket for {company_name}: {e}")
             raise
+    
+    def _sanitize_bucket_name(self, company_name: str) -> str:
+        """Sanitize company name to create a valid GCS bucket name"""
+        try:
+            import re
+            import hashlib
+            
+            # Convert to lowercase
+            safe_name = company_name.lower()
+            
+            # Replace problematic characters with hyphens
+            # GCS bucket names cannot contain dots (.) as they're interpreted as domain names
+            # Also replace other special characters that might cause issues
+            safe_name = re.sub(r'[^a-z0-9-]', '-', safe_name)
+            
+            # Remove multiple consecutive hyphens
+            safe_name = re.sub(r'-+', '-', safe_name)
+            
+            # Remove leading/trailing hyphens
+            safe_name = safe_name.strip('-')
+            
+            # Ensure it's not empty
+            if not safe_name:
+                # Fallback: use hash of original name
+                safe_name = hashlib.md5(company_name.encode()).hexdigest()[:8]
+            
+            # GCS bucket names must be 3-63 characters
+            if len(safe_name) > 63 - len("qudemo-"):
+                # Truncate and add hash suffix to ensure uniqueness
+                hash_suffix = hashlib.md5(company_name.encode()).hexdigest()[:8]
+                safe_name = safe_name[:63 - len("qudemo-") - len(hash_suffix) - 1] + "-" + hash_suffix
+            
+            # Ensure minimum length (GCS requires 3+ chars)
+            if len(safe_name) < 3:
+                safe_name = safe_name + "-" + hashlib.md5(company_name.encode()).hexdigest()[:6]
+            
+            logger.info(f"🔄 Sanitized company name: '{company_name}' -> '{safe_name}'")
+            return safe_name
+            
+        except Exception as e:
+            logger.error(f"❌ Error sanitizing bucket name for '{company_name}': {e}")
+            # Fallback: use hash of original name
+            import hashlib
+            return hashlib.md5(company_name.encode()).hexdigest()[:12]
     
     def store_video_transcript(self, company_name: str, qudemo_id: str, 
                              transcript_data: Dict[str, Any]) -> bool:
@@ -186,62 +230,7 @@ class GoogleCloudStorageService:
             logger.error(f"❌ Failed to store Q&A answer: {e}")
             return False
     
-    def store_suggested_questions(self, company_name: str, qudemo_id: str, 
-                                 suggested_questions: List[str]) -> bool:
-        """Store suggested questions in Google Cloud Storage with company/qudemo structure"""
-        try:
-            # Get company-specific bucket
-            bucket = self._get_company_bucket(company_name)
-            
-            # Create file path: qudemo_id/suggested_questions.json (within company bucket)
-            file_path = f"{qudemo_id}/suggested_questions.json"
-            
-            # Create suggested questions data
-            suggested_questions_data = {
-                "qudemo_id": qudemo_id,
-                "company_name": company_name,
-                "suggested_questions": suggested_questions,
-                "generated_at": datetime.now().isoformat(),
-                "total_questions": len(suggested_questions)
-            }
-            
-            # Upload to Google Cloud Storage
-            blob = bucket.blob(file_path)
-            blob.upload_from_string(
-                json.dumps(suggested_questions_data, indent=2),
-                content_type='application/json'
-            )
-            
-            logger.info(f"✅ Stored {len(suggested_questions)} suggested questions for {company_name}/{qudemo_id} in GCS")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to store suggested questions: {e}")
-            return False
-    
-    def get_suggested_questions(self, company_name: str, qudemo_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve suggested questions from Google Cloud Storage with company/qudemo structure"""
-        try:
-            # Get company-specific bucket
-            bucket = self._get_company_bucket(company_name)
-            
-            # Create file path: qudemo_id/suggested_questions.json (within company bucket)
-            file_path = f"{qudemo_id}/suggested_questions.json"
-            blob = bucket.blob(file_path)
-            
-            if not blob.exists():
-                logger.warning(f"⚠️ Suggested questions not found: {file_path}")
-                return None
-            
-            content = blob.download_as_text()
-            suggested_questions_data = json.loads(content)
-            
-            logger.info(f"✅ Retrieved suggested questions for {company_name}/{qudemo_id} from GCS")
-            return suggested_questions_data
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to retrieve suggested questions: {e}")
-            return None
+    # Note: Removed suggested questions storage methods since we generate fresh questions on-demand
     
     def get_qa_answers(self, company_name: str, qudemo_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve Q&A answers from Google Cloud Storage with company/qudemo structure"""
@@ -496,6 +485,78 @@ class GoogleCloudStorageService:
             logger.error(f"❌ Failed to get storage structure: {e}")
             return {}
     
+    def upload_file_content(self, content: str, file_path: str, content_type: str = 'application/octet-stream') -> bool:
+        """Upload file content to Google Cloud Storage"""
+        try:
+            # Extract company name from file path (format: company_name/qudemo_id/documents/...)
+            path_parts = file_path.split('/')
+            if len(path_parts) >= 1:
+                company_name = path_parts[0]
+                # Get company-specific bucket
+                bucket = self._get_company_bucket(company_name)
+            else:
+                # Fallback to default bucket
+                bucket = self.client.bucket(self.default_bucket_name)
+            
+            # Create blob and upload content
+            blob = bucket.blob(file_path)
+            blob.upload_from_string(content, content_type=content_type)
+            
+            logger.info(f"✅ Uploaded file content to GCS: {file_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to upload file content to {file_path}: {e}")
+            return False
+
+    def list_files(self, prefix: str) -> List[str]:
+        """List files in GCS with a given prefix"""
+        try:
+            # Extract company name from prefix (format: company_name/qudemo_id/documents/)
+            path_parts = prefix.split('/')
+            if len(path_parts) >= 1:
+                company_name = path_parts[0]
+                # Get company-specific bucket
+                bucket = self._get_company_bucket(company_name)
+            else:
+                # Fallback to default bucket
+                bucket = self.client.bucket(self.default_bucket_name)
+            
+            # List blobs with prefix
+            blobs = bucket.list_blobs(prefix=prefix)
+            file_paths = [blob.name for blob in blobs]
+            
+            logger.info(f"📁 Listed {len(file_paths)} files with prefix: {prefix}")
+            return file_paths
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to list files with prefix {prefix}: {e}")
+            return []
+
+    def download_file_content(self, file_path: str) -> Optional[str]:
+        """Download file content from Google Cloud Storage"""
+        try:
+            # Extract company name from file path (format: company_name/qudemo_id/documents/...)
+            path_parts = file_path.split('/')
+            if len(path_parts) >= 1:
+                company_name = path_parts[0]
+                # Get company-specific bucket
+                bucket = self._get_company_bucket(company_name)
+            else:
+                # Fallback to default bucket
+                bucket = self.client.bucket(self.default_bucket_name)
+            
+            # Get blob and download content
+            blob = bucket.blob(file_path)
+            content = blob.download_as_text()
+            
+            logger.info(f"✅ Downloaded file content from GCS: {file_path}")
+            return content
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to download file content from {file_path}: {e}")
+            return None
+
     def _format_professional_answer(self, raw_answer: str, question: str, sources: list) -> str:
         """Return raw answer directly without template overwriting"""
         return raw_answer

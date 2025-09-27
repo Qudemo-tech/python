@@ -10,6 +10,7 @@ import logging
 from typing import Dict, List, Optional, Any
 from google_cloud_storage_service import GoogleCloudStorageService
 from direct_transcript_qa import DirectTranscriptQA
+from document_processor import DocumentProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +24,12 @@ class GCSQAService:
             service_account_path='service-account-key.json'
         )
         self.direct_qa = DirectTranscriptQA()
+        self.document_processor = DocumentProcessor()
     
     async def ask_question(self, question: str, company_name: str, qudemo_id: str) -> Dict[str, Any]:
         """
         Answer a question using transcript data from Google Cloud Storage
+        Priority: 1. Document content, 2. Video transcript
         
         Args:
             question: The question to answer
@@ -40,7 +43,43 @@ class GCSQAService:
             logger.info(f"❓ Processing question: {question}")
             logger.info(f"🏢 Company: {company_name}, QuDemo: {qudemo_id}")
             
-            # Search for relevant content in the transcript using direct method
+            # STEP 1: Search document content first (higher priority)
+            logger.info(f"📄 Searching document content for: {question}")
+            document_results = self.document_processor.search_document_content(
+                company_name=company_name,
+                qudemo_id=qudemo_id,
+                query=question
+            )
+            
+            if document_results:
+                logger.info(f"✅ Found {len(document_results)} document results")
+                # Use document answer (prioritize document content)
+                answer_data = self._create_document_answer(document_results, question)
+                
+                if answer_data:
+                    # Store the Q&A answer
+                    self.gcs_service.store_qa_answer(
+                        company_name=company_name,
+                        qudemo_id=qudemo_id,
+                        question=question,
+                        answer_data=answer_data
+                    )
+                    
+                    return {
+                        'success': True,
+                        'answer': answer_data.get('answer', ''),
+                        'timestamp': 0,  # Documents don't have timestamps
+                        'end': 0,
+                        'formatted_timestamp': 'Document',
+                        'video_url': '',  # No video for document answers
+                        'video_title': 'Document Content',
+                        'confidence': answer_data.get('confidence', 0.8),
+                        'sources': answer_data.get('sources', []),
+                        'answer_source': 'document_content'
+                    }
+            
+            # STEP 2: Fall back to video transcript search
+            logger.info(f"🎥 No document answer found, searching video transcript for: {question}")
             answer_data = self.gcs_service.search_transcript_directly(
                 company_name=company_name,
                 qudemo_id=qudemo_id,
@@ -169,33 +208,29 @@ class GCSQAService:
         return self.gcs_service.delete_qudemo_data(company_name, qudemo_id)
     
     def generate_and_store_suggested_questions(self, company_name: str, qudemo_id: str) -> List[str]:
-        """Generate and store suggested questions for a QuDemo"""
+        """Generate fresh suggested questions for a QuDemo without storing them"""
         try:
-            logger.info(f"🤖 Generating suggested questions for {company_name}/{qudemo_id}")
+            logger.info(f"🤖 GENERATING FRESH suggested questions for {company_name}/{qudemo_id}")
+            logger.info(f"🔍 Starting fresh generation process...")
             
-            # Get transcript data
-            transcript_data = self.gcs_service.get_video_transcript(company_name, qudemo_id)
-            if not transcript_data:
-                logger.warning(f"⚠️ No transcript found for {company_name}/{qudemo_id}")
+            # Get combined content from both video transcripts and documents
+            logger.info(f"📚 Getting combined content for suggestions...")
+            combined_content = self._get_combined_content_for_suggestions(company_name, qudemo_id)
+            
+            if not combined_content:
+                logger.warning(f"⚠️ No content found (video or documents) for {company_name}/{qudemo_id}")
                 return []
             
-            # Generate suggested questions using the direct QA system
-            suggested_questions = self.direct_qa.generate_suggested_questions(transcript_data)
+            logger.info(f"📄 Found content length: {len(combined_content)} characters")
+            
+            # Generate suggested questions using the combined content (fresh every time)
+            logger.info(f"🎯 Generating fresh questions from content...")
+            suggested_questions = self._generate_suggested_questions_from_content(combined_content)
             
             if suggested_questions:
-                # Store suggested questions in GCS
-                success = self.gcs_service.store_suggested_questions(
-                    company_name=company_name,
-                    qudemo_id=qudemo_id,
-                    suggested_questions=suggested_questions
-                )
-                
-                if success:
-                    logger.info(f"✅ Generated and stored {len(suggested_questions)} suggested questions for {company_name}/{qudemo_id}")
-                    return suggested_questions
-                else:
-                    logger.error(f"❌ Failed to store suggested questions for {company_name}/{qudemo_id}")
-                    return []
+                logger.info(f"✅ Generated {len(suggested_questions)} FRESH suggested questions for {company_name}/{qudemo_id}")
+                logger.info(f"📝 Questions: {suggested_questions}")
+                return suggested_questions
             else:
                 logger.warning(f"⚠️ No suggested questions generated for {company_name}/{qudemo_id}")
                 return []
@@ -204,14 +239,287 @@ class GCSQAService:
             logger.error(f"❌ Failed to generate suggested questions: {e}")
             return []
     
-    def get_suggested_questions(self, company_name: str, qudemo_id: str) -> List[str]:
-        """Get suggested questions for a QuDemo"""
+    def _get_combined_content_for_suggestions(self, company_name: str, qudemo_id: str) -> str:
+        """Get combined content from both video transcripts and documents for suggestion generation"""
         try:
-            suggested_questions_data = self.gcs_service.get_suggested_questions(company_name, qudemo_id)
-            if suggested_questions_data:
-                return suggested_questions_data.get('suggested_questions', [])
-            else:
-                return []
+            combined_content = ""
+            
+            # Get video transcript content
+            transcript_data = self.gcs_service.get_video_transcript(company_name, qudemo_id)
+            if transcript_data:
+                # Extract raw transcript text from video data
+                if 'videos' in transcript_data:
+                    for video in transcript_data['videos']:
+                        video_transcript = video.get('transcript', '')
+                        if video_transcript:
+                            combined_content += f"\n\n--- Video Content ---\n\n{video_transcript}"
+                elif 'transcript' in transcript_data:
+                    combined_content += f"\n\n--- Video Content ---\n\n{transcript_data['transcript']}"
+                
+                logger.info(f"📹 Added video transcript content: {len(transcript_data)} characters")
+            
+            # Get document content
+            try:
+                # Get all documents for this QuDemo
+                documents_path = f"{company_name}/{qudemo_id}/documents/"
+                document_files = self.gcs_service.list_files(documents_path)
+                
+                document_count = 0
+                for doc_file in document_files:
+                    if doc_file.endswith('extracted_text.json'):
+                        document_content = self.gcs_service.download_file_content(doc_file)
+                        if document_content:
+                            try:
+                                import json
+                                doc_data = json.loads(document_content)
+                                extracted_text = doc_data.get('extracted_text', '')
+                                if extracted_text:
+                                    combined_content += f"\n\n--- Document Content ---\n\n{extracted_text}"
+                                    document_count += 1
+                            except json.JSONDecodeError:
+                                continue
+                
+                if document_count > 0:
+                    logger.info(f"📄 Added {document_count} document(s) content")
+            
+            except Exception as doc_error:
+                logger.warning(f"⚠️ Error getting document content: {doc_error}")
+            
+            logger.info(f"📊 Combined content length: {len(combined_content)} characters")
+            return combined_content.strip()
+            
         except Exception as e:
-            logger.error(f"❌ Failed to get suggested questions: {e}")
+            logger.error(f"❌ Error getting combined content: {e}")
+            return ""
+    
+    def _generate_suggested_questions_from_content(self, content: str) -> List[str]:
+        """Generate suggested questions from combined video and document content"""
+        try:
+            import openai
+            import json
+            import os
+            
+            # Get OpenAI API key
+            api_key = os.getenv('OPENAI_API_KEY')
+            if not api_key:
+                logger.warning("⚠️ OpenAI API key not found for suggested questions generation")
+                return []
+            
+            # Initialize OpenAI client
+            client = openai.OpenAI(api_key=api_key)
+            
+            # Use the same high-quality prompt as video-only suggested questions
+            prompt = f"""You are an expert at analyzing content to generate helpful suggested questions. Your task is to create 5-8 high-quality, engaging questions that viewers might want to ask about this content.
+
+REQUIREMENTS:
+- Generate 5-8 questions maximum
+- Questions should be specific and actionable
+- Questions should cover different aspects of the content
+- Questions should be natural and conversational
+- Questions should help viewers understand key concepts, features, or processes
+- Questions should be relevant to the actual content provided
+- Avoid generic questions like "What is this about?"
+- Focus on practical, useful questions that provide value
+
+QUESTION TYPES TO INCLUDE:
+- How-to questions (e.g., "How do I...")
+- What questions (e.g., "What is...", "What are...")
+- Why questions (e.g., "Why does...", "Why should I...")
+- When questions (e.g., "When should I...")
+- Where questions (e.g., "Where can I...")
+- Comparison questions (e.g., "What's the difference between...")
+- Feature questions (e.g., "What features...")
+- Process questions (e.g., "What are the steps to...")
+
+Return ONLY a JSON array of questions, nothing else:
+["question1?", "question2?", "question3?", ...]
+
+Content:
+{content[:3000]}  # Limit content to avoid token limits
+
+Questions:"""
+            
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=500,
+                top_p=0.9,
+                frequency_penalty=0.3,
+                presence_penalty=0.2
+            )
+            
+            # Parse the response
+            response_text = response.choices[0].message.content.strip()
+            logger.info(f"🤖 LLM Response for suggested questions: {response_text}")
+            
+            # Clean up the response - remove markdown code blocks if present
+            if response_text.startswith("```json"):
+                response_text = response_text[7:]  # Remove ```json
+            if response_text.startswith("```"):
+                response_text = response_text[3:]   # Remove ```
+            if response_text.endswith("```"):
+                response_text = response_text[:-3]  # Remove trailing ```
+            
+            response_text = response_text.strip()
+            
+            # Try to parse JSON
+            try:
+                questions = json.loads(response_text)
+                if isinstance(questions, list) and all(isinstance(q, str) for q in questions):
+                    # Filter out empty questions and ensure they end with question marks
+                    filtered_questions = []
+                    for question in questions:
+                        question = question.strip()
+                        if question and not question.endswith('?'):
+                            question += '?'
+                        if question and len(question) > 5:  # Minimum length check
+                            filtered_questions.append(question)
+                    
+                    logger.info(f"✅ Generated {len(filtered_questions)} suggested questions")
+                    return filtered_questions[:8]  # Limit to 8 questions max
+                else:
+                    logger.error(f"❌ Invalid JSON format for suggested questions")
+                    return []
+            except json.JSONDecodeError as e:
+                logger.error(f"❌ Failed to parse suggested questions JSON: {e}")
+                logger.error(f"❌ Raw response: {response_text}")
+                return []
+            
+        except Exception as e:
+            logger.error(f"❌ Error generating suggested questions from content: {e}")
             return []
+    
+    def _create_document_answer(self, document_results: List[Dict[str, Any]], question: str) -> Optional[Dict[str, Any]]:
+        """
+        Create a well-formatted answer from document search results
+        
+        Args:
+            document_results: List of document search results
+            question: Original question
+            
+        Returns:
+            Formatted answer data or None
+        """
+        try:
+            if not document_results:
+                return None
+            
+            # Combine all relevant sections from all documents
+            all_sections = []
+            sources = []
+            
+            for result in document_results:
+                document_id = result.get('document_id', '')
+                filename = result.get('filename', '')
+                relevant_sections = result.get('relevant_sections', [])
+                matched_terms = result.get('matched_terms', [])
+                
+                # Add document as a source
+                sources.append({
+                    'type': 'document',
+                    'document_id': document_id,
+                    'filename': filename,
+                    'matched_terms': matched_terms
+                })
+                
+                # Add all relevant sections
+                all_sections.extend(relevant_sections)
+            
+            if not all_sections:
+                return None
+            
+            # Create a comprehensive answer from all sections
+            combined_content = "\n\n".join(all_sections)
+            
+            # Use LLM to create a well-formatted answer (similar to video answers)
+            formatted_answer = self._format_document_answer_with_llm(combined_content, question)
+            
+            return {
+                'answer': formatted_answer,
+                'confidence': 0.8,  # High confidence for document answers
+                'sources': sources,
+                'timestamp': 0,
+                'formatted_timestamp': 'Document',
+                'video_url': '',
+                'video_title': 'Document Content'
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Error creating document answer: {e}")
+            return None
+    
+    def _format_document_answer_with_llm(self, content: str, question: str) -> str:
+        """
+        Use LLM to format document content into a well-structured answer
+        Uses the same high-quality prompt format as video answers
+        
+        Args:
+            content: Raw document content
+            question: Original question
+            
+        Returns:
+            Formatted answer
+        """
+        try:
+            # Use the same LLM system as video answers for consistency
+            import openai
+            import os
+            
+            # Get OpenAI API key
+            api_key = os.getenv('OPENAI_API_KEY')
+            if not api_key:
+                logger.warning("⚠️ OpenAI API key not found, returning raw content")
+                return content[:500] + "..." if len(content) > 500 else content
+            
+            # Initialize OpenAI client
+            client = openai.OpenAI(api_key=api_key)
+            
+            # Use the SAME high-quality prompt as video answers for consistency
+            prompt = f"""You are an expert at analyzing document content to answer questions. Your task is to find the most relevant information in the document and provide a HIGH-QUALITY, INTELLIGENT answer.
+
+CRITICAL: Your answer must be COMPREHENSIVE but CONCISE - 2-3 sentences maximum. Think like ChatGPT - intelligent, insightful, and comprehensive.
+
+MANDATORY REQUIREMENTS:
+- NEVER include raw document quotes or excerpts
+- NEVER include step-by-step instructions from the document
+- ALWAYS provide processed, intelligent analysis
+- ALWAYS use professional, business-ready language
+- ALWAYS focus on the core essence and business value
+
+YOUR ANSWER MUST:
+- Be 2-3 sentences maximum
+- Be intelligent and insightful (like ChatGPT)
+- Show deep understanding of the concepts
+- Use professional, business-ready language
+- Provide clear comparisons and contrasts
+- Be immediately valuable and actionable
+- Demonstrate consciousness and completeness
+- Focus on the core essence and business value
+- Interpret and analyze the content, don't just quote it
+
+Question: {question}
+
+Document Content:
+{content[:2000]}
+
+Answer:"""
+            
+            response = client.chat.completions.create(
+                model="gpt-4o",  # Use same model as video answers
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,  # Same temperature as video answers
+                max_tokens=300,
+                top_p=0.9
+            )
+            
+            answer = response.choices[0].message.content.strip()
+            logger.info(f"✅ LLM formatted document answer: {len(answer)} characters")
+            return answer
+            
+        except Exception as e:
+            logger.error(f"❌ Error formatting document answer with LLM: {e}")
+            # Fallback to simple content truncation
+            return content[:400] + "..." if len(content) > 400 else content
+    
+    # Note: Removed get_suggested_questions method since we generate fresh questions on-demand

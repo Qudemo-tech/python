@@ -203,7 +203,7 @@ class GeminiTranscriptionProcessor:
         # Configure Gemini
         genai.configure(api_key=gemini_api_key)
         # Use gemini-pro-latest model for optimized speed and multimodal input
-        self.model = genai.GenerativeModel('gemini-pro-latest')
+        self.model = genai.GenerativeModel('gemini-2.0-flash')
         
         # Configure OpenAI for embeddings
         openai.api_key = openai_api_key
@@ -654,7 +654,7 @@ class GeminiTranscriptionProcessor:
             Keep it under 200 words.
             """
             
-            model = genai.GenerativeModel('gemini-pro-latest')
+            model = genai.GenerativeModel('gemini-2.0-flash')
             response = model.generate_content(prompt)
             
             if response and response.text:
@@ -730,7 +730,7 @@ class GeminiTranscriptionProcessor:
             
             self.last_api_call_time = time.time()
             
-            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-latest:generateContent"
+            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
             
             headers = {
                 "Content-Type": "application/json",

@@ -31,7 +31,7 @@ class FinalGeminiScraper:
                 raise ValueError("Gemini API key is required")
             
             genai.configure(api_key=gemini_api_key)
-            self.model = genai.GenerativeModel('gemini-pro-latest')
+            self.model = genai.GenerativeModel('gemini-2.0-flash')
             self.browser = None
             self.page = None
             self.gemini_available = True  # Default to available

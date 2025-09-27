@@ -383,7 +383,34 @@ async def generate_suggested_questions(company_name: str, qudemo_id: str):
         logger.error(f"❌ Error generating suggested questions: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Note: Removed GET endpoint for suggested questions since we generate them fresh on-demand
+@app.get("/suggested-questions/{company_name}/{qudemo_id}")
+async def get_suggested_questions(company_name: str, qudemo_id: str):
+    """Get stored suggested questions for a QuDemo"""
+    try:
+        if not gcs_qa_service:
+            raise HTTPException(status_code=500, detail="GCS Q&A service not available")
+        
+        logger.info(f"📖 FETCHING STORED suggested questions for {company_name}/{qudemo_id}")
+        
+        # Get stored suggested questions
+        stored_questions = gcs_qa_service.gcs_service.get_suggested_questions(company_name, qudemo_id)
+        
+        if stored_questions:
+            logger.info(f"✅ Retrieved {len(stored_questions)} stored suggested questions for {company_name}/{qudemo_id}")
+            return {
+                "success": True,
+                "suggested_questions": stored_questions
+            }
+        else:
+            logger.info(f"📝 No stored suggested questions found for {company_name}/{qudemo_id}")
+            return {
+                "success": True,
+                "suggested_questions": []
+            }
+        
+    except Exception as e:
+        logger.error(f"❌ Error fetching suggested questions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/knowledge/sources/{company_name}")
 async def get_knowledge_sources_company(company_name: str):
@@ -695,6 +722,14 @@ async def process_document(
         
         if success:
             logger.info(f"✅ Document processed successfully: {document_id}")
+            
+            # Generate suggested questions after successful document processing
+            try:
+                logger.info(f"🤖 Generating suggested questions after document processing for {company_name}/{qudemo_id}")
+                suggested_questions = gcs_qa_service.generate_and_store_suggested_questions(company_name, qudemo_id)
+                logger.info(f"✅ Generated {len(suggested_questions)} suggested questions after document processing")
+            except Exception as e:
+                logger.error(f"❌ Error generating suggested questions after document processing: {e}")
             
             # Notify Node.js backend of successful processing
             try:
@@ -1169,6 +1204,19 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                 'website_processed': 0
             }
         
+        # Generate suggested questions after successful processing
+        try:
+            if total_chunks > 0:  # Only generate if we have processed content
+                logger.info(f"🤖 Generating suggested questions for {company_name}/{qudemo_id}")
+                suggested_questions = gcs_qa_service.generate_and_store_suggested_questions(company_name, qudemo_id)
+                logger.info(f"✅ Generated {len(suggested_questions)} suggested questions")
+            else:
+                logger.info("⏭️ Skipping suggested questions generation - no content processed")
+                suggested_questions = []
+        except Exception as e:
+            logger.error(f"❌ Error generating suggested questions: {e}")
+            suggested_questions = []
+        
         # Generate user-friendly status message
         status_message = _generate_processing_status_message(successful_content, processing_errors, total_chunks)
         
@@ -1189,7 +1237,8 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
             'videos': [video['url'] for video in successful_content['videos']],
             'websites': [website['url'] for website in successful_content['websites']],
             'videos_processed': len(successful_content['videos']),
-            'website_processed': len(successful_content['websites'])
+            'website_processed': len(successful_content['websites']),
+            'suggested_questions_generated': len(suggested_questions)
         }
             
     except Exception as e:

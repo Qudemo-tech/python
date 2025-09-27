@@ -230,7 +230,63 @@ class GoogleCloudStorageService:
             logger.error(f"❌ Failed to store Q&A answer: {e}")
             return False
     
-    # Note: Removed suggested questions storage methods since we generate fresh questions on-demand
+    def store_suggested_questions(self, company_name: str, qudemo_id: str, suggested_questions: List[str]) -> bool:
+        """Store suggested questions in Google Cloud Storage with company/qudemo structure"""
+        try:
+            # Get company-specific bucket
+            bucket = self._get_company_bucket(company_name)
+            
+            # Create file path: qudemo_id/suggested_questions.json (within company bucket)
+            file_path = f"{qudemo_id}/suggested_questions.json"
+            
+            # Create suggested questions data
+            suggested_questions_data = {
+                "suggested_questions": suggested_questions,
+                "created_at": datetime.now().isoformat(),
+                "qudemo_id": qudemo_id,
+                "company_name": company_name
+            }
+            
+            # Upload data
+            blob = bucket.blob(file_path)
+            blob.upload_from_string(
+                json.dumps(suggested_questions_data, indent=2),
+                content_type='application/json'
+            )
+            
+            logger.info(f"✅ Stored {len(suggested_questions)} suggested questions for {company_name}/{qudemo_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to store suggested questions: {e}")
+            return False
+    
+    def get_suggested_questions(self, company_name: str, qudemo_id: str) -> Optional[List[str]]:
+        """Get stored suggested questions from Google Cloud Storage"""
+        try:
+            # Get company-specific bucket
+            bucket = self._get_company_bucket(company_name)
+            
+            # Create file path: qudemo_id/suggested_questions.json (within company bucket)
+            file_path = f"{qudemo_id}/suggested_questions.json"
+            
+            # Check if file exists
+            blob = bucket.blob(file_path)
+            if not blob.exists():
+                logger.info(f"📝 No stored suggested questions found for {company_name}/{qudemo_id}")
+                return None
+            
+            # Download and parse the file
+            content = blob.download_as_text()
+            suggested_questions_data = json.loads(content)
+            
+            questions = suggested_questions_data.get('suggested_questions', [])
+            logger.info(f"✅ Retrieved {len(questions)} stored suggested questions for {company_name}/{qudemo_id}")
+            return questions
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to retrieve suggested questions: {e}")
+            return None
     
     def get_qa_answers(self, company_name: str, qudemo_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve Q&A answers from Google Cloud Storage with company/qudemo structure"""
@@ -277,6 +333,15 @@ class GoogleCloudStorageService:
             
         except Exception as e:
             logger.error(f"❌ Failed to search transcript directly: {e}")
+            return None
+    
+    def search_video_transcript(self, company_name: str, qudemo_id: str, question: str) -> Optional[Dict[str, Any]]:
+        """Search video transcript for a question - wrapper for search_transcript_directly"""
+        try:
+            logger.info(f"🎥 Searching video transcript for question: {question}")
+            return self.search_transcript_directly(company_name, qudemo_id, question)
+        except Exception as e:
+            logger.error(f"❌ Failed to search video transcript: {e}")
             return None
     
     def _get_anchor_chunks(self, chunks: List[Dict], question: str, k: int = 60) -> List[Dict]:

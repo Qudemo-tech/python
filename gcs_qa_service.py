@@ -43,7 +43,7 @@ class GCSQAService:
             logger.info(f"❓ Processing question: {question}")
             logger.info(f"🏢 Company: {company_name}, QuDemo: {qudemo_id}")
             
-            # STEP 1: Search document content first (higher priority)
+            # STEP 1: Search both documents and videos simultaneously (equal priority)
             logger.info(f"📄 Searching document content for: {question}")
             document_results = self.document_processor.search_document_content(
                 company_name=company_name,
@@ -51,35 +51,134 @@ class GCSQAService:
                 query=question
             )
             
-            if document_results:
-                logger.info(f"✅ Found {len(document_results)} document results")
-                # Use document answer (prioritize document content)
-                answer_data = self._create_document_answer(document_results, question)
+            logger.info(f"🎥 Searching video transcript for: {question}")
+            video_results = self.gcs_service.search_video_transcript(
+                company_name=company_name,
+                qudemo_id=qudemo_id,
+                question=question
+            )
+            
+            # Check what we found
+            has_document_results = bool(document_results)
+            has_video_results = bool(video_results and 
+                                   video_results.get('answer') != 'not found' and 
+                                   video_results.get('answer') != 'No relevant information found' and
+                                   video_results.get('answer') and
+                                   len(video_results.get('answer', '').strip()) > 0)
+            
+            logger.info(f"📊 Search results: Documents={has_document_results}, Videos={has_video_results}")
+            
+            if has_document_results and has_video_results:
+                # CASE 1: Found in both - combine answers and show video
+                logger.info("🎯 Found in both video and document - combining answers")
+                document_answer_data = self._create_document_answer(document_results, question)
+                video_answer_data = self._create_video_answer(video_results, question)
                 
-                if answer_data:
+                if document_answer_data and video_answer_data:
+                    # Combine the answers intelligently
+                    combined_answer = self._combine_answers(
+                        document_answer_data.get('answer', ''),
+                        video_answer_data.get('answer', ''),
+                        question
+                    )
+                    
+                    # Store the combined Q&A answer
+                    combined_data = {
+                        'answer': combined_answer,
+                        'sources': document_answer_data.get('sources', []) + video_answer_data.get('sources', []),
+                        'answer_source': 'both'
+                    }
+                    
+                    self.gcs_service.store_qa_answer(
+                        company_name=company_name,
+                        qudemo_id=qudemo_id,
+                        question=question,
+                        answer_data=combined_data
+                    )
+                    
+                    return {
+                        'success': True,
+                        'answer': combined_answer,
+                        'timestamp': video_answer_data.get('timestamp', 0),
+                        'end': video_answer_data.get('end', 0),
+                        'formatted_timestamp': video_answer_data.get('formatted_timestamp', ''),
+                        'video_url': video_answer_data.get('video_url', ''),
+                        'video_title': video_answer_data.get('video_title', ''),
+                        'sources': combined_data.get('sources', []),
+                        'answer_source': 'both'
+                    }
+                
+            elif has_video_results:
+                # CASE 2: Found only in video - show video + chat answer
+                logger.info("🎥 Found only in video - showing video with chat answer")
+                video_answer_data = self._create_video_answer(video_results, question)
+                
+                if video_answer_data:
                     # Store the Q&A answer
                     self.gcs_service.store_qa_answer(
                         company_name=company_name,
                         qudemo_id=qudemo_id,
                         question=question,
-                        answer_data=answer_data
+                        answer_data=video_answer_data
                     )
                     
                     return {
                         'success': True,
-                        'answer': answer_data.get('answer', ''),
+                        'answer': video_answer_data.get('answer', ''),
+                        'timestamp': video_answer_data.get('timestamp', 0),
+                        'end': video_answer_data.get('end', 0),
+                        'formatted_timestamp': video_answer_data.get('formatted_timestamp', ''),
+                        'video_url': video_answer_data.get('video_url', ''),
+                        'video_title': video_answer_data.get('video_title', ''),
+                        'sources': video_answer_data.get('sources', []),
+                        'answer_source': 'video_only'
+                    }
+                
+            elif has_document_results:
+                # CASE 3: Found only in document - show only chat answer (no video)
+                logger.info("📄 Found only in document - showing text answer only")
+                document_answer_data = self._create_document_answer(document_results, question)
+                
+                if document_answer_data:
+                    # Store the Q&A answer
+                    self.gcs_service.store_qa_answer(
+                        company_name=company_name,
+                        qudemo_id=qudemo_id,
+                        question=question,
+                        answer_data=document_answer_data
+                    )
+                    
+                    return {
+                        'success': True,
+                        'answer': document_answer_data.get('answer', ''),
                         'timestamp': 0,  # Documents don't have timestamps
                         'end': 0,
                         'formatted_timestamp': 'Document',
                         'video_url': '',  # No video for document answers
                         'video_title': 'Document Content',
-                        'confidence': answer_data.get('confidence', 0.8),
-                        'sources': answer_data.get('sources', []),
-                        'answer_source': 'document_content'
+                        'confidence': document_answer_data.get('confidence', 0.8),
+                        'sources': document_answer_data.get('sources', []),
+                        'answer_source': 'document_only'
                     }
             
-            # STEP 2: Fall back to video transcript search
-            logger.info(f"🎥 No document answer found, searching video transcript for: {question}")
+            else:
+                # CASE 4: Found in neither - return no results
+                logger.info("❌ No relevant information found in either video or document")
+                return {
+                    'success': False,
+                    'answer': 'No relevant information found in the available content.',
+                    'timestamp': 0,
+                    'end': 0,
+                    'formatted_timestamp': '',
+                    'video_url': '',
+                    'video_title': '',
+                    'sources': [],
+                    'answer_source': 'none'
+                }
+            
+            # This should not be reached due to the if/elif/else structure above
+            # But keeping as fallback for safety
+            logger.info(f"🎥 Fallback: searching video transcript for: {question}")
             answer_data = self.gcs_service.search_transcript_directly(
                 company_name=company_name,
                 qudemo_id=qudemo_id,
@@ -230,6 +329,14 @@ class GCSQAService:
             if suggested_questions:
                 logger.info(f"✅ Generated {len(suggested_questions)} FRESH suggested questions for {company_name}/{qudemo_id}")
                 logger.info(f"📝 Questions: {suggested_questions}")
+                
+                # Store the suggested questions
+                storage_success = self.gcs_service.store_suggested_questions(company_name, qudemo_id, suggested_questions)
+                if storage_success:
+                    logger.info(f"💾 Successfully stored suggested questions for {company_name}/{qudemo_id}")
+                else:
+                    logger.warning(f"⚠️ Failed to store suggested questions for {company_name}/{qudemo_id}")
+                
                 return suggested_questions
             else:
                 logger.warning(f"⚠️ No suggested questions generated for {company_name}/{qudemo_id}")
@@ -433,6 +540,8 @@ Questions:"""
             combined_content = "\n\n".join(all_sections)
             
             # Use LLM to create a well-formatted answer (similar to video answers)
+            logger.info(f"📄 Combined content length: {len(combined_content)} characters")
+            logger.info(f"📄 Combined content preview: {combined_content[:200]}...")
             formatted_answer = self._format_document_answer_with_llm(combined_content, question)
             
             return {
@@ -448,6 +557,138 @@ Questions:"""
         except Exception as e:
             logger.error(f"❌ Error creating document answer: {e}")
             return None
+    
+    def _create_video_answer(self, video_results: Dict[str, Any], question: str) -> Optional[Dict[str, Any]]:
+        """
+        Create a well-formatted answer from video search results
+        
+        Args:
+            video_results: Video search results
+            question: Original question
+            
+        Returns:
+            Formatted answer data or None
+        """
+        try:
+            if not video_results or video_results.get('answer') == 'not found':
+                return None
+            
+            return {
+                'answer': video_results.get('answer', ''),
+                'timestamp': video_results.get('timestamp', 0),
+                'end': video_results.get('end', 0),
+                'formatted_timestamp': video_results.get('formatted_timestamp', ''),
+                'video_url': video_results.get('video_url', ''),
+                'video_title': video_results.get('video_title', ''),
+                'sources': [{
+                    'type': 'video',
+                    'timestamp': video_results.get('timestamp', 0),
+                    'formatted_timestamp': video_results.get('formatted_timestamp', ''),
+                    'video_url': video_results.get('video_url', ''),
+                    'video_title': video_results.get('video_title', '')
+                }],
+                'confidence': 0.8
+            }
+        except Exception as e:
+            logger.error(f"❌ Error creating video answer: {e}")
+            return None
+    
+    def _combine_answers(self, document_answer: str, video_answer: str, question: str) -> str:
+        """
+        Intelligently combine document and video answers
+        
+        Args:
+            document_answer: Answer from document search
+            video_answer: Answer from video search
+            question: Original question
+            
+        Returns:
+            Combined answer
+        """
+        try:
+            # Filter out "No relevant information found" text
+            if document_answer and document_answer.strip() in ['not found', 'No relevant information found']:
+                document_answer = ''
+            if video_answer and video_answer.strip() in ['not found', 'No relevant information found']:
+                video_answer = ''
+            
+            # If one answer is empty, return the other
+            if not document_answer.strip():
+                return video_answer.strip()
+            if not video_answer.strip():
+                return document_answer.strip()
+            
+            # If one answer is much longer, it might be more comprehensive
+            if len(document_answer) > len(video_answer) * 2:
+                # Document answer is much more detailed
+                combined = f"{document_answer} {video_answer}"
+            elif len(video_answer) > len(document_answer) * 2:
+                # Video answer is much more detailed
+                combined = f"{video_answer} {document_answer}"
+            else:
+                # Both are similar length, combine them
+                combined = f"{video_answer} {document_answer}"
+            
+            # Clean up the combined answer
+            return self._clean_combined_answer(combined)
+            
+        except Exception as e:
+            logger.error(f"❌ Error combining answers: {e}")
+            return f"{document_answer}\n\n{video_answer}"
+    
+    def _clean_combined_answer(self, answer: str) -> str:
+        """
+        Clean up a combined answer to remove redundancy
+        
+        Args:
+            answer: Combined answer text
+            
+        Returns:
+            Cleaned answer
+        """
+        try:
+            # Remove duplicate sentences and limit to 4-5 sentences
+            sentences = answer.split('. ')
+            seen = set()
+            unique_sentences = []
+            
+            for sentence in sentences:
+                # Normalize sentence for comparison
+                normalized = sentence.strip().lower()
+                if normalized not in seen and len(normalized) > 10:  # Avoid very short duplicates
+                    unique_sentences.append(sentence.strip())
+                    seen.add(normalized)
+                    
+                    # Limit to maximum 5 sentences
+                    if len(unique_sentences) >= 5:
+                        break
+            
+            cleaned = '. '.join(unique_sentences)
+            
+            # Ensure proper ending
+            if not cleaned.endswith('.'):
+                cleaned += '.'
+            
+            # Final check: if still too long, truncate to 500 characters
+            if len(cleaned) > 500:
+                sentences = cleaned.split('. ')
+                truncated_sentences = []
+                char_count = 0
+                for sentence in sentences:
+                    if char_count + len(sentence) + 2 <= 500:  # +2 for '. '
+                        truncated_sentences.append(sentence)
+                        char_count += len(sentence) + 2
+                    else:
+                        break
+                cleaned = '. '.join(truncated_sentences)
+                if not cleaned.endswith('.'):
+                    cleaned += '.'
+            
+            return cleaned
+            
+        except Exception as e:
+            logger.error(f"❌ Error cleaning combined answer: {e}")
+            return answer
     
     def _format_document_answer_with_llm(self, content: str, question: str) -> str:
         """
@@ -469,8 +710,20 @@ Questions:"""
             # Get OpenAI API key
             api_key = os.getenv('OPENAI_API_KEY')
             if not api_key:
-                logger.warning("⚠️ OpenAI API key not found, returning raw content")
-                return content[:500] + "..." if len(content) > 500 else content
+                logger.warning("⚠️ OpenAI API key not found, using fallback formatting")
+                logger.info(f"📄 Content length: {len(content)} characters")
+                logger.info(f"📄 Content preview: {content[:200]}...")
+                # Create a more concise fallback answer (3-4 sentences max)
+                sentences = content.split('. ')
+                if len(sentences) >= 3:
+                    # Take first 3-4 sentences and make them concise
+                    answer = '. '.join(sentences[:3]) + '.'
+                    return answer[:400] + "..." if len(answer) > 400 else answer
+                elif len(sentences) >= 2:
+                    answer = '. '.join(sentences[:2]) + '.'
+                    return answer[:300] + "..." if len(answer) > 300 else answer
+                else:
+                    return content[:200] + "..." if len(content) > 200 else content
             
             # Initialize OpenAI client
             client = openai.OpenAI(api_key=api_key)
@@ -478,7 +731,7 @@ Questions:"""
             # Use the SAME high-quality prompt as video answers for consistency
             prompt = f"""You are an expert at analyzing document content to answer questions. Your task is to find the most relevant information in the document and provide a HIGH-QUALITY, INTELLIGENT answer.
 
-CRITICAL: Your answer must be COMPREHENSIVE but CONCISE - 2-3 sentences maximum. Think like ChatGPT - intelligent, insightful, and comprehensive.
+CRITICAL: Your answer must be EXACTLY 4-5 sentences to provide comprehensive information. Think like ChatGPT - intelligent, insightful, and detailed.
 
 MANDATORY REQUIREMENTS:
 - NEVER include raw document quotes or excerpts
@@ -488,7 +741,7 @@ MANDATORY REQUIREMENTS:
 - ALWAYS focus on the core essence and business value
 
 YOUR ANSWER MUST:
-- Be 2-3 sentences maximum
+- Be EXACTLY 4-5 sentences to provide comprehensive information
 - Be intelligent and insightful (like ChatGPT)
 - Show deep understanding of the concepts
 - Use professional, business-ready language
@@ -505,21 +758,56 @@ Document Content:
 
 Answer:"""
             
+            logger.info(f"📄 Sending to LLM: {len(content)} characters, truncated to 2000")
+            logger.info(f"📄 Question: {question}")
+            
             response = client.chat.completions.create(
                 model="gpt-4o",  # Use same model as video answers
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,  # Same temperature as video answers
-                max_tokens=300,
+                max_tokens=250,  # Increased for 4-5 sentence document answers
                 top_p=0.9
             )
             
             answer = response.choices[0].message.content.strip()
-            logger.info(f"✅ LLM formatted document answer: {len(answer)} characters")
+            
+            # Ensure answer is 4-5 sentences for comprehensive information
+            sentences = answer.split('. ')
+            if len(sentences) > 5:
+                # Take only first 5 sentences
+                answer = '. '.join(sentences[:5])
+                if not answer.endswith('.'):
+                    answer += '.'
+            
+            # Also check character length (should be under 500 characters for 4-5 sentences)
+            if len(answer) > 500:
+                sentences = answer.split('. ')
+                truncated_sentences = []
+                char_count = 0
+                for sentence in sentences:
+                    if char_count + len(sentence) + 2 <= 500:  # +2 for '. '
+                        truncated_sentences.append(sentence)
+                        char_count += len(sentence) + 2
+                    else:
+                        break
+                answer = '. '.join(truncated_sentences)
+                if not answer.endswith('.'):
+                    answer += '.'
+            
+            logger.info(f"✅ LLM formatted document answer (truncated): {len(answer)} characters")
             return answer
             
         except Exception as e:
             logger.error(f"❌ Error formatting document answer with LLM: {e}")
-            # Fallback to simple content truncation
-            return content[:400] + "..." if len(content) > 400 else content
+            # Improved fallback formatting (3-4 sentences max)
+            sentences = content.split('. ')
+            if len(sentences) >= 3:
+                answer = '. '.join(sentences[:3]) + '.'
+                return answer[:350] + "..." if len(answer) > 350 else answer
+            elif len(sentences) >= 2:
+                answer = '. '.join(sentences[:2]) + '.'
+                return answer[:250] + "..." if len(answer) > 250 else answer
+            else:
+                return content[:200] + "..." if len(content) > 200 else content
     
     # Note: Removed get_suggested_questions method since we generate fresh questions on-demand

@@ -141,7 +141,7 @@ class DirectTranscriptQA:
             # Create the prompt for multi-video support
             prompt = f"""You are an expert at analyzing video transcripts to answer questions. Your task is to find the most relevant information in the transcript and provide a HIGH-QUALITY, INTELLIGENT answer.
 
-CRITICAL: Your answer must be COMPREHENSIVE but CONCISE - 2-3 sentences maximum. Think like ChatGPT - intelligent, insightful, and comprehensive.
+CRITICAL: Your answer must be EXACTLY 4-5 sentences to provide comprehensive information. Each sentence should be detailed and informative.
 
 MANDATORY REQUIREMENTS:
 - NEVER include raw transcript quotes like "Hey there" or "Great question"
@@ -151,7 +151,7 @@ MANDATORY REQUIREMENTS:
 - ALWAYS focus on the core essence and business value
 
 YOUR ANSWER MUST:
-- Be 2-3 sentences maximum
+- Be EXACTLY 4-5 sentences to provide comprehensive information - Each sentence should be detailed and informative
 - Be intelligent and insightful (like ChatGPT)
 - Show deep understanding of the concepts
 - Use professional, business-ready language
@@ -192,7 +192,7 @@ question: {question}"""
                 model="gpt-4o",  # Use GPT-4o for highest quality
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,  # Lower temperature for more focused, consistent responses
-                max_tokens=300,   # Increased for comprehensive business-focused answers
+                max_tokens=500,   # Increased to allow longer 4-5 sentence responses
                 top_p=0.95,      # High precision for quality
                 frequency_penalty=0.2,  # Penalty to reduce repetition
                 presence_penalty=0.1    # Encourage new concepts
@@ -215,10 +215,61 @@ question: {question}"""
             # Try to parse JSON
             try:
                 result = json.loads(response_text)
+                
+                # Validate and truncate the answer if needed
+                if result.get('answer') and result.get('answer') != 'not found':
+                    answer = result['answer']
+                    
+                    # Ensure answer is 4-5 sentences for comprehensive information
+                    sentences = answer.split('. ')
+                    if len(sentences) > 5:
+                        # Take only first 5 sentences
+                        answer = '. '.join(sentences[:5])
+                        if not answer.endswith('.'):
+                            answer += '.'
+                    
+                    # Also check character length (should be under 500 characters for 4-5 sentences)
+                    if len(answer) > 500:
+                        sentences = answer.split('. ')
+                        truncated_sentences = []
+                        char_count = 0
+                        for sentence in sentences:
+                            if char_count + len(sentence) + 2 <= 500:  # +2 for '. '
+                                truncated_sentences.append(sentence)
+                                char_count += len(sentence) + 2
+                            else:
+                                break
+                        answer = '. '.join(truncated_sentences)
+                        if not answer.endswith('.'):
+                            answer += '.'
+                    
+                    result['answer'] = answer
+                    print(f"✅ Answer truncated to {len(answer)} characters: {answer[:100]}...")
+                
                 return result
             except json.JSONDecodeError as e:
                 print(f"❌ Failed to parse LLM JSON response: {e}")
                 print(f"❌ Raw response: {response_text}")
+                
+                # Try to fix common JSON issues
+                try:
+                    # Try to fix unterminated strings by adding missing quotes
+                    if '"video_url":' in response_text and not response_text.strip().endswith('"'):
+                        # Find the last incomplete video_url and fix it
+                        last_video_url = response_text.rfind('"video_url":')
+                        if last_video_url != -1:
+                            # Extract the video URL part and fix it
+                            url_part = response_text[last_video_url + len('"video_url":'):].strip()
+                            if url_part.startswith('"') and not url_part.endswith('"'):
+                                # Remove the opening quote and add closing quote and brace
+                                url_value = url_part[1:].strip()
+                                fixed_response = response_text[:last_video_url + len('"video_url":') + 1] + url_value + '"}'
+                                print(f"🔧 Attempting to fix JSON: {fixed_response}")
+                                result = json.loads(fixed_response)
+                                return result
+                except:
+                    pass
+                
                 return None
             
         except Exception as e:
@@ -493,7 +544,7 @@ transcript:
             # Stricter prompt for reprocessing
             prompt = f"""You are an expert at analyzing video transcripts to answer questions. Your task is to find the most relevant information in the transcript and provide a HIGH-QUALITY, INTELLIGENT answer.
 
-CRITICAL: Your answer must be COMPREHENSIVE but CONCISE - 2-3 sentences maximum. Think like ChatGPT - intelligent, insightful, and comprehensive.
+CRITICAL: Your answer must be EXACTLY 4-5 sentences to provide comprehensive information. Each sentence should be detailed and informative.
 
 ABSOLUTELY FORBIDDEN:
 - NEVER include raw transcript quotes like "Hey there" or "Great question"
@@ -508,7 +559,7 @@ MANDATORY REQUIREMENTS:
 - ALWAYS interpret and analyze, never quote directly
 
 YOUR ANSWER MUST:
-- Be 2-3 sentences maximum
+- Be EXACTLY 4-5 sentences to provide comprehensive information - Each sentence should be detailed and informative
 - Be intelligent and insightful (like ChatGPT)
 - Show deep understanding of the concepts
 - Use professional, business-ready language
@@ -535,7 +586,7 @@ question: {question}"""
                 model="gpt-4o",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
-                max_tokens=300,
+                max_tokens=500,   # Increased to allow longer 4-5 sentence responses
                 top_p=0.95,
                 frequency_penalty=0.2,
                 presence_penalty=0.1

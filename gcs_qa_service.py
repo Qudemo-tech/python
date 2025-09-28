@@ -87,7 +87,7 @@ class GCSQAService:
             
             if has_video_results:
                 video_answer_data = self._create_video_answer(video_results, question)
-            
+                
             if has_website_results:
                 website_answer_data = self._create_website_answer(website_results, question)
             
@@ -221,25 +221,25 @@ class GCSQAService:
                 else:
                     # Combine normally
                     combined_answer = self._combine_multiple_answers(answers_to_combine, question)
-                
-                # Store the combined Q&A answer
-                combined_data = {
-                    'answer': combined_answer,
+                    
+                    # Store the combined Q&A answer
+                    combined_data = {
+                        'answer': combined_answer,
                     'sources': all_sources,
                     'answer_source': f"multiple_{'_'.join(available_sources)}"
-                }
-                
-                self.gcs_service.store_qa_answer(
-                    company_name=company_name,
-                    qudemo_id=qudemo_id,
-                    question=question,
-                    answer_data=combined_data
-                )
-                
+                    }
+                    
+                    self.gcs_service.store_qa_answer(
+                        company_name=company_name,
+                        qudemo_id=qudemo_id,
+                        question=question,
+                        answer_data=combined_data
+                    )
+                    
                 # Return with video data if available (for UI consistency)
                 return_data = {
-                    'success': True,
-                    'answer': combined_answer,
+                        'success': True,
+                        'answer': combined_answer,
                     'sources': all_sources,
                     'answer_source': f"multiple_{'_'.join(available_sources)}"
                 }
@@ -1068,16 +1068,16 @@ Answer:"""
                     return '\n'.join(steps)
             
             # Fallback to LLM if direct extraction doesn't work
-            prompt = f"""Copy the text exactly as it appears in the content below. Do not summarize or rewrite anything.
+            prompt = f"""Extract and present the information from the website content below. Preserve ALL specific details, numbers, percentages, categories, and exact requirements. Do not generalize or summarize away specific information.
 
 Question: {question}
 
 Website Content:
-{content[:3000]}
+{content[:4000]}
 
-Copy the text exactly:"""
+Extract the specific information while preserving all details:"""
             
-            logger.info(f"🌐 Sending to LLM: {len(content)} characters, truncated to 3000")
+            logger.info(f"🌐 Sending to LLM: {len(content)} characters, truncated to 4000")
             logger.info(f"🌐 Question: {question}")
             logger.info(f"🌐 Content preview (first 500 chars): {content[:500]}")
             logger.info(f"🌐 Content preview (last 500 chars): {content[-500:]}")
@@ -1086,7 +1086,7 @@ Copy the text exactly:"""
                 model="gpt-4o",  # Use same model as other answers
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,  # Same temperature as other answers
-                max_tokens=250,  # Increased for 4-5 sentence website answers
+                max_tokens=400,  # Increased to preserve detailed website information
                 top_p=0.9
             )
             
@@ -1154,28 +1154,33 @@ Copy the text exactly:"""
             # Create a prompt to intelligently combine the answers
             answers_text = "\n\n".join([f"Source {i+1}: {answer}" for i, answer in enumerate(answers)])
             
-            prompt = f"""You are an expert at combining information from multiple sources to create a comprehensive, intelligent answer. Your task is to merge the following answers into a single, coherent response.
+            prompt = f"""You are an expert at combining information from multiple sources to create a comprehensive, detailed answer. Your task is to merge the following answers into a single, coherent response.
 
-CRITICAL: Your combined answer must be EXACTLY 4-6 sentences to provide comprehensive information. Think like ChatGPT - intelligent, insightful, and detailed.
+CRITICAL: Your combined answer must preserve ALL specific details, requirements, and actionable information. Prioritize specific information over generic business speak.
 
 MANDATORY REQUIREMENTS:
-- NEVER include source references or "Source 1 says..." type language
-- NEVER include redundant information
-- ALWAYS provide a unified, intelligent analysis
-- ALWAYS use professional, business-ready language
-- ALWAYS focus on the core essence and business value
-- ALWAYS synthesize information rather than just concatenating
+- ALWAYS preserve specific details, numbers, percentages, and exact requirements
+- ALWAYS include specific roles, titles, and categories when mentioned (e.g., CFO, COO, President, VP, General Partner, Treasurer)
+- ALWAYS preserve step-by-step instructions and procedures
+- ALWAYS include specific thresholds, limits, and criteria (e.g., 25% ownership)
+- ALWAYS maintain the original level of detail and specificity
+- ALWAYS include specific categories and classifications when provided
+- ALWAYS preserve lists of specific items, roles, or requirements
+- NEVER generalize or synthesize away specific information
+- NEVER replace specific details with generic business concepts
+- NEVER summarize away important categories or classifications
 
 YOUR COMBINED ANSWER MUST:
-- Be EXACTLY 4-6 sentences to provide comprehensive information
-- Be intelligent and insightful (like ChatGPT)
-- Show deep understanding of the concepts
-- Use professional, business-ready language
-- Provide clear comparisons and contrasts
-- Be immediately valuable and actionable
-- Demonstrate consciousness and completeness
-- Focus on the core essence and business value
-- Synthesize information from all sources into a unified response
+- Preserve ALL specific details from the sources
+- Include exact numbers, percentages, and thresholds
+- Maintain specific role titles and categories (list them if provided)
+- Keep step-by-step procedures intact
+- Include specific categories and classifications
+- Provide actionable, specific information
+- Be comprehensive and detailed
+- Focus on what users need to know to take action
+- Combine sources while preserving all specific information
+- Include all specific examples and role types mentioned
 
 Question: {question}
 
@@ -1190,34 +1195,21 @@ Combined Answer:"""
                 model="gpt-4o",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
-                max_tokens=300,  # Increased for 4-6 sentence combined answers
+                max_tokens=800,  # Increased to preserve all detailed information including role lists
                 top_p=0.9
             )
             
             combined_answer = response.choices[0].message.content.strip()
             
-            # Ensure answer is 4-6 sentences for comprehensive information
-            sentences = combined_answer.split('. ')
-            if len(sentences) > 6:
-                # Take only first 6 sentences
-                combined_answer = '. '.join(sentences[:6])
-                if not combined_answer.endswith('.'):
-                    combined_answer += '.'
-            
-            # Also check character length (should be under 600 characters for 4-6 sentences)
-            if len(combined_answer) > 600:
+            # Ensure answer is comprehensive but not too long
+            if len(combined_answer) > 1500:
+                # If too long, try to preserve the most important parts
                 sentences = combined_answer.split('. ')
-                truncated_sentences = []
-                char_count = 0
-                for sentence in sentences:
-                    if char_count + len(sentence) + 2 <= 600:  # +2 for '. '
-                        truncated_sentences.append(sentence)
-                        char_count += len(sentence) + 2
-                    else:
-                        break
-                combined_answer = '. '.join(truncated_sentences)
-                if not combined_answer.endswith('.'):
-                    combined_answer += '.'
+                if len(sentences) > 12:
+                    # Take first 12 sentences to preserve detail
+                    combined_answer = '. '.join(sentences[:12])
+                    if not combined_answer.endswith('.'):
+                        combined_answer += '.'
             
             logger.info(f"✅ LLM combined answer (truncated): {len(combined_answer)} characters")
             return combined_answer

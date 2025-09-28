@@ -711,7 +711,7 @@ class WebsiteScraper:
             logger.warning(f"⚠️ Failed to scrape {url} with requests: {e}")
             return None
     
-    async def _scrape_page_playwright(self, page: Page, url: str) -> Optional[Dict]:
+    async def _scrape_page_playwright(self, page, url: str) -> Optional[Dict]:
         """Scrape a single page using Playwright"""
         try:
             await page.goto(url, wait_until='networkidle', timeout=30000)

@@ -25,6 +25,7 @@ from simple_gemini_transcriber import SimpleGeminiTranscriber
 from document_processor import DocumentProcessor
 from company_api import router as company_router
 from company_bucket_service import initialize_company_bucket_service, get_company_bucket_service
+from website_scraper import WebsiteScraper
 # from enhanced_scraper_with_failure_handling import initialize_enhanced_scraper, get_enhanced_scraper
 
 # New universal scraper system
@@ -47,11 +48,12 @@ gcs_qa_service = None
 simple_transcriber = None
 document_processor = None
 company_bucket_service = None
+website_scraper = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for FastAPI"""
-    global loom_processor_gcs, gcs_qa_service, simple_transcriber, document_processor, company_bucket_service
+    global loom_processor_gcs, gcs_qa_service, simple_transcriber, document_processor, company_bucket_service, website_scraper
     
     try:
         logger.info("🚀 Starting Enhanced QuDemo Python Backend (GCS-based)...")
@@ -130,6 +132,10 @@ async def lifespan(app: FastAPI):
         try:
             document_processor = DocumentProcessor()
             logger.info("✅ Document Processor initialized")
+            
+            # Initialize Website Scraper
+            website_scraper = WebsiteScraper()
+            logger.info("✅ Website Scraper initialized")
         except Exception as e:
             logger.error(f"❌ Document Processor initialization error: {e}")
             document_processor = None
@@ -214,7 +220,7 @@ class QuestionRequest(BaseModel):
 
 class QuDemoContentRequest(BaseModel):
     video_urls: Optional[List[str]] = []
-    website_url: Optional[str] = None
+    website_urls: Optional[List[str]] = []
 
 class UrlRequest(BaseModel):
     url: str
@@ -608,6 +614,36 @@ async def get_knowledge_sources_qudemo(company_name: str, qudemo_id: str):
         logger.error(f"❌ Error getting knowledge sources: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/knowledge/website-count/{company_name}/{qudemo_id}")
+async def get_website_count(company_name: str, qudemo_id: str):
+    """Get website count for a QuDemo"""
+    try:
+        logger.info(f"🌐 Getting website count for {company_name}/{qudemo_id}")
+        
+        # Get website count from GCS
+        if gcs_qa_service:
+            count = gcs_qa_service.gcs_service.get_website_count(company_name, qudemo_id)
+            return {
+                "success": True,
+                "data": {
+                    "count": count
+                }
+            }
+        else:
+            return {
+                "success": True,
+                "data": {
+                    "count": 0
+                }
+            }
+        
+    except Exception as e:
+        logger.error(f"❌ Error getting website count: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
 @app.post("/upload-loom-media/{company_name}/{qudemo_id}")
 async def upload_loom_media(
     company_name: str, 
@@ -852,6 +888,57 @@ async def search_documents(company_name: str, qudemo_id: str, query: str):
         logger.error(f"❌ Document search error: {str(e)}")
         return {"results": [], "error": str(e)}
 
+@app.post("/process-website/{company_name}/{qudemo_id}")
+async def process_website(company_name: str, qudemo_id: str, website_url: str = Form(...)):
+    """Process website scraping with dynamic depth and adaptive timeout"""
+    try:
+        if not website_scraper:
+            raise HTTPException(status_code=500, detail="Website scraper not initialized")
+        
+        if not gcs_qa_service:
+            raise HTTPException(status_code=500, detail="GCS service not initialized")
+        
+        logger.info(f"🌐 Starting website processing for: {website_url}")
+        
+        # Scrape the website
+        website_data = await website_scraper.scrape_website(website_url)
+        
+        # Store the scraped content
+        if website_data and website_data.get('scraped_pages'):
+            storage_success = gcs_qa_service.store_website_content(company_name, qudemo_id, website_data)
+            
+            if storage_success:
+                logger.info(f"✅ Website processing completed: {website_data['total_pages']} pages scraped")
+                return {
+                    "success": True,
+                    "website_id": website_data['website_id'],
+                    "total_pages": website_data['total_pages'],
+                    "scraping_status": website_data['scraping_status'],
+                    "base_url": website_data['base_url'],
+                    "errors": website_data.get('errors', [])
+                }
+            else:
+                logger.error("❌ Failed to store website content")
+                return {
+                    "success": False,
+                    "error": "Failed to store website content",
+                    "website_data": website_data
+                }
+        else:
+            logger.warning(f"⚠️ No content scraped from website: {website_url}")
+            return {
+                "success": False,
+                "error": "No content could be scraped from the website",
+                "website_data": website_data
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Website processing error: {str(e)}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
 @app.post("/process-qudemo-content/{company_name}/{qudemo_id}")
 async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuDemoContentRequest):
     """Process qudemo content with optimized processing order: Videos first, then website"""
@@ -1061,74 +1148,91 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
         if request.video_urls and len(request.video_urls) > 0:
             logger.info("✅ Step 1 (Videos) completed successfully!")
             
-        if request.website_url:
-            logger.info(f"🌐 Step 2: Processing website with universal scraper: {request.website_url}")
-            processing_order.append("website")
+        if request.website_urls and len(request.website_urls) > 0:
+            logger.info(f"🌐 Step 2: Processing {len(request.website_urls)} websites")
+            processing_order.append("websites")
             
-            website_success = False
+            websites_processed = 0
+            websites_failed = 0
             
-            # Use legacy scraper (enhanced scrapers deleted)
-            try:
-                logger.info("🔄 Using legacy Gemini scraper...")
-                logger.info("⏱️ Legacy scraping with Gemini...")
-                
-                gemini_api_key = os.getenv('GEMINI_API_KEY')
-                if not gemini_api_key:
-                    raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable not set")
-                
-                scraper = FinalGeminiScraper(gemini_api_key=gemini_api_key)
-                website_results = await scraper.scrape_website_comprehensive(request.website_url)
-                
-                if website_results and len(website_results) > 0:
-                    # Store website results in GCS (if GCS service is available)
-                    if gcs_qa_service:
-                        # For now, we'll store website content as a simple text file in GCS
-                        website_content = {
-                            'website_url': request.website_url,
-                            'scraped_content': website_results,
-                            'chunks_count': len(website_results),
-                            'processed_at': datetime.now().isoformat()
-                        }
-                        
-                        # Store as a JSON file in the QuDemo folder
-                        bucket = gcs_qa_service.gcs_service._get_company_bucket(company_name)
-                        blob = bucket.blob(f"{qudemo_id}/website_content.json")
-                        blob.upload_from_string(
-                            json.dumps(website_content, indent=2),
-                            content_type='application/json'
-                        )
-                        
-                        total_chunks += len(website_results)
-                        successful_content["websites"].append({
-                            "url": request.website_url,
-                            "chunks_stored": len(website_results)
-                        })
-                        logger.info(f"✅ Website content stored in GCS: {len(website_results)} chunks")
-                        website_success = True
-                    else:
-                        logger.error("❌ GCS service not available for website storage")
-                else:
-                    logger.error("❌ Legacy scraper returned no results")
+            for i, website_url in enumerate(request.website_urls):
+                try:
+                    logger.info(f"🌐 Processing website {i+1}/{len(request.website_urls)}: {website_url}")
                     
-            except Exception as e:
-                logger.error(f"❌ Website scraping error: {e}")
-                processing_errors.append({
-                    "type": "website",
-                    "url": request.website_url,
-                    "error": str(e),
-                    "error_type": "scraping_error",
-                    "protection_detected": False
-                })
+                    # Use the new website scraper
+                    if website_scraper:
+                        website_data = await website_scraper.scrape_website(website_url)
+                        
+                        if website_data and website_data.get('scraped_pages'):
+                            # Store website content using GCS service
+                            storage_success = gcs_qa_service.store_website_content(company_name, qudemo_id, website_data)
+                            
+                            if storage_success:
+                                total_chunks += website_data.get('total_pages', 0)
+                                successful_content["websites"].append({
+                                    "url": website_url,
+                                    "pages_scraped": website_data.get('total_pages', 0),
+                                    "status": website_data.get('scraping_status', 'completed')
+                                })
+                                websites_processed += 1
+                                logger.info(f"✅ Website {i+1} processed successfully: {website_data.get('total_pages', 0)} pages")
+                            else:
+                                logger.error(f"❌ Failed to store website {i+1} content")
+                                processing_errors.append({
+                                    "type": "website",
+                                    "url": website_url,
+                                    "error": "Failed to store website content",
+                                    "error_type": "storage_error"
+                                })
+                                websites_failed += 1
+                        else:
+                            logger.warning(f"⚠️ No content scraped from website {i+1}: {website_url}")
+                            
+                            # Check if it's likely a CRM site with bot detection
+                            is_crm_site = any(crm in website_url.lower() for crm in [
+                                'salesforce', 'surveysparrow', 'zendesk', 'freshdesk', 
+                                'intercom', 'hubspot', 'pipedrive', 'monday.com'
+                            ])
+                            
+                            if is_crm_site:
+                                error_msg = "CRM site detected with bot protection - try uploading documents instead"
+                                error_type = "crm_bot_detection"
+                            else:
+                                error_msg = "No content could be scraped - site may have bot protection"
+                                error_type = "scraping_error"
+                            
+                            processing_errors.append({
+                                "type": "website",
+                                "url": website_url,
+                                "error": error_msg,
+                                "error_type": error_type
+                            })
+                            websites_failed += 1
+                    else:
+                        logger.error("❌ Website scraper not initialized")
+                        processing_errors.append({
+                            "type": "website",
+                            "url": website_url,
+                            "error": "Website scraper not available",
+                            "error_type": "service_error"
+                        })
+                        websites_failed += 1
+                        
+                except Exception as e:
+                    logger.error(f"❌ Website {i+1} processing error: {e}")
+                    processing_errors.append({
+                        "type": "website",
+                        "url": website_url,
+                        "error": str(e),
+                        "error_type": "processing_error"
+                    })
+                    websites_failed += 1
             
-            if not website_success:
-                logger.error("❌ Both universal and legacy scraping failed")
-        
-        # Final completion message
-        if request.website_url:
-            if website_success:
-                logger.info("✅ Step 2 (Website) completed successfully!")
-            else:
-                logger.info("⚠️ Step 2 (Website) failed - anti-bot protection detected")
+            # Final website processing summary
+            if websites_processed > 0:
+                logger.info(f"✅ Step 2 (Websites) completed: {websites_processed}/{len(request.website_urls)} websites processed successfully")
+            if websites_failed > 0:
+                logger.info(f"⚠️ Step 2 (Websites) partial failure: {websites_failed}/{len(request.website_urls)} websites failed")
         
         if total_chunks > 0:
             logger.info(f"🎉 Processing completed! Total chunks stored: {total_chunks}")
@@ -1443,7 +1547,7 @@ def _generate_processing_status_message(successful_content: Dict, processing_err
     
     if successful_content['websites']:
         website_count = len(successful_content['websites'])
-        total_website_chunks = sum(website['chunks_stored'] for website in successful_content['websites'])
+        total_website_chunks = sum(website['pages_scraped'] for website in successful_content['websites'])
         messages.append(f"✅ {website_count} website(s) scraped successfully ({total_website_chunks} chunks)")
     
     # Add error information

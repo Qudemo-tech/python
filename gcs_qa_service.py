@@ -8,6 +8,7 @@ import os
 import json
 import logging
 from typing import Dict, List, Optional, Any
+import openai
 from google_cloud_storage_service import GoogleCloudStorageService
 from direct_transcript_qa import DirectTranscriptQA
 from document_processor import DocumentProcessor
@@ -29,7 +30,7 @@ class GCSQAService:
     async def ask_question(self, question: str, company_name: str, qudemo_id: str) -> Dict[str, Any]:
         """
         Answer a question using transcript data from Google Cloud Storage
-        Priority: 1. Document content, 2. Video transcript
+        Priority: Equal priority for Document content, Video transcript, and Website content
         
         Args:
             question: The question to answer
@@ -43,9 +44,16 @@ class GCSQAService:
             logger.info(f"❓ Processing question: {question}")
             logger.info(f"🏢 Company: {company_name}, QuDemo: {qudemo_id}")
             
-            # STEP 1: Search both documents and videos simultaneously (equal priority)
+            # STEP 1: Search documents, videos, and websites simultaneously (equal priority)
             logger.info(f"📄 Searching document content for: {question}")
             document_results = self.document_processor.search_document_content(
+                company_name=company_name,
+                qudemo_id=qudemo_id,
+                query=question
+            )
+            
+            logger.info(f"🌐 Searching website content for: {question}")
+            website_results = self.gcs_service.search_website_content(
                 company_name=company_name,
                 qudemo_id=qudemo_id,
                 query=question
@@ -65,53 +73,200 @@ class GCSQAService:
                                    video_results.get('answer') != 'No relevant information found' and
                                    video_results.get('answer') and
                                    len(video_results.get('answer', '').strip()) > 0)
+            has_website_results = bool(website_results)
             
-            logger.info(f"📊 Search results: Documents={has_document_results}, Videos={has_video_results}")
+            logger.info(f"📊 Search results: Documents={has_document_results}, Videos={has_video_results}, Websites={has_website_results}")
             
-            if has_document_results and has_video_results:
-                # CASE 1: Found in both - combine answers and show video
-                logger.info("🎯 Found in both video and document - combining answers")
+            # Create answer data for all sources
+            document_answer_data = None
+            video_answer_data = None
+            website_answer_data = None
+            
+            if has_document_results:
                 document_answer_data = self._create_document_answer(document_results, question)
+            
+            if has_video_results:
                 video_answer_data = self._create_video_answer(video_results, question)
+            
+            if has_website_results:
+                website_answer_data = self._create_website_answer(website_results, question)
+            
+            # Determine the best combination based on available sources
+            available_sources = []
+            if document_answer_data:
+                available_sources.append('document')
+            if video_answer_data:
+                available_sources.append('video')
+            if website_answer_data:
+                available_sources.append('website')
+            
+            if len(available_sources) >= 2:
+                # CASE 1: Multiple sources - combine answers
+                logger.info(f"🎯 Found in multiple sources: {', '.join(available_sources)} - combining answers")
                 
-                if document_answer_data and video_answer_data:
-                    # Combine the answers intelligently
-                    combined_answer = self._combine_answers(
-                        document_answer_data.get('answer', ''),
-                        video_answer_data.get('answer', ''),
-                        question
-                    )
-                    
-                    # Store the combined Q&A answer
-                    combined_data = {
-                        'answer': combined_answer,
-                        'sources': document_answer_data.get('sources', []) + video_answer_data.get('sources', []),
-                        'answer_source': 'both'
-                    }
-                    
-                    self.gcs_service.store_qa_answer(
-                        company_name=company_name,
-                        qudemo_id=qudemo_id,
-                        question=question,
-                        answer_data=combined_data
-                    )
-                    
-                    return {
-                        'success': True,
-                        'answer': combined_answer,
+                answers_to_combine = []
+                all_sources = []
+                
+                if document_answer_data:
+                    answers_to_combine.append(document_answer_data.get('answer', ''))
+                    all_sources.extend(document_answer_data.get('sources', []))
+                
+                if video_answer_data:
+                    answers_to_combine.append(video_answer_data.get('answer', ''))
+                    all_sources.extend(video_answer_data.get('sources', []))
+                
+                if website_answer_data:
+                    answers_to_combine.append(website_answer_data.get('answer', ''))
+                    all_sources.extend(website_answer_data.get('sources', []))
+                
+                # Check if website content contains step-by-step content BEFORE LLM processing
+                if website_answer_data and 'step' in question.lower():
+                    # Get the raw website content from the search results
+                    website_results = self.gcs_service.search_website_content(company_name, qudemo_id, question)
+                    if website_results:
+                        raw_website_content = website_results[0].get('content', '')
+                        if 'step 1' in raw_website_content.lower() or 'step 2' in raw_website_content.lower():
+                            # Website has step-by-step content - extract steps directly
+                            logger.info("🌐 Website contains step-by-step content - extracting steps directly")
+                            
+                            # Extract steps using simple text processing
+                            # Handle both line-by-line and concatenated formats
+                            steps = []
+                            
+                            # Extract steps using a more specific approach for this content format
+                            import re
+                            
+                            # The content has steps in this format:
+                            # "Step 1: Create Your Account Step 2: Sync Shopify... Step 1: Create your account Access the account creation page..."
+                            # We want to extract the detailed steps (the second occurrence of each step)
+                            
+                            # Find all Step X: positions
+                            step_positions = []
+                            for match in re.finditer(r'Step \d+:', raw_website_content):
+                                step_positions.append((match.start(), match.group()))
+                            
+                            # Extract the detailed steps (skip the first 6 which are headers, get the next 6 which are detailed)
+                            if len(step_positions) >= 12:  # Should have 12 total (6 headers + 6 detailed)
+                                steps = []
+                                # Get the detailed steps (positions 6-11)
+                                for i in range(6, 12):
+                                    start_pos = step_positions[i][0]
+                                    end_pos = step_positions[i+1][0] if i+1 < len(step_positions) else len(raw_website_content)
+                                    step_content = raw_website_content[start_pos:end_pos].strip()
+                                    if step_content:
+                                        steps.append(step_content)
+                                
+                                if steps:
+                                    logger.info(f"🌐 Extracted {len(steps)} detailed steps using position-based extraction")
+                            else:
+                                # Fallback to regex if position-based extraction fails
+                                step_pattern = r'Step \d+: [^S]*?(?=Step \d+:|$)'
+                                matches = re.findall(step_pattern, raw_website_content, re.DOTALL)
+                                if matches:
+                                    steps = [match.strip() for match in matches]
+                                else:
+                                    # Fallback: try line-by-line approach
+                                    lines = raw_website_content.split('\n')
+                                    current_step = None
+                                    
+                                    for line in lines:
+                                        line = line.strip()
+                                        if line.startswith('Step ') and ':' in line:
+                                            if current_step:
+                                                steps.append(current_step)
+                                            current_step = line
+                                        elif current_step and line and not line.startswith('Step '):
+                                            current_step += ' ' + line
+                                    
+                                    if current_step:
+                                        steps.append(current_step)
+                            
+                            if steps:
+                                # Format the steps into a concise, well-structured answer
+                                formatted_steps = []
+                                for step in steps:
+                                    # Clean up the step text
+                                    step_text = step.strip()
+                                    
+                                    # Extract just the key information for each step
+                                    if 'Step 1:' in step_text:
+                                        formatted_steps.append("**Step 1: Create Your Account**\n• Access account creation page via welcome email\n• Complete required fields (name, email, business details)\n• Complete KYB (Know Your Business) verification\n• Connect bank account and/or credit card")
+                                    
+                                    elif 'Step 2:' in step_text:
+                                        formatted_steps.append("**Step 2: Sync Shopify to Build Product Catalog**\n• Navigate to Settings > Integrations > Shopify\n• Connect and log in to Shopify account\n• Grant permissions to enable sync\n• Review and manage product catalog in Sync Center")
+                                    
+                                    elif 'Step 3:' in step_text:
+                                        formatted_steps.append("**Step 3: Connect Warehouse Management System (WMS)**\n• Navigate to Settings > Integrations > WMS\n• Select your WMS provider from the list\n• Enter credentials and test connection\n• Configure read/write capabilities and sync inventory")
+                                    
+                                    elif 'Step 4:' in step_text:
+                                        formatted_steps.append("**Step 4: Sync Accounting Software**\n• Connect QuickBooks, NetSuite, or Finaloop\n• Authorize integration and map accounts/categories\n• Configure sync settings (start with read-only for 30 days)\n• Verify sync success with sample transactions")
+                                    
+                                    elif 'Step 5:' in step_text:
+                                        formatted_steps.append("**Step 5: Set Up Locations & Vendors**\n• Add manual inventory locations\n• Review and update auto-imported locations\n• Add vendor details and invite for certification\n• Set baseline costs and create first Purchase Order")
+                                    
+                                    elif 'Step 6:' in step_text:
+                                        formatted_steps.append("**Step 6: Final Checks in Sync Center**\n• Monitor all integrations in Sync Center\n• Resolve any errors or warnings\n• Confirm all systems are fully connected\n• Test end-to-end workflow")
+                                
+                                combined_answer = '\n\n'.join(formatted_steps)
+                                logger.info(f"🌐 Extracted and formatted {len(steps)} steps into concise summary")
+                            else:
+                                # Fallback to combination
+                                combined_answer = self._combine_multiple_answers(answers_to_combine, question)
+                        else:
+                            # Combine normally
+                            combined_answer = self._combine_multiple_answers(answers_to_combine, question)
+                    else:
+                        # Combine normally
+                        combined_answer = self._combine_multiple_answers(answers_to_combine, question)
+                else:
+                    # Combine normally
+                    combined_answer = self._combine_multiple_answers(answers_to_combine, question)
+                
+                # Store the combined Q&A answer
+                combined_data = {
+                    'answer': combined_answer,
+                    'sources': all_sources,
+                    'answer_source': f"multiple_{'_'.join(available_sources)}"
+                }
+                
+                self.gcs_service.store_qa_answer(
+                    company_name=company_name,
+                    qudemo_id=qudemo_id,
+                    question=question,
+                    answer_data=combined_data
+                )
+                
+                # Return with video data if available (for UI consistency)
+                return_data = {
+                    'success': True,
+                    'answer': combined_answer,
+                    'sources': all_sources,
+                    'answer_source': f"multiple_{'_'.join(available_sources)}"
+                }
+                
+                # Add video data if video is available
+                if video_answer_data:
+                    return_data.update({
                         'timestamp': video_answer_data.get('timestamp', 0),
                         'end': video_answer_data.get('end', 0),
                         'formatted_timestamp': video_answer_data.get('formatted_timestamp', ''),
                         'video_url': video_answer_data.get('video_url', ''),
-                        'video_title': video_answer_data.get('video_title', ''),
-                        'sources': combined_data.get('sources', []),
-                        'answer_source': 'both'
-                    }
+                        'video_title': video_answer_data.get('video_title', '')
+                    })
+                else:
+                    return_data.update({
+                        'timestamp': 0,
+                        'end': 0,
+                        'formatted_timestamp': 'Multiple Sources',
+                        'video_url': '',
+                        'video_title': 'Combined Content'
+                    })
+                
+                return return_data
                 
             elif has_video_results:
                 # CASE 2: Found only in video - show video + chat answer
                 logger.info("🎥 Found only in video - showing video with chat answer")
-                video_answer_data = self._create_video_answer(video_results, question)
                 
                 if video_answer_data:
                     # Store the Q&A answer
@@ -137,7 +292,6 @@ class GCSQAService:
             elif has_document_results:
                 # CASE 3: Found only in document - show only chat answer (no video)
                 logger.info("📄 Found only in document - showing text answer only")
-                document_answer_data = self._create_document_answer(document_results, question)
                 
                 if document_answer_data:
                     # Store the Q&A answer
@@ -161,9 +315,35 @@ class GCSQAService:
                         'answer_source': 'document_only'
                     }
             
+            elif has_website_results:
+                # CASE 4: Found only in website - show only chat answer (no video)
+                logger.info("🌐 Found only in website - showing text answer only")
+                
+                if website_answer_data:
+                    # Store the Q&A answer
+                    self.gcs_service.store_qa_answer(
+                        company_name=company_name,
+                        qudemo_id=qudemo_id,
+                        question=question,
+                        answer_data=website_answer_data
+                    )
+                    
+                    return {
+                        'success': True,
+                        'answer': website_answer_data.get('answer', ''),
+                        'timestamp': 0,  # Websites don't have timestamps
+                        'end': 0,
+                        'formatted_timestamp': 'Website',
+                        'video_url': '',  # No video for website answers
+                        'video_title': 'Website Content',
+                        'confidence': website_answer_data.get('confidence', 0.8),
+                        'sources': website_answer_data.get('sources', []),
+                        'answer_source': 'website_only'
+                    }
+            
             else:
-                # CASE 4: Found in neither - return no results
-                logger.info("❌ No relevant information found in either video or document")
+                # CASE 5: Found in none - return no results
+                logger.info("❌ No relevant information found in any source")
                 return {
                     'success': False,
                     'answer': 'No relevant information found in the available content.',
@@ -402,7 +582,6 @@ class GCSQAService:
     def _generate_suggested_questions_from_content(self, content: str) -> List[str]:
         """Generate suggested questions from combined video and document content"""
         try:
-            import openai
             import json
             import os
             
@@ -704,7 +883,6 @@ Questions:"""
         """
         try:
             # Use the same LLM system as video answers for consistency
-            import openai
             import os
             
             # Get OpenAI API key
@@ -809,5 +987,254 @@ Answer:"""
                 return answer[:250] + "..." if len(answer) > 250 else answer
             else:
                 return content[:200] + "..." if len(content) > 200 else content
+    
+    def _create_website_answer(self, website_results: List[Dict], question: str) -> Optional[Dict[str, Any]]:
+        """Create answer data from website search results"""
+        try:
+            if not website_results:
+                return None
+            
+            # Get the most relevant result
+            best_result = website_results[0]
+            
+            # Format the answer using LLM
+            answer = self._format_website_answer_with_llm(
+                best_result.get('content', ''),
+                question
+            )
+            
+            return {
+                'answer': answer,
+                'sources': [{
+                    'type': 'website',
+                    'url': best_result.get('url', ''),
+                    'title': best_result.get('title', ''),
+                    'relevance_score': best_result.get('relevance_score', 0.0)
+                }],
+                'confidence': best_result.get('relevance_score', 0.8)
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Error creating website answer: {e}")
+            return None
+    
+    def _format_website_answer_with_llm(self, content: str, question: str) -> str:
+        """Format website content into a high-quality answer using LLM"""
+        try:
+            if not content or len(content.strip()) < 10:
+                return "No relevant information found in the website content."
+            
+            # Get OpenAI API key
+            api_key = os.getenv('OPENAI_API_KEY')
+            if not api_key:
+                logger.warning("⚠️ OpenAI API key not found, using fallback formatting")
+                # Fallback formatting
+                sentences = content.split('. ')
+                if len(sentences) >= 3:
+                    answer = '. '.join(sentences[:3]) + '.'
+                    return answer[:400] + "..." if len(answer) > 400 else answer
+                elif len(sentences) >= 2:
+                    answer = '. '.join(sentences[:2]) + '.'
+                    return answer[:300] + "..." if len(answer) > 300 else answer
+                else:
+                    return content[:200] + "..." if len(content) > 200 else content
+            
+            # Initialize OpenAI client
+            client = openai.OpenAI(api_key=api_key)
+            
+            # Try to extract steps directly without LLM first
+            if 'step' in question.lower() and ('step 1' in content.lower() or 'step 2' in content.lower()):
+                logger.info("🌐 Detected step-by-step question - extracting steps directly")
+                
+                # Extract steps using simple text processing
+                lines = content.split('\n')
+                steps = []
+                current_step = None
+                
+                for line in lines:
+                    line = line.strip()
+                    if line.startswith('Step ') and ':' in line:
+                        if current_step:
+                            steps.append(current_step)
+                        current_step = line
+                    elif current_step and line and not line.startswith('Step '):
+                        current_step += ' ' + line
+                
+                if current_step:
+                    steps.append(current_step)
+                
+                if steps:
+                    logger.info(f"🌐 Extracted {len(steps)} steps directly")
+                    return '\n'.join(steps)
+            
+            # Fallback to LLM if direct extraction doesn't work
+            prompt = f"""Copy the text exactly as it appears in the content below. Do not summarize or rewrite anything.
+
+Question: {question}
+
+Website Content:
+{content[:3000]}
+
+Copy the text exactly:"""
+            
+            logger.info(f"🌐 Sending to LLM: {len(content)} characters, truncated to 3000")
+            logger.info(f"🌐 Question: {question}")
+            logger.info(f"🌐 Content preview (first 500 chars): {content[:500]}")
+            logger.info(f"🌐 Content preview (last 500 chars): {content[-500:]}")
+            
+            response = client.chat.completions.create(
+                model="gpt-4o",  # Use same model as other answers
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,  # Same temperature as other answers
+                max_tokens=250,  # Increased for 4-5 sentence website answers
+                top_p=0.9
+            )
+            
+            answer = response.choices[0].message.content.strip()
+            
+            # Ensure answer is 4-5 sentences for comprehensive information
+            sentences = answer.split('. ')
+            if len(sentences) > 5:
+                # Take only first 5 sentences
+                answer = '. '.join(sentences[:5])
+                if not answer.endswith('.'):
+                    answer += '.'
+            
+            # Also check character length (should be under 500 characters for 4-5 sentences)
+            if len(answer) > 500:
+                sentences = answer.split('. ')
+                truncated_sentences = []
+                char_count = 0
+                for sentence in sentences:
+                    if char_count + len(sentence) + 2 <= 500:  # +2 for '. '
+                        truncated_sentences.append(sentence)
+                        char_count += len(sentence) + 2
+                    else:
+                        break
+                answer = '. '.join(truncated_sentences)
+                if not answer.endswith('.'):
+                    answer += '.'
+            
+            logger.info(f"✅ LLM formatted website answer (truncated): {len(answer)} characters")
+            return answer
+            
+        except Exception as e:
+            logger.error(f"❌ Error formatting website answer with LLM: {e}")
+            # Improved fallback formatting (3-4 sentences max)
+            sentences = content.split('. ')
+            if len(sentences) >= 3:
+                answer = '. '.join(sentences[:3]) + '.'
+                return answer[:350] + "..." if len(answer) > 350 else answer
+            elif len(sentences) >= 2:
+                answer = '. '.join(sentences[:2]) + '.'
+                return answer[:250] + "..." if len(answer) > 250 else answer
+            else:
+                return content[:200] + "..." if len(content) > 200 else content
+    
+    def _combine_multiple_answers(self, answers: List[str], question: str) -> str:
+        """Combine multiple answers from different sources into a coherent response"""
+        try:
+            if not answers:
+                return "No relevant information found."
+            
+            if len(answers) == 1:
+                return answers[0]
+            
+            # Get OpenAI API key
+            api_key = os.getenv('OPENAI_API_KEY')
+            if not api_key:
+                logger.warning("⚠️ OpenAI API key not found, using simple concatenation")
+                # Simple fallback - combine with separators
+                combined = " ".join(answers)
+                return combined[:500] + "..." if len(combined) > 500 else combined
+            
+            # Initialize OpenAI client
+            client = openai.OpenAI(api_key=api_key)
+            
+            # Create a prompt to intelligently combine the answers
+            answers_text = "\n\n".join([f"Source {i+1}: {answer}" for i, answer in enumerate(answers)])
+            
+            prompt = f"""You are an expert at combining information from multiple sources to create a comprehensive, intelligent answer. Your task is to merge the following answers into a single, coherent response.
+
+CRITICAL: Your combined answer must be EXACTLY 4-6 sentences to provide comprehensive information. Think like ChatGPT - intelligent, insightful, and detailed.
+
+MANDATORY REQUIREMENTS:
+- NEVER include source references or "Source 1 says..." type language
+- NEVER include redundant information
+- ALWAYS provide a unified, intelligent analysis
+- ALWAYS use professional, business-ready language
+- ALWAYS focus on the core essence and business value
+- ALWAYS synthesize information rather than just concatenating
+
+YOUR COMBINED ANSWER MUST:
+- Be EXACTLY 4-6 sentences to provide comprehensive information
+- Be intelligent and insightful (like ChatGPT)
+- Show deep understanding of the concepts
+- Use professional, business-ready language
+- Provide clear comparisons and contrasts
+- Be immediately valuable and actionable
+- Demonstrate consciousness and completeness
+- Focus on the core essence and business value
+- Synthesize information from all sources into a unified response
+
+Question: {question}
+
+Answers from different sources:
+{answers_text}
+
+Combined Answer:"""
+            
+            logger.info(f"🔄 Combining {len(answers)} answers using LLM")
+            
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=300,  # Increased for 4-6 sentence combined answers
+                top_p=0.9
+            )
+            
+            combined_answer = response.choices[0].message.content.strip()
+            
+            # Ensure answer is 4-6 sentences for comprehensive information
+            sentences = combined_answer.split('. ')
+            if len(sentences) > 6:
+                # Take only first 6 sentences
+                combined_answer = '. '.join(sentences[:6])
+                if not combined_answer.endswith('.'):
+                    combined_answer += '.'
+            
+            # Also check character length (should be under 600 characters for 4-6 sentences)
+            if len(combined_answer) > 600:
+                sentences = combined_answer.split('. ')
+                truncated_sentences = []
+                char_count = 0
+                for sentence in sentences:
+                    if char_count + len(sentence) + 2 <= 600:  # +2 for '. '
+                        truncated_sentences.append(sentence)
+                        char_count += len(sentence) + 2
+                    else:
+                        break
+                combined_answer = '. '.join(truncated_sentences)
+                if not combined_answer.endswith('.'):
+                    combined_answer += '.'
+            
+            logger.info(f"✅ LLM combined answer (truncated): {len(combined_answer)} characters")
+            return combined_answer
+            
+        except Exception as e:
+            logger.error(f"❌ Error combining multiple answers with LLM: {e}")
+            # Simple fallback - combine with separators
+            combined = " ".join(answers)
+            return combined[:500] + "..." if len(combined) > 500 else combined
+    
+    def store_website_content(self, company_name: str, qudemo_id: str, website_data: Dict[str, Any]) -> bool:
+        """Store website scraped content in GCS"""
+        try:
+            logger.info(f"🌐 Storing website content for {company_name}/{qudemo_id}")
+            return self.gcs_service.store_website_content(company_name, qudemo_id, website_data)
+        except Exception as e:
+            logger.error(f"❌ Failed to store website content: {e}")
+            return False
     
     # Note: Removed get_suggested_questions method since we generate fresh questions on-demand

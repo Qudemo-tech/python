@@ -754,3 +754,202 @@ class GoogleCloudStorageService:
         except Exception as e:
             logger.error(f"❌ Failed to delete company bucket {company_name}: {e}")
             return False
+    
+    def store_website_content(self, company_name: str, qudemo_id: str, website_data: Dict[str, Any]) -> bool:
+        """Store website scraped content in GCS"""
+        try:
+            bucket = self._get_company_bucket(company_name)
+            
+            # Create website storage path
+            website_id = website_data.get('website_id', f"website_{int(datetime.now().timestamp())}")
+            file_path = f"{qudemo_id}/websites/{website_id}.json"
+            
+            # Prepare data for storage
+            storage_data = {
+                'website_id': website_id,
+                'base_url': website_data.get('base_url'),
+                'scraped_pages': website_data.get('scraped_pages', []),
+                'total_pages': website_data.get('total_pages', 0),
+                'scraping_status': website_data.get('scraping_status', 'unknown'),
+                'errors': website_data.get('errors', []),
+                'analysis': website_data.get('analysis', {}),
+                'scraped_at': website_data.get('scraped_at', datetime.now().isoformat()),
+                'stored_at': datetime.now().isoformat()
+            }
+            
+            # Upload to GCS
+            blob = bucket.blob(file_path)
+            blob.upload_from_string(
+                json.dumps(storage_data, indent=2),
+                content_type='application/json'
+            )
+            
+            logger.info(f"✅ Stored website content: {website_id} ({storage_data['total_pages']} pages)")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to store website content: {e}")
+            return False
+    
+    def get_website_content(self, company_name: str, qudemo_id: str, website_id: str = None) -> Optional[Dict[str, Any]]:
+        """Get website content from GCS"""
+        try:
+            bucket = self._get_company_bucket(company_name)
+            
+            if website_id:
+                # Get specific website
+                file_path = f"{qudemo_id}/websites/{website_id}.json"
+                blob = bucket.blob(file_path)
+                
+                if blob.exists():
+                    content = blob.download_as_text()
+                    return json.loads(content)
+                else:
+                    return None
+            else:
+                # Get all websites for the QuDemo
+                prefix = f"{qudemo_id}/websites/"
+                blobs = bucket.list_blobs(prefix=prefix)
+                
+                websites = []
+                for blob in blobs:
+                    if blob.name.endswith('.json'):
+                        content = blob.download_as_text()
+                        website_data = json.loads(content)
+                        websites.append(website_data)
+                
+                return {
+                    'websites': websites,
+                    'total_websites': len(websites)
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to get website content: {e}")
+            return None
+    
+    def search_website_content(self, company_name: str, qudemo_id: str, query: str) -> List[Dict[str, Any]]:
+        """Search website content for a query"""
+        try:
+            # Get all website content
+            website_data = self.get_website_content(company_name, qudemo_id)
+            if not website_data:
+                logger.info(f"🌐 No website data found for {company_name}/{qudemo_id}")
+                return []
+            
+            results = []
+            query_lower = query.lower()
+            
+            # Handle the data structure returned by get_website_content
+            if isinstance(website_data, dict) and 'websites' in website_data:
+                # Multiple websites structure: {'websites': [...], 'total_websites': ...}
+                websites = website_data['websites']
+            elif isinstance(website_data, list):
+                # Direct list of websites
+                websites = website_data
+            else:
+                # Single website structure
+                websites = [website_data]
+            
+            logger.info(f"🌐 Searching through {len(websites)} website(s) for query: {query}")
+            
+            for website in websites:
+                logger.info(f"🌐 Searching website: {website.get('website_id', 'unknown')} with {len(website.get('scraped_pages', []))} pages")
+                
+                for page in website.get('scraped_pages', []):
+                    content = page.get('content', '').lower()
+                    title = page.get('title', '').lower()
+                    
+                    # Enhanced text matching with keyword extraction
+                    query_keywords = [word for word in query_lower.split() if len(word) > 2]
+                    content_matches = sum(1 for keyword in query_keywords if keyword in content)
+                    title_matches = sum(1 for keyword in query_keywords if keyword in title)
+                    
+                    # Match if at least 2 keywords are found, or exact phrase match
+                    if (content_matches >= 2 or title_matches >= 2 or 
+                        query_lower in content or query_lower in title):
+                        logger.info(f"🌐 Found match in page: {page.get('title', 'untitled')}")
+                        logger.info(f"🌐 Content matches: {content_matches}, Title matches: {title_matches}")
+                        logger.info(f"🌐 Query keywords: {query_keywords}")
+                        results.append({
+                            'source_type': 'website',
+                            'url': page.get('url'),
+                            'title': page.get('title'),
+                            'content': page.get('content'),
+                            'relevance_score': self._calculate_relevance_score(query, page.get('content', ''), page.get('title', '')),
+                            'website_id': website.get('website_id'),
+                            'base_url': website.get('base_url')
+                        })
+                    else:
+                        logger.info(f"🌐 No match in page: {page.get('title', 'untitled')} (content: {content_matches}, title: {title_matches})")
+            
+            # Sort by relevance score
+            results.sort(key=lambda x: x['relevance_score'], reverse=True)
+            logger.info(f"🌐 Website search completed: {len(results)} results found")
+            return results
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to search website content: {e}")
+            return []
+    
+    def get_website_count(self, company_name: str, qudemo_id: str) -> int:
+        """Get count of websites processed for a QuDemo"""
+        try:
+            bucket = self._get_company_bucket(company_name)
+            
+            # List all website files for this QuDemo
+            prefix = f"{qudemo_id}/websites/"
+            blobs = bucket.list_blobs(prefix=prefix)
+            
+            count = 0
+            for blob in blobs:
+                if blob.name.endswith('.json'):
+                    count += 1
+            
+            logger.info(f"📊 Website count for {company_name}/{qudemo_id}: {count}")
+            return count
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to get website count: {e}")
+            return 0
+    
+    def _calculate_relevance_score(self, query: str, content: str, title: str = "") -> float:
+        """Calculate relevance score for website content with title prioritization"""
+        try:
+            query_lower = query.lower()
+            content_lower = content.lower()
+            title_lower = title.lower()
+            
+            query_words = set(query_lower.split())
+            content_words = content_lower.split()
+            title_words = title_lower.split()
+            
+            if not content_words:
+                return 0.0
+            
+            # Count query word matches in content and title
+            content_matches = sum(1 for word in query_words if word in content_words)
+            title_matches = sum(1 for word in query_words if word in title_words)
+            
+            # Calculate base score
+            match_ratio = content_matches / len(query_words) if query_words else 0
+            content_factor = min(len(content_words) / 100, 1.0)  # Normalize content length
+            
+            base_score = match_ratio * content_factor
+            
+            # Boost score for title matches (exact title match gets highest priority)
+            if title_lower == query_lower:
+                # Exact title match - highest priority
+                return base_score + 10.0
+            elif title_matches >= len(query_words) * 0.8:  # 80% of keywords in title
+                # Most keywords in title - high priority
+                return base_score + 5.0
+            elif title_matches >= 2:
+                # Some keywords in title - medium priority
+                return base_score + 2.0
+            else:
+                # No title matches - base score only
+                return base_score
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Relevance score calculation failed: {e}")
+            return 0.0

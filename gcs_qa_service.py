@@ -77,6 +77,16 @@ class GCSQAService:
             
             logger.info(f"📊 Search results: Documents={has_document_results}, Videos={has_video_results}, Websites={has_website_results}")
             
+            # Debug: Log what video results contain
+            if has_video_results:
+                logger.info(f"🎥 Video results preview: {video_results.get('answer', '')[:200]}...")
+            
+            # Debug: Log what website results contain
+            if has_website_results:
+                logger.info(f"🌐 Website results count: {len(website_results)}")
+                if website_results:
+                    logger.info(f"🌐 Website result preview: {website_results[0].get('content', '')[:200]}...")
+            
             # Create answer data for all sources
             document_answer_data = None
             video_answer_data = None
@@ -90,6 +100,50 @@ class GCSQAService:
                 
             if has_website_results:
                 website_answer_data = self._create_website_answer(website_results, question)
+            
+            # Check if website has high relevance score - prioritize it early
+            website_relevance = 0
+            if website_answer_data and website_answer_data.get('sources'):
+                for source in website_answer_data.get('sources', []):
+                    if source.get('type') == 'website':
+                        website_relevance = source.get('relevance_score', 0)
+                        break
+            
+            logger.info(f"🌐 Website answer data: {website_answer_data is not None}")
+            logger.info(f"🌐 Website relevance score: {website_relevance}")
+            
+            # If website has high relevance (>= 5.0), prioritize it over everything else
+            if website_relevance >= 5.0 and website_answer_data:
+                logger.info(f"🌐 Website has high relevance ({website_relevance}) - prioritizing website answer over all other sources")
+                
+                # Use website answer as primary
+                combined_answer = website_answer_data.get('answer', '')
+                
+                # Store the Q&A answer
+                combined_data = {
+                    'answer': combined_answer,
+                    'sources': website_answer_data.get('sources', []),
+                    'answer_source': 'website_prioritized'
+                }
+                
+                self.gcs_service.store_qa_answer(
+                    company_name=company_name,
+                    qudemo_id=qudemo_id,
+                    question=question,
+                    answer_data=combined_data
+                )
+                
+                return {
+                    'success': True,
+                    'answer': combined_answer,
+                    'sources': combined_data['sources'],
+                    'answer_source': 'website_prioritized',
+                    'timestamp': 0,
+                    'end': 0,
+                    'formatted_timestamp': 'Website Content',
+                    'video_url': '',
+                    'video_title': 'Website Content'
+                }
             
             # Determine the best combination based on available sources
             available_sources = []

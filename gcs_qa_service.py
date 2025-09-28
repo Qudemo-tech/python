@@ -21,7 +21,7 @@ class GCSQAService:
         """Initialize GCS Q&A service"""
         self.gcs_service = GoogleCloudStorageService(
             bucket_name=gcs_bucket_name,
-            service_account_path='service-account-key.json'
+            service_account_path=os.getenv('GOOGLE_APPLICATION_CREDENTIALS', 'service-account-key.json')
         )
         self.direct_qa = DirectTranscriptQA()
         self.document_processor = DocumentProcessor()

@@ -30,21 +30,39 @@ class GoogleCloudStorageService:
         
         # Initialize Google Cloud Storage client
         try:
-            if self.service_account_path and os.path.exists(self.service_account_path):
+            # Check for service account JSON in environment variable first (for Render)
+            service_account_json = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
+            if service_account_json:
+                import json
+                service_account_info = json.loads(service_account_json)
+                credentials = service_account.Credentials.from_service_account_info(service_account_info)
+                self.client = storage.Client(credentials=credentials)
+                logger.info(f"✅ Google Cloud Storage client initialized using environment JSON")
+            elif self.service_account_path and os.path.exists(self.service_account_path):
                 credentials = service_account.Credentials.from_service_account_file(
                     self.service_account_path
                 )
                 self.client = storage.Client(credentials=credentials)
+                logger.info(f"✅ Google Cloud Storage client initialized using service account file: {self.service_account_path}")
             else:
-                # Use default credentials (for production)
-                self.client = storage.Client()
+                # Check Render secret files directory as fallback
+                render_secret_path = '/etc/secrets/service-account-key.json'
+                if os.path.exists(render_secret_path):
+                    credentials = service_account.Credentials.from_service_account_file(render_secret_path)
+                    self.client = storage.Client(credentials=credentials)
+                    logger.info(f"✅ Google Cloud Storage client initialized using Render secret file: {render_secret_path}")
+                else:
+                    # Use default credentials (for production)
+                    self.client = storage.Client()
+                    logger.info(f"✅ Google Cloud Storage client initialized using default credentials")
             
             # Initialize client only, buckets will be created per company
-            logger.info(f"✅ Google Cloud Storage client initialized")
             logger.info(f"📦 Will create company-specific buckets as needed")
                 
         except Exception as e:
             logger.error(f"❌ Failed to initialize Google Cloud Storage: {e}")
+            logger.error(f"❌ Service account path checked: {self.service_account_path}")
+            logger.error(f"❌ Render secret path checked: /etc/secrets/service-account-key.json")
             raise
     
     def _get_company_bucket(self, company_name: str):

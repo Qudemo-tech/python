@@ -36,7 +36,7 @@ class SimpleGeminiTranscriber:
         self.api_key = api_key
         self.gcs_service = GoogleCloudStorageService(
             bucket_name=gcs_bucket_name,
-            service_account_path='service-account-key.json'
+            service_account_path=os.getenv('GOOGLE_APPLICATION_CREDENTIALS', 'service-account-key.json')
         )
         logger.info("✅ Simple Gemini Transcriber initialized with GCS storage")
     

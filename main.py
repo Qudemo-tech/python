@@ -59,19 +59,55 @@ async def lifespan(app: FastAPI):
         
         # Initialize GCS Q&A Service (NEW - Google Cloud Storage based)
         try:
-            # Check if service account file exists
-            service_account_path = 'service-account-key.json'
-            if os.path.exists(service_account_path):
-                logger.info(f"🔍 Service account file found: {service_account_path}")
+            # Check for GCS credentials in multiple locations
+            service_account_json = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
+            google_app_creds = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+            
+            # Check local file
+            local_service_account = 'service-account-key.json'
+            # Check Render secret files directory
+            render_secret_path = '/etc/secrets/service-account-key.json'
+            
+            credentials_found = False
+            credentials_path = None
+            
+            if service_account_json:
+                logger.info(f"🔍 GCS credentials found in GOOGLE_SERVICE_ACCOUNT_JSON environment variable")
+                credentials_found = True
+            elif google_app_creds and os.path.exists(google_app_creds):
+                logger.info(f"🔍 GCS credentials found at GOOGLE_APPLICATION_CREDENTIALS: {google_app_creds}")
+                credentials_found = True
+                credentials_path = google_app_creds
+            elif os.path.exists(render_secret_path):
+                logger.info(f"🔍 GCS credentials found in Render secret files: {render_secret_path}")
+                credentials_found = True
+                credentials_path = render_secret_path
+                # Set environment variable for other services
+                os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = render_secret_path
+            elif os.path.exists(local_service_account):
+                logger.info(f"🔍 GCS credentials found in local file: {local_service_account}")
+                credentials_found = True
+                credentials_path = local_service_account
+                # Set environment variable for other services
+                os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = local_service_account
+            
+            if credentials_found:
+                logger.info(f"🔍 GCS credentials found - initializing service")
                 gcs_qa_service = GCSQAService()
                 logger.info("✅ GCS Q&A Service initialized (Google Cloud Storage based)")
             else:
-                logger.warning("⚠️ Service account key not found, GCS Q&A Service disabled")
+                logger.warning("⚠️ GCS credentials not found, GCS Q&A Service disabled")
+                logger.warning("⚠️ Checked locations:")
+                logger.warning(f"  - GOOGLE_SERVICE_ACCOUNT_JSON env var: {'✓' if service_account_json else '✗'}")
+                logger.warning(f"  - GOOGLE_APPLICATION_CREDENTIALS: {google_app_creds or 'Not set'}")
+                logger.warning(f"  - Render secret file: {render_secret_path} ({'✓' if os.path.exists(render_secret_path) else '✗'})")
+                logger.warning(f"  - Local file: {local_service_account} ({'✓' if os.path.exists(local_service_account) else '✗'})")
                 gcs_qa_service = None
         except Exception as e:
             logger.error(f"❌ GCS Q&A Service initialization error: {e}")
             import traceback
             logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+            logger.error("❌ GCS Q&A Service will be disabled - some features may not work")
             gcs_qa_service = None
         
         # Initialize Simple Gemini Transcriber (NEW - Simple GCS-based transcription)

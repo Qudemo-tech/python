@@ -20,7 +20,7 @@ class CompanyBucketService:
     def __init__(self):
         """Initialize company bucket service"""
         self.gcs_service = GoogleCloudStorageService(
-            service_account_path='service-account-key.json'
+            service_account_path=os.getenv('GOOGLE_APPLICATION_CREDENTIALS', 'service-account-key.json')
         )
         logger.info("✅ Company Bucket Service initialized")
     

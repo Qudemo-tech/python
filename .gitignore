@@ -234,3 +234,8 @@ celerybeat.pid
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# Playwright browser profiles and cache
+profiles/
+playwright_cache/
+browser_cache/

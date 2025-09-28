@@ -1194,12 +1194,16 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                                 'intercom', 'hubspot', 'pipedrive', 'monday.com'
                             ])
                             
+                            logger.info(f"🌐 CRM Detection - URL: {website_url}, is_crm_site: {is_crm_site}")
+                            
                             if is_crm_site:
                                 error_msg = "CRM site detected with bot protection - try uploading documents instead"
                                 error_type = "crm_bot_detection"
+                                logger.info(f"🌐 CRM site detected: {website_url}")
                             else:
                                 error_msg = "No content could be scraped - site may have bot protection"
                                 error_type = "scraping_error"
+                                logger.info(f"🌐 Non-CRM site failed: {website_url}")
                             
                             processing_errors.append({
                                 "type": "website",
@@ -1359,6 +1363,11 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
         
         # Generate user-friendly status message
         status_message = _generate_processing_status_message(successful_content, processing_errors, total_chunks)
+        
+        # Debug: Log processing errors
+        logger.info(f"🔍 Processing errors to return: {processing_errors}")
+        logger.info(f"🔍 Has errors: {len(processing_errors) > 0}")
+        logger.info(f"🔍 Has anti-bot protection: {any(error.get('protection_detected', False) for error in processing_errors)}")
         
         return {
             'success': True,

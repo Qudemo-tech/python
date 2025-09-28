@@ -19,7 +19,7 @@ import tempfile
 import shutil
 
 # Enhanced components
-from final_gemini_scraper import FinalGeminiScraper
+# from final_gemini_scraper import FinalGeminiScraper  # Removed - requires Playwright
 from gcs_qa_service import GCSQAService
 from simple_gemini_transcriber import SimpleGeminiTranscriber
 from document_processor import DocumentProcessor

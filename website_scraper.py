@@ -927,12 +927,69 @@ class WebsiteScraper:
     async def _scrape_page_playwright(self, page, url: str) -> Optional[Dict]:
         """Scrape a single page using Playwright"""
         try:
-            await page.goto(url, wait_until='networkidle', timeout=30000)
+            # Try different wait strategies for slow-loading sites
+            try:
+                # First try: networkidle with 60 second timeout
+                await page.goto(url, wait_until='networkidle', timeout=60000)
+            except Exception as e:
+                logger.warning(f"⚠️ Networkidle timeout for {url}, trying domcontentloaded: {e}")
+                try:
+                    # Fallback: domcontentloaded with 60 second timeout
+                    await page.goto(url, wait_until='domcontentloaded', timeout=60000)
+                    # Wait a bit more for dynamic content
+                    await asyncio.sleep(5)
+                except Exception as e2:
+                    logger.warning(f"⚠️ Domcontentloaded timeout for {url}, trying load: {e2}")
+                    # Final fallback: load event with 60 second timeout
+                    await page.goto(url, wait_until='load', timeout=60000)
+                    # Wait longer for dynamic content
+                    await asyncio.sleep(8)
             
             # Wait for content to load
-            await asyncio.sleep(random.uniform(1, 3))
+            await asyncio.sleep(random.uniform(2, 4))
             
-            # Get page content
+            # Try to get text content directly first (more reliable for JS-heavy sites)
+            try:
+                text_content = await page.evaluate("document.body.innerText")
+                if text_content and len(text_content.strip()) > 100:
+                    # Get title
+                    title = await page.title()
+                    
+                    # Clean up the text content
+                    import re
+                    cleaned_content = re.sub(r'\s+', ' ', text_content).strip()
+                    
+                    # Extract headings (try to get them from the page)
+                    headings = []
+                    try:
+                        heading_elements = await page.evaluate("""
+                            () => {
+                                const headings = [];
+                                document.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(h => {
+                                    headings.push({
+                                        level: h.tagName.toLowerCase(),
+                                        text: h.innerText.trim()
+                                    });
+                                });
+                                return headings;
+                            }
+                        """)
+                        headings = heading_elements or []
+                    except:
+                        pass
+                    
+                    return {
+                        'url': url,
+                        'title': title or urlparse(url).path,
+                        'content': cleaned_content,
+                        'headings': headings,
+                        'word_count': len(cleaned_content.split()),
+                        'scraped_at': datetime.now().isoformat()
+                    }
+            except Exception as e:
+                logger.warning(f"⚠️ Direct text extraction failed, falling back to HTML: {e}")
+            
+            # Fallback to HTML content extraction
             content = await page.content()
             return self._extract_page_content(url, content)
             
@@ -953,13 +1010,40 @@ class WebsiteScraper:
             title = soup.find('title')
             title_text = title.get_text().strip() if title else urlparse(url).path
             
-            # Extract main content
-            main_content = soup.find('main') or soup.find('article') or soup.find('div', class_=re.compile(r'content|main|body'))
+            # Extract main content with improved logic
+            main_content = None
             
-            if main_content:
-                content_text = main_content.get_text(separator=' ', strip=True)
-            else:
+            # Try multiple strategies to find the main content
+            # Strategy 1: Look for article tag
+            main_content = soup.find('article')
+            
+            # Strategy 2: Look for common blog content containers
+            if not main_content:
+                main_content = soup.find('div', class_=re.compile(r'blog|post|content|entry|article'))
+            
+            # Strategy 3: Look for main tag but check if it has substantial content
+            if not main_content:
+                main_tag = soup.find('main')
+                if main_tag:
+                    main_text = main_tag.get_text(separator=' ', strip=True)
+                    # Only use main tag if it has substantial content (more than 500 characters)
+                    if len(main_text) > 500:
+                        main_content = main_tag
+            
+            # Strategy 4: Look for divs with substantial content
+            if not main_content:
+                content_divs = soup.find_all('div', class_=re.compile(r'content|main|body|text'))
+                for div in content_divs:
+                    div_text = div.get_text(separator=' ', strip=True)
+                    if len(div_text) > 1000:  # Substantial content
+                        main_content = div
+                        break
+            
+            # Strategy 5: Fall back to full page text
+            if not main_content:
                 content_text = soup.get_text(separator=' ', strip=True)
+            else:
+                content_text = main_content.get_text(separator=' ', strip=True)
             
             # Clean up content
             content_text = re.sub(r'\s+', ' ', content_text).strip()

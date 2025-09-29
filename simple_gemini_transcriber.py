@@ -45,7 +45,7 @@ class SimpleGeminiTranscriber:
         video_url: str,
         model: str = "gemini-2.0-flash",
         mime_type: str = "video/mp4",
-        timeout: int = 600,  # Increased to 10 minutes for video processing
+        timeout: int = 1800,  # Increased to 30 minutes for long video processing
     ) -> Optional[str]:
         """
         Transcribe spoken words from a video URL using Gemini.
@@ -76,13 +76,26 @@ class SimpleGeminiTranscriber:
         try:
             logger.info(f"🎥 Transcribing video: {video_url}")
             
-            # Retry logic for timeout issues
-            max_retries = 2  # Reduced retries since video processing takes long
+            # Check if this might be a long video and warn user
+            if "youtu.be" in video_url or "youtube.com" in video_url:
+                logger.info("📺 YouTube video detected - processing may take longer for videos over 30 minutes")
+                logger.info("⏱️ For 1-hour videos, expect 15-30 minutes of processing time")
+            
+            # Retry logic for timeout issues with better handling for long videos
+            max_retries = 3  # Increased retries for long videos
             r = None
             
             for attempt in range(max_retries):
                 try:
-                    logger.info(f"🔄 Attempt {attempt + 1}/{max_retries} - Processing video (this may take 5-10 minutes)...")
+                    # Estimate processing time based on attempt
+                    if attempt == 0:
+                        time_estimate = "5-15 minutes"
+                    elif attempt == 1:
+                        time_estimate = "10-20 minutes"
+                    else:
+                        time_estimate = "15-30 minutes"
+                    
+                    logger.info(f"🔄 Attempt {attempt + 1}/{max_retries} - Processing video (this may take {time_estimate})...")
                     logger.info(f"📡 Making request to: {endpoint}")
                     logger.info(f"📦 Payload structure: {list(payload.keys())}")
                     
@@ -100,10 +113,10 @@ class SimpleGeminiTranscriber:
                 except requests.exceptions.Timeout:
                     if attempt < max_retries - 1:
                         logger.warning(f"⚠️ Timeout on attempt {attempt + 1}, retrying with longer timeout...")
-                        timeout = timeout + 300  # Add 5 more minutes for retry
+                        timeout = timeout + 600  # Add 10 more minutes for retry (was 5 minutes)
                         continue
                     else:
-                        logger.error(f"❌ All {max_retries} attempts timed out (video processing may be too slow)")
+                        logger.error(f"❌ All {max_retries} attempts timed out (video processing may be too slow for this video length)")
                         return None
                 except requests.exceptions.RequestException as e:
                     logger.error(f"❌ Request failed on attempt {attempt + 1}: {e}")
@@ -118,6 +131,15 @@ class SimpleGeminiTranscriber:
                 logger.error(f"❌ API request failed with status {r.status_code if r else 'No response'}")
                 if r:
                     logger.error(f"Response content: {r.text[:500]}...")
+                    
+                    # Provide specific guidance for common errors
+                    if r.status_code == 500:
+                        logger.error("💡 500 Error: This usually means the video is too long or complex for processing")
+                        logger.error("💡 Try with a shorter video (under 30 minutes) or check if the video URL is accessible")
+                    elif r.status_code == 400:
+                        logger.error("💡 400 Error: Invalid request - check video URL format and accessibility")
+                    elif r.status_code == 403:
+                        logger.error("💡 403 Error: API quota exceeded or invalid API key")
                 return None
 
             try:

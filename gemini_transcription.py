@@ -768,7 +768,7 @@ class GeminiTranscriptionProcessor:
             }
             
             # Increased timeout for long videos
-            timeout = 120  # 2 minutes timeout to prevent long waits
+            timeout = 1800  # 30 minutes timeout for long video processing
             logger.info(f"Sending request to Gemini API with {timeout}s timeout... (attempt {attempt + 1}/{max_retries})")
             response = requests.post(
                 url,

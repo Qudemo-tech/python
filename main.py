@@ -439,15 +439,24 @@ async def get_suggested_questions(company_name: str, qudemo_id: str):
         
         if stored_questions:
             logger.info(f"✅ Retrieved {len(stored_questions)} stored suggested questions for {company_name}/{qudemo_id}")
+            
+            # Ensure "What is this about?" is the first question
+            if not stored_questions or stored_questions[0] != "What is this about?":
+                # Add "What is this about?" as the first question if it's not already there
+                final_questions = ["What is this about?"] + [q for q in stored_questions if q != "What is this about?"]
+                logger.info(f"✅ Added 'What is this about?' as first question. Final questions: {final_questions}")
+            else:
+                final_questions = stored_questions
+            
             return {
                 "success": True,
-                "suggested_questions": stored_questions
+                "suggested_questions": final_questions
             }
         else:
             logger.info(f"📝 No stored suggested questions found for {company_name}/{qudemo_id}")
             return {
                 "success": True,
-                "suggested_questions": []
+                "suggested_questions": ["What is this about?"]
             }
         
     except Exception as e:

@@ -552,7 +552,7 @@ class GCSQAService:
             
             if not combined_content:
                 logger.warning(f"⚠️ No content found (video or documents) for {company_name}/{qudemo_id}")
-                return []
+                return ["What is this about?"]
             
             logger.info(f"📄 Found content length: {len(combined_content)} characters")
             
@@ -574,11 +574,11 @@ class GCSQAService:
                 return suggested_questions
             else:
                 logger.warning(f"⚠️ No suggested questions generated for {company_name}/{qudemo_id}")
-                return []
+                return ["What is this about?"]
             
         except Exception as e:
             logger.error(f"❌ Failed to generate suggested questions: {e}")
-            return []
+            return ["What is this about?"]
     
     def _get_combined_content_for_suggestions(self, company_name: str, qudemo_id: str) -> str:
         """Get combined content from both video transcripts and documents for suggestion generation"""
@@ -649,16 +649,15 @@ class GCSQAService:
             client = openai.OpenAI(api_key=api_key)
             
             # Use the same high-quality prompt as video-only suggested questions
-            prompt = f"""You are an expert at analyzing content to generate helpful suggested questions. Your task is to create 5-8 high-quality, engaging questions that viewers might want to ask about this content.
+            prompt = f"""You are an expert at analyzing content to generate helpful suggested questions. Your task is to create 4-7 high-quality, engaging questions that viewers might want to ask about this content.
 
 REQUIREMENTS:
-- Generate 5-8 questions maximum
+- Generate 4-7 questions maximum (one will be added automatically)
 - Questions should be specific and actionable
 - Questions should cover different aspects of the content
 - Questions should be natural and conversational
 - Questions should help viewers understand key concepts, features, or processes
 - Questions should be relevant to the actual content provided
-- Avoid generic questions like "What is this about?"
 - Focus on practical, useful questions that provide value
 
 QUESTION TYPES TO INCLUDE:
@@ -717,18 +716,24 @@ Questions:"""
                             filtered_questions.append(question)
                     
                     logger.info(f"✅ Generated {len(filtered_questions)} suggested questions")
-                    return filtered_questions[:8]  # Limit to 8 questions max
+                    
+                    # Add "What is this about?" as the first question
+                    final_questions = ["What is this about?"] + filtered_questions[:7]  # Limit to 7 additional questions (8 total)
+                    
+                    logger.info(f"✅ Final suggested questions with 'What is this about?' added: {final_questions}")
+                    return final_questions
                 else:
                     logger.error(f"❌ Invalid JSON format for suggested questions")
-                    return []
+                    return ["What is this about?"]
             except json.JSONDecodeError as e:
                 logger.error(f"❌ Failed to parse suggested questions JSON: {e}")
                 logger.error(f"❌ Raw response: {response_text}")
-                return []
+                # Return just the default question if parsing fails
+                return ["What is this about?"]
             
         except Exception as e:
             logger.error(f"❌ Error generating suggested questions from content: {e}")
-            return []
+            return ["What is this about?"]
     
     def _create_document_answer(self, document_results: List[Dict[str, Any]], question: str) -> Optional[Dict[str, Any]]:
         """
@@ -1192,7 +1197,19 @@ Extract the specific information while preserving all details:"""
                 return "No relevant information found."
             
             if len(answers) == 1:
-                return answers[0]
+                # For "What is this about?" question, still process single answers to make them concise
+                if question.lower().strip() == "what is this about?":
+                    single_answer = answers[0]
+                    # If the single answer is too long, truncate it
+                    if len(single_answer) > 500:
+                        sentences = single_answer.split('. ')
+                        if len(sentences) > 4:
+                            single_answer = '. '.join(sentences[:4])
+                            if not single_answer.endswith('.'):
+                                single_answer += '.'
+                    return single_answer
+                else:
+                    return answers[0]
             
             # Get OpenAI API key
             api_key = os.getenv('OPENAI_API_KEY')
@@ -1200,7 +1217,11 @@ Extract the specific information while preserving all details:"""
                 logger.warning("⚠️ OpenAI API key not found, using simple concatenation")
                 # Simple fallback - combine with separators
                 combined = " ".join(answers)
-                return combined[:500] + "..." if len(combined) > 500 else combined
+                if question.lower().strip() == "what is this about?":
+                    # For "What is this about?" - keep it very short
+                    return combined[:300] + "..." if len(combined) > 300 else combined
+                else:
+                    return combined[:500] + "..." if len(combined) > 500 else combined
             
             # Initialize OpenAI client
             client = openai.OpenAI(api_key=api_key)
@@ -1208,7 +1229,25 @@ Extract the specific information while preserving all details:"""
             # Create a prompt to intelligently combine the answers
             answers_text = "\n\n".join([f"Source {i+1}: {answer}" for i, answer in enumerate(answers)])
             
-            prompt = f"""You are an expert at combining information from multiple sources to create a comprehensive, detailed answer. Your task is to merge the following answers into a single, coherent response.
+            # Special handling for "What is this about?" question - provide a concise summary
+            if question.lower().strip() == "what is this about?":
+                prompt = f"""You are an expert at analyzing content to provide clear, concise summaries. Your task is to create a brief but comprehensive overview of what this content is about.
+
+REQUIREMENTS:
+- Provide a clear, concise summary (2-4 sentences maximum)
+- Focus on the main purpose, key topics, and important points
+- Include the most important details without being too verbose
+- Make it easy for someone to quickly understand what this content covers
+- Preserve key information but prioritize clarity and brevity
+
+Question: {question}
+
+Content from different sources:
+{answers_text}
+
+Concise Summary:"""
+            else:
+                prompt = f"""You are an expert at combining information from multiple sources to create a comprehensive, detailed answer. Your task is to merge the following answers into a single, coherent response.
 
 CRITICAL: Your combined answer must preserve ALL specific details, requirements, and actionable information. Prioritize specific information over generic business speak.
 
@@ -1245,25 +1284,42 @@ Combined Answer:"""
             
             logger.info(f"🔄 Combining {len(answers)} answers using LLM")
             
+            # Adjust max_tokens based on question type
+            if question.lower().strip() == "what is this about?":
+                max_tokens = 200  # Shorter for summary
+            else:
+                max_tokens = 800  # Longer for detailed answers
+            
             response = client.chat.completions.create(
                 model="gpt-4o",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
-                max_tokens=800,  # Increased to preserve all detailed information including role lists
+                max_tokens=max_tokens,
                 top_p=0.9
             )
             
             combined_answer = response.choices[0].message.content.strip()
             
-            # Ensure answer is comprehensive but not too long
-            if len(combined_answer) > 1500:
-                # If too long, try to preserve the most important parts
-                sentences = combined_answer.split('. ')
-                if len(sentences) > 12:
-                    # Take first 12 sentences to preserve detail
-                    combined_answer = '. '.join(sentences[:12])
-                    if not combined_answer.endswith('.'):
-                        combined_answer += '.'
+            # Ensure answer length is appropriate for question type
+            if question.lower().strip() == "what is this about?":
+                # For "What is this about?" - keep it very concise (max 3-4 sentences)
+                if len(combined_answer) > 500:
+                    sentences = combined_answer.split('. ')
+                    if len(sentences) > 4:
+                        # Take first 4 sentences maximum
+                        combined_answer = '. '.join(sentences[:4])
+                        if not combined_answer.endswith('.'):
+                            combined_answer += '.'
+            else:
+                # For other questions - comprehensive but not too long
+                if len(combined_answer) > 1500:
+                    # If too long, try to preserve the most important parts
+                    sentences = combined_answer.split('. ')
+                    if len(sentences) > 12:
+                        # Take first 12 sentences to preserve detail
+                        combined_answer = '. '.join(sentences[:12])
+                        if not combined_answer.endswith('.'):
+                            combined_answer += '.'
             
             logger.info(f"✅ LLM combined answer (truncated): {len(combined_answer)} characters")
             return combined_answer
@@ -1272,7 +1328,11 @@ Combined Answer:"""
             logger.error(f"❌ Error combining multiple answers with LLM: {e}")
             # Simple fallback - combine with separators
             combined = " ".join(answers)
-            return combined[:500] + "..." if len(combined) > 500 else combined
+            if question.lower().strip() == "what is this about?":
+                # For "What is this about?" - keep it very short
+                return combined[:300] + "..." if len(combined) > 300 else combined
+            else:
+                return combined[:500] + "..." if len(combined) > 500 else combined
     
     def store_website_content(self, company_name: str, qudemo_id: str, website_data: Dict[str, Any]) -> bool:
         """Store website scraped content in GCS"""

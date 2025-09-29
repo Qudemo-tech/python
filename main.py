@@ -1347,25 +1347,28 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
         # Check if any content was successfully processed
         if total_chunks == 0:
             logger.error("❌ No content could be processed - QuDemo should not be created")
-            return {
-                'success': False,
-                'message': "No content could be processed. All sources failed due to restrictions or errors.",
-                'total_chunks_stored': 0,
-                'company_name': company_name,
-                'qudemo_id': qudemo_id,
-                'processing_order': processing_order,
-                'optimization_note': "All content sources failed to process",
-                # Enhanced status information
-                'successful_content': successful_content,
-                'processing_errors': processing_errors,
-                'has_errors': True,
-                'has_anti_bot_protection': any(error.get('protection_detected', False) for error in processing_errors),
-                # Add the structure that Node.js backend expects
-                'videos': [],
-                'websites': [],
-                'videos_processed': 0,
-                'website_processed': 0
-            }
+            raise HTTPException(
+                status_code=400, 
+                detail={
+                    'success': False,
+                    'message': "No content could be processed. All sources failed due to restrictions or errors.",
+                    'total_chunks_stored': 0,
+                    'company_name': company_name,
+                    'qudemo_id': qudemo_id,
+                    'processing_order': processing_order,
+                    'optimization_note': "All content sources failed to process",
+                    # Enhanced status information
+                    'successful_content': successful_content,
+                    'processing_errors': processing_errors,
+                    'has_errors': True,
+                    'has_anti_bot_protection': any(error.get('protection_detected', False) for error in processing_errors),
+                    # Add the structure that Node.js backend expects
+                    'videos': [],
+                    'websites': [],
+                    'videos_processed': 0,
+                    'website_processed': 0
+                }
+            )
         
         # Generate suggested questions after successful processing
         try:

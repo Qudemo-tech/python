@@ -317,13 +317,14 @@ class WebsiteScraper:
             
         content_lower = content.lower()
         
-        # Only check for very specific bot detection indicators
+        # Check for very specific bot detection indicators in content (not headers)
         strong_bot_indicators = [
             'please verify you are human',
             'captcha', 'recaptcha', 'hcaptcha',
-            'cloudflare', 'checking your browser',
+            'checking your browser',
             'are you human', 'verify you are human',
-            'bot detection', 'automated access blocked'
+            'bot detection', 'automated access blocked',
+            'access denied', 'blocked by security policy'
         ]
         
         # Check for strong bot detection indicators
@@ -336,12 +337,19 @@ class WebsiteScraper:
             'class="cf-browser-verification"',
             'id="cf-challenge"',
             'class="challenge"',
-            'data-ray="'
+            'data-ray="',
+            'cloudflare ray id',
+            'just a moment',
+            'please wait while we check your browser'
         ]
         
         for pattern in bot_patterns:
             if pattern in content_lower:
                 return True
+        
+        # Check for very short content that might be a challenge page
+        if len(content.strip()) < 500 and any(word in content_lower for word in ['challenge', 'verify', 'checking']):
+            return True
         
         return False
     
@@ -427,11 +435,19 @@ class WebsiteScraper:
             # Get initial page
             page_content = await self._scrape_page_requests(url)
             if page_content:
-                scraped_pages.append(page_content)
-                self.scraped_urls.add(url)
+                # Check if this is an error indicator
+                if isinstance(page_content, dict) and page_content.get('error'):
+                    errors.append(f"Main page scraping failed: {page_content.get('error')}")
+                    logger.warning(f"⚠️ Main page scraping failed: {page_content.get('error')}")
+                else:
+                    scraped_pages.append(page_content)
+                    self.scraped_urls.add(url)
+            else:
+                errors.append("Main page scraping failed: No content returned")
+                logger.warning(f"⚠️ Main page scraping failed: No content returned for {url}")
             
-            # Find and scrape additional pages
-            if page_content:
+            # Find and scrape additional pages (only if main page was successful)
+            if page_content and not (isinstance(page_content, dict) and page_content.get('error')):
                 # We need to get the raw HTML content to extract links
                 # Let's fetch the page again to get the raw HTML
                 import aiohttp
@@ -468,8 +484,13 @@ class WebsiteScraper:
                     try:
                         page_content = await self._scrape_page_requests(additional_url)
                         if page_content:
-                            scraped_pages.append(page_content)
-                            self.scraped_urls.add(additional_url)
+                            # Check if this is an error indicator
+                            if isinstance(page_content, dict) and page_content.get('error'):
+                                errors.append(f"Failed to scrape {additional_url}: {page_content.get('error')}")
+                                logger.warning(f"⚠️ Failed to scrape {additional_url}: {page_content.get('error')}")
+                            else:
+                                scraped_pages.append(page_content)
+                                self.scraped_urls.add(additional_url)
                         
                         # Add delay between requests
                         await asyncio.sleep(random.uniform(1, 3))
@@ -666,49 +687,208 @@ class WebsiteScraper:
         return scraped_pages, errors
     
     async def _scrape_page_requests(self, url: str) -> Optional[Dict]:
-        """Scrape a single page using requests with robust error handling"""
+        """Scrape a single page using requests with enhanced bot bypass techniques"""
         try:
-            headers = {
-                'User-Agent': random.choice(self.user_agents),
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'Connection': 'keep-alive',
-            }
+            # Try multiple approaches with different headers and techniques
+            approaches = [
+                self._try_standard_approach,
+                self._try_mobile_approach,
+                self._try_referer_approach,
+                self._try_session_approach,
+                self._try_requests_sync,
+                self._try_delayed_approach
+            ]
             
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=15) as response:
-                    if response.status == 200:
-                        content = await response.text()
-                        
-                        # Check if content is valid HTML
-                        if not content or len(content.strip()) < 100:
-                            logger.warning(f"⚠️ Empty or too short content for {url}")
-                            return None
-                        
-                        # Check for common error pages
-                        if self._is_error_page(content):
-                            logger.warning(f"⚠️ Error page detected for {url}")
-                            return None
-                        
-                        # Check for bot detection pages
-                        if self._is_bot_detection_page(content):
-                            logger.warning(f"🤖 Bot detection page for {url}")
-                            return None
-                        
-                        return self._extract_page_content(url, content)
+            for i, approach in enumerate(approaches):
+                try:
+                    logger.info(f"🔄 Trying approach {i+1}/6 for {url}")
+                    result = await approach(url)
+                    if result:
+                        logger.info(f"✅ Success with approach {i+1} for {url}")
+                        return result
                     else:
-                        logger.warning(f"⚠️ HTTP {response.status} for {url}")
-                        return None
+                        logger.info(f"❌ Approach {i+1} failed for {url}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Approach {i+1} error for {url}: {e}")
+                
+                # Add delay between attempts
+                if i < len(approaches) - 1:
+                    await asyncio.sleep(random.uniform(2, 5))
+            
+            logger.warning(f"❌ All approaches failed for {url}")
+            # Return a special error indicator to help with error classification
+            return {"error": "all_scraping_approaches_failed", "url": url}
                         
-        except asyncio.TimeoutError:
-            logger.warning(f"⚠️ Timeout scraping {url}")
-            return None
-        except aiohttp.ClientError as e:
-            logger.warning(f"⚠️ Client error scraping {url}: {e}")
-            return None
         except Exception as e:
             logger.warning(f"⚠️ Failed to scrape {url} with requests: {e}")
+            return None
+    
+    async def _try_standard_approach(self, url: str) -> Optional[Dict]:
+        """Standard scraping approach"""
+        headers = {
+            'User-Agent': random.choice(self.user_agents),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0'
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=20) as response:
+                return await self._process_response(url, response)
+    
+    async def _try_mobile_approach(self, url: str) -> Optional[Dict]:
+        """Mobile user agent approach"""
+        mobile_headers = {
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=mobile_headers, timeout=20) as response:
+                return await self._process_response(url, response)
+    
+    async def _try_referer_approach(self, url: str) -> Optional[Dict]:
+        """Approach with referer header"""
+        parsed_url = urlparse(url)
+        referer = f"{parsed_url.scheme}://{parsed_url.netloc}/"
+        
+        headers = {
+            'User-Agent': random.choice(self.user_agents),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Referer': referer,
+            'Origin': referer
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=20) as response:
+                return await self._process_response(url, response)
+    
+    async def _try_delayed_approach(self, url: str) -> Optional[Dict]:
+        """Approach with longer delays and different timing"""
+        await asyncio.sleep(random.uniform(3, 7))  # Longer delay
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"'
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=25) as response:
+                return await self._process_response(url, response)
+    
+    async def _try_session_approach(self, url: str) -> Optional[Dict]:
+        """Approach using session with cookies and multiple requests"""
+        parsed_url = urlparse(url)
+        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        
+        headers = {
+            'User-Agent': random.choice(self.user_agents),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            # First, visit the homepage to establish session
+            try:
+                await session.get(base_url, headers=headers, timeout=15)
+                await asyncio.sleep(random.uniform(1, 3))
+            except:
+                pass  # Continue even if homepage fails
+            
+            # Now try the target URL
+            async with session.get(url, headers=headers, timeout=20) as response:
+                return await self._process_response(url, response)
+    
+    async def _try_requests_sync(self, url: str) -> Optional[Dict]:
+        """Approach using synchronous requests library"""
+        headers = {
+            'User-Agent': random.choice(self.user_agents),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+        }
+        
+        try:
+            # Use requests library directly (synchronous)
+            response = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
+            
+            if response.status_code == 200:
+                content = response.text
+                
+                # Check if content is valid HTML
+                if not content or len(content.strip()) < 100:
+                    logger.warning(f"⚠️ Empty or too short content for {url}")
+                    return None
+                
+                # Check for common error pages
+                if self._is_error_page(content):
+                    logger.warning(f"⚠️ Error page detected for {url}")
+                    return None
+                
+                # Check for bot detection pages
+                if self._is_bot_detection_page(content):
+                    logger.warning(f"🤖 Bot detection page for {url}")
+                    return None
+                
+                return self._extract_page_content(url, content)
+            else:
+                logger.warning(f"⚠️ HTTP {response.status_code} for {url}")
+                return None
+                
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"⚠️ Requests error for {url}: {e}")
+            return None
+    
+    async def _process_response(self, url: str, response) -> Optional[Dict]:
+        """Process the HTTP response and extract content"""
+        if response.status == 200:
+            content = await response.text()
+            
+            # Check if content is valid HTML
+            if not content or len(content.strip()) < 100:
+                logger.warning(f"⚠️ Empty or too short content for {url}")
+                return None
+            
+            # Check for common error pages
+            if self._is_error_page(content):
+                logger.warning(f"⚠️ Error page detected for {url}")
+                return None
+            
+            # Check for bot detection pages
+            if self._is_bot_detection_page(content):
+                logger.warning(f"🤖 Bot detection page for {url}")
+                return None
+            
+            return self._extract_page_content(url, content)
+        else:
+            logger.warning(f"⚠️ HTTP {response.status} for {url}")
             return None
     
     async def _scrape_page_playwright(self, page, url: str) -> Optional[Dict]:

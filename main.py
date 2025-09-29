@@ -1188,22 +1188,32 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
                         else:
                             logger.warning(f"⚠️ No content scraped from website {i+1}: {website_url}")
                             
-                            # Check if it's likely a CRM site with bot detection
-                            is_crm_site = any(crm in website_url.lower() for crm in [
-                                'salesforce', 'surveysparrow', 'zendesk', 'freshdesk', 
-                                'intercom', 'hubspot', 'pipedrive', 'monday.com'
-                            ])
+                            # Check the actual scraping errors to determine the failure type
+                            scraping_errors = website_data.get('errors', []) if website_data else []
+                            error_details = website_data.get('analysis', {}) if website_data else {}
                             
-                            logger.info(f"🌐 CRM Detection - URL: {website_url}, is_crm_site: {is_crm_site}")
-                            
-                            if is_crm_site:
-                                error_msg = "CRM site detected with bot protection - try uploading documents instead"
-                                error_type = "crm_bot_detection"
-                                logger.info(f"🌐 CRM site detected: {website_url}")
+                            # Determine error type based on actual scraping results, not URL patterns
+                            if scraping_errors:
+                                # Check if any error indicates bot detection
+                                bot_detection_errors = [error for error in scraping_errors if 
+                                    'bot detection' in error.lower() or 
+                                    'captcha' in error.lower() or
+                                    'cloudflare' in error.lower() or
+                                    'challenge' in error.lower()]
+                                
+                                if bot_detection_errors:
+                                    error_msg = "Site has bot protection that prevents scraping - try uploading documents instead"
+                                    error_type = "crm_bot_detection"
+                                    logger.info(f"🌐 Bot detection confirmed from scraping errors: {website_url}")
+                                else:
+                                    error_msg = f"Scraping failed: {', '.join(scraping_errors[:2])}"  # Show first 2 errors
+                                    error_type = "scraping_error"
+                                    logger.info(f"🌐 Scraping failed for other reasons: {website_url}")
                             else:
-                                error_msg = "No content could be scraped - site may have bot protection"
+                                # No specific errors, generic failure message
+                                error_msg = "No content could be scraped - site may have bot protection or other restrictions"
                                 error_type = "scraping_error"
-                                logger.info(f"🌐 Non-CRM site failed: {website_url}")
+                                logger.info(f"🌐 Generic scraping failure: {website_url}")
                             
                             processing_errors.append({
                                 "type": "website",

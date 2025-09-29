@@ -1140,27 +1140,27 @@ Extract the specific information while preserving all details:"""
                 model="gpt-4o",  # Use same model as other answers
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,  # Same temperature as other answers
-                max_tokens=400,  # Increased to preserve detailed website information
+                max_tokens=600,  # Increased to allow for detailed step-by-step instructions
                 top_p=0.9
             )
             
             answer = response.choices[0].message.content.strip()
             
-            # Ensure answer is 4-5 sentences for comprehensive information
+            # Ensure answer is comprehensive but not too long
             sentences = answer.split('. ')
-            if len(sentences) > 5:
-                # Take only first 5 sentences
-                answer = '. '.join(sentences[:5])
+            if len(sentences) > 8:
+                # Take only first 8 sentences for more comprehensive information
+                answer = '. '.join(sentences[:8])
                 if not answer.endswith('.'):
                     answer += '.'
             
-            # Also check character length (should be under 500 characters for 4-5 sentences)
-            if len(answer) > 500:
+            # Also check character length (increased to 1000 characters for detailed instructions)
+            if len(answer) > 1000:
                 sentences = answer.split('. ')
                 truncated_sentences = []
                 char_count = 0
                 for sentence in sentences:
-                    if char_count + len(sentence) + 2 <= 500:  # +2 for '. '
+                    if char_count + len(sentence) + 2 <= 1000:  # +2 for '. '
                         truncated_sentences.append(sentence)
                         char_count += len(sentence) + 2
                     else:

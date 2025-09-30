@@ -208,7 +208,15 @@ app.include_router(company_router, prefix="/api/company", tags=["Company Managem
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001", 
+        "https://qu-demo.vercel.app",
+        "https://qudemo.com",
+        "https://qudemo-frontend.vercel.app",
+        "https://qudemo.vercel.app",
+        "https://testqudemo.netlify.app"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

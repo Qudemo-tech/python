@@ -539,7 +539,7 @@ class GCSQAService:
     def delete_qudemo(self, company_name: str, qudemo_id: str) -> bool:
         """Delete all data for a specific qudemo"""
         return self.gcs_service.delete_qudemo_data(company_name, qudemo_id)
-    
+
     def generate_and_store_suggested_questions(self, company_name: str, qudemo_id: str) -> List[str]:
         """Generate fresh suggested questions for a QuDemo without storing them"""
         try:

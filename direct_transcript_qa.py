@@ -385,7 +385,16 @@ question: {question}"""
             
             if suggested_questions:
                 print(f"✅ Generated {len(suggested_questions)} suggested questions")
-                return suggested_questions
+                
+                # Validate each question to ensure it has a good answer
+                validated_questions = self._validate_suggested_questions(suggested_questions, transcript_data)
+                
+                if validated_questions:
+                    print(f"✅ Validated {len(validated_questions)} suggested questions")
+                    return validated_questions
+                else:
+                    print(f"⚠️ No valid suggested questions after validation")
+                    return []
             else:
                 print(f"⚠️ No suggested questions generated")
                 return []
@@ -393,6 +402,35 @@ question: {question}"""
         except Exception as e:
             print(f"❌ Failed to generate suggested questions: {e}")
             return []
+    
+    def _validate_suggested_questions(self, questions: List[str], transcript_data: Dict[str, Any]) -> List[str]:
+        """Validate suggested questions to ensure they have good answers"""
+        try:
+            validated_questions = []
+            
+            for question in questions:
+                print(f"🔍 Validating question: {question}")
+                
+                # Test if the question has a good answer
+                answer_result = self.answer_question(question, transcript_data)
+                
+                # Check if the answer is valid (not "no relevant content")
+                if (answer_result and 
+                    answer_result.get('answer') and 
+                    'no relevant content' not in answer_result.get('answer', '').lower() and
+                    'no relevant information' not in answer_result.get('answer', '').lower() and
+                    len(answer_result.get('answer', '')) > 20):  # Minimum answer length
+                    
+                    validated_questions.append(question)
+                    print(f"✅ Question validated: {question}")
+                else:
+                    print(f"❌ Question rejected: {question} - Answer: {answer_result.get('answer', 'No answer')}")
+            
+            return validated_questions
+            
+        except Exception as e:
+            print(f"❌ Error validating suggested questions: {e}")
+            return questions  # Return original questions if validation fails
     
     def _ask_llm_for_suggested_questions(self, transcript: str) -> List[str]:
         """Ask LLM to generate suggested questions from the transcript"""

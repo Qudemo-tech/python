@@ -282,16 +282,31 @@ class GoogleCloudStorageService:
     def get_suggested_questions(self, company_name: str, qudemo_id: str) -> Optional[List[str]]:
         """Get stored suggested questions from Google Cloud Storage"""
         try:
+            logger.info(f"🔍 GETTING suggested questions for company: '{company_name}', qudemo: '{qudemo_id}'")
+            
             # Get company-specific bucket
             bucket = self._get_company_bucket(company_name)
+            logger.info(f"🔍 Using bucket: {bucket.name}")
             
             # Create file path: qudemo_id/suggested_questions.json (within company bucket)
             file_path = f"{qudemo_id}/suggested_questions.json"
+            logger.info(f"🔍 Looking for file at path: {file_path}")
             
             # Check if file exists
             blob = bucket.blob(file_path)
             if not blob.exists():
-                logger.info(f"📝 No stored suggested questions found for {company_name}/{qudemo_id}")
+                logger.warning(f"⚠️ No stored suggested questions found for {company_name}/{qudemo_id} at path: {file_path}")
+                logger.info(f"🔍 Listing all blobs in bucket to debug:")
+                try:
+                    blobs_list = list(bucket.list_blobs(prefix=f"{qudemo_id}/", max_results=10))
+                    if blobs_list:
+                        logger.info(f"🔍 Found {len(blobs_list)} files with prefix '{qudemo_id}/':")
+                        for b in blobs_list:
+                            logger.info(f"   - {b.name}")
+                    else:
+                        logger.info(f"🔍 No files found with prefix '{qudemo_id}/'")
+                except Exception as list_err:
+                    logger.error(f"❌ Error listing blobs: {list_err}")
                 return None
             
             # Download and parse the file
@@ -300,10 +315,13 @@ class GoogleCloudStorageService:
             
             questions = suggested_questions_data.get('suggested_questions', [])
             logger.info(f"✅ Retrieved {len(questions)} stored suggested questions for {company_name}/{qudemo_id}")
+            logger.info(f"📝 Questions: {questions}")
             return questions
             
         except Exception as e:
-            logger.error(f"❌ Failed to retrieve suggested questions: {e}")
+            logger.error(f"❌ Failed to retrieve suggested questions for {company_name}/{qudemo_id}: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
             return None
     
     def get_qa_answers(self, company_name: str, qudemo_id: str) -> Optional[Dict[str, Any]]:

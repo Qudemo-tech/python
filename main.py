@@ -448,13 +448,23 @@ async def get_suggested_questions(company_name: str, qudemo_id: str):
         if stored_questions:
             logger.info(f"✅ Retrieved {len(stored_questions)} stored suggested questions for {company_name}/{qudemo_id}")
             
+            # Fix branding: Replace "Q-Demo" with "Qudemo" in all questions
+            # This is especially important for the welcome Qudemo (ID: 48b29bfb-b290-4669-9f25-ee411cdb1d9d)
+            fixed_questions = []
+            for question in stored_questions:
+                # Replace all variations of Q-Demo with Qudemo
+                fixed_question = question.replace("Q-Demo", "Qudemo")
+                fixed_question = fixed_question.replace("Q-demo", "Qudemo")
+                fixed_question = fixed_question.replace("q-demo", "Qudemo")
+                fixed_questions.append(fixed_question)
+            
             # Ensure "What is this about?" is the first question
-            if not stored_questions or stored_questions[0] != "What is this about?":
+            if not fixed_questions or fixed_questions[0] != "What is this about?":
                 # Add "What is this about?" as the first question if it's not already there
-                final_questions = ["What is this about?"] + [q for q in stored_questions if q != "What is this about?"]
+                final_questions = ["What is this about?"] + [q for q in fixed_questions if q != "What is this about?"]
                 logger.info(f"✅ Added 'What is this about?' as first question. Final questions: {final_questions}")
             else:
-                final_questions = stored_questions
+                final_questions = fixed_questions
             
             return {
                 "success": True,

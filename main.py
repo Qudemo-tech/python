@@ -334,9 +334,15 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
         )
         
         if answer_result['success']:
+            # Fix branding: Replace "Q-Demo" with "Qudemo" in the answer
+            answer_text = answer_result['answer']
+            answer_text = answer_text.replace("Q-Demo", "Qudemo")
+            answer_text = answer_text.replace("Q-demo", "Qudemo")
+            answer_text = answer_text.replace("q-demo", "Qudemo")
+            
             return {
                 'success': True,
-                'answer': answer_result['answer'],
+                'answer': answer_text,
                 'sources': answer_result.get('sources', []),
                 'total_sources': len(answer_result.get('sources', [])) if answer_result.get('sources') else answer_result.get('total_sources', 0),
                 'search_score': answer_result.get('search_score', 0),
@@ -358,10 +364,16 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
             is_no_content = 'no relevant content found' in error_message.lower() or 'no relevant information' in error_message.lower()
             
             if is_no_content:
+                # Fix branding in error messages too
+                no_content_msg = 'No relevant information found'
+                no_content_msg = no_content_msg.replace("Q-Demo", "Qudemo")
+                no_content_msg = no_content_msg.replace("Q-demo", "Qudemo")
+                no_content_msg = no_content_msg.replace("q-demo", "Qudemo")
+                
                 return {
                     'success': False,
-                    'error': 'No relevant information found',
-                    'answer': 'No relevant information found',
+                    'error': no_content_msg,
+                    'answer': no_content_msg,
                     'start': 0,
                     'end': 0,
                     'video_url': None,
@@ -377,10 +389,14 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
                 }
             else:
                 # This is an actual error, show the error message
+                # Fix branding in error messages
+                fixed_error = error_message.replace("Q-Demo", "Qudemo").replace("Q-demo", "Qudemo").replace("q-demo", "Qudemo")
+                fixed_answer = answer_result.get('answer', '').replace("Q-Demo", "Qudemo").replace("Q-demo", "Qudemo").replace("q-demo", "Qudemo")
+                
                 return {
                     'success': False,
-                    'error': error_message,
-                    'answer': answer_result.get('answer', ''),
+                    'error': fixed_error,
+                    'answer': fixed_answer,
                     'start': 0,
                     'end': 0,
                     'video_url': None,

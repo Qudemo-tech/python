@@ -472,15 +472,16 @@ async def get_suggested_questions(company_name: str, qudemo_id: str):
                 fixed_question = question.replace("Q-Demo", "Qudemo")
                 fixed_question = fixed_question.replace("Q-demo", "Qudemo")
                 fixed_question = fixed_question.replace("q-demo", "Qudemo")
-                fixed_questions.append(fixed_question)
+                # Remove "What is this about?" if it exists
+                if fixed_question != "What is this about?":
+                    fixed_questions.append(fixed_question)
             
-            # Ensure "What is this about?" is the first question
-            if not fixed_questions or fixed_questions[0] != "What is this about?":
-                # Add "What is this about?" as the first question if it's not already there
-                final_questions = ["What is this about?"] + [q for q in fixed_questions if q != "What is this about?"]
-                logger.info(f"✅ Added 'What is this about?' as first question. Final questions: {final_questions}")
-            else:
-                final_questions = fixed_questions
+            # Randomly shuffle the questions
+            import random
+            random.shuffle(fixed_questions)
+            final_questions = fixed_questions
+            
+            logger.info(f"✅ Final questions (shuffled, no 'What is this about?'): {final_questions}")
             
             return {
                 "success": True,
@@ -490,7 +491,7 @@ async def get_suggested_questions(company_name: str, qudemo_id: str):
             logger.info(f"📝 No stored suggested questions found for {company_name}/{qudemo_id}")
             return {
                 "success": True,
-                "suggested_questions": ["What is this about?"]
+                "suggested_questions": []
             }
         
     except Exception as e:

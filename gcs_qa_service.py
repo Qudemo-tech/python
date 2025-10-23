@@ -552,7 +552,7 @@ class GCSQAService:
             
             if not combined_content:
                 logger.warning(f"⚠️ No content found (video or documents) for {company_name}/{qudemo_id}")
-                return ["What is this about?"]
+                return []
             
             logger.info(f"📄 Found content length: {len(combined_content)} characters")
             
@@ -574,11 +574,11 @@ class GCSQAService:
                 return suggested_questions
             else:
                 logger.warning(f"⚠️ No suggested questions generated for {company_name}/{qudemo_id}")
-                return ["What is this about?"]
+                return []
             
         except Exception as e:
             logger.error(f"❌ Failed to generate suggested questions: {e}")
-            return ["What is this about?"]
+            return []
     
     def _get_combined_content_for_suggestions(self, company_name: str, qudemo_id: str) -> str:
         """Get combined content from both video transcripts and documents for suggestion generation"""
@@ -717,23 +717,25 @@ Questions:"""
                     
                     logger.info(f"✅ Generated {len(filtered_questions)} suggested questions")
                     
-                    # Add "What is this about?" as the first question
-                    final_questions = ["What is this about?"] + filtered_questions[:7]  # Limit to 7 additional questions (8 total)
+                    # Randomly shuffle all questions first, then limit to 8
+                    import random
+                    random.shuffle(filtered_questions)  # Shuffle all questions first
+                    final_questions = filtered_questions[:8]  # Then limit to 8 questions
                     
-                    logger.info(f"✅ Final suggested questions with 'What is this about?' added: {final_questions}")
+                    logger.info(f"✅ Final suggested questions (shuffled): {final_questions}")
                     return final_questions
                 else:
                     logger.error(f"❌ Invalid JSON format for suggested questions")
-                    return ["What is this about?"]
+                    return []
             except json.JSONDecodeError as e:
                 logger.error(f"❌ Failed to parse suggested questions JSON: {e}")
                 logger.error(f"❌ Raw response: {response_text}")
-                # Return just the default question if parsing fails
-                return ["What is this about?"]
+                # Return empty list if parsing fails
+                return []
             
         except Exception as e:
             logger.error(f"❌ Error generating suggested questions from content: {e}")
-            return ["What is this about?"]
+            return []
     
     def _create_document_answer(self, document_results: List[Dict[str, Any]], question: str) -> Optional[Dict[str, Any]]:
         """

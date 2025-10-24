@@ -249,7 +249,7 @@ class GoogleCloudStorageService:
             return False
     
     def store_suggested_questions(self, company_name: str, qudemo_id: str, suggested_questions: List[str]) -> bool:
-        """Store suggested questions in Google Cloud Storage with company/qudemo structure"""
+        """Store suggested questions in Google Cloud Storage with company/qudemo structure (legacy format)"""
         try:
             # Get company-specific bucket
             bucket = self._get_company_bucket(company_name)
@@ -279,8 +279,42 @@ class GoogleCloudStorageService:
             logger.error(f"❌ Failed to store suggested questions: {e}")
             return False
     
+    def store_suggested_questions_with_metadata(self, company_name: str, qudemo_id: str, 
+                                                video_questions: List[Dict]) -> bool:
+        """Store suggested questions WITH VIDEO METADATA for intelligent shuffling"""
+        try:
+            # Get company-specific bucket
+            bucket = self._get_company_bucket(company_name)
+            
+            # Create file path: qudemo_id/suggested_questions.json (within company bucket)
+            file_path = f"{qudemo_id}/suggested_questions.json"
+            
+            # Create suggested questions data with video metadata
+            suggested_questions_data = {
+                "version": "2.0",  # New format version
+                "video_questions": video_questions,  # Array of {video_id, video_index, video_title, questions}
+                "created_at": datetime.now().isoformat(),
+                "qudemo_id": qudemo_id,
+                "company_name": company_name
+            }
+            
+            # Upload data
+            blob = bucket.blob(file_path)
+            blob.upload_from_string(
+                json.dumps(suggested_questions_data, indent=2),
+                content_type='application/json'
+            )
+            
+            total_questions = sum(len(vq['questions']) for vq in video_questions)
+            logger.info(f"✅ Stored {total_questions} questions from {len(video_questions)} video(s) for {company_name}/{qudemo_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to store suggested questions with metadata: {e}")
+            return False
+    
     def get_suggested_questions(self, company_name: str, qudemo_id: str) -> Optional[List[str]]:
-        """Get stored suggested questions from Google Cloud Storage"""
+        """Get stored suggested questions with INTELLIGENT SHUFFLING for multiple videos"""
         try:
             logger.info(f"🔍 GETTING suggested questions for company: '{company_name}', qudemo: '{qudemo_id}'")
             
@@ -313,16 +347,72 @@ class GoogleCloudStorageService:
             content = blob.download_as_text()
             suggested_questions_data = json.loads(content)
             
-            questions = suggested_questions_data.get('suggested_questions', [])
-            logger.info(f"✅ Retrieved {len(questions)} stored suggested questions for {company_name}/{qudemo_id}")
-            logger.info(f"📝 Questions: {questions}")
-            return questions
+            # Check version to handle both old and new formats
+            version = suggested_questions_data.get('version', '1.0')
+            
+            if version == '2.0' and 'video_questions' in suggested_questions_data:
+                # NEW FORMAT: Video-specific questions with metadata
+                video_questions = suggested_questions_data.get('video_questions', [])
+                logger.info(f"✅ Found NEW FORMAT questions from {len(video_questions)} video(s)")
+                
+                # Apply intelligent shuffling
+                shuffled_questions = self._shuffle_video_questions(video_questions)
+                logger.info(f"✅ Shuffled {len(shuffled_questions)} questions for display")
+                return shuffled_questions
+                
+            else:
+                # OLD FORMAT: Flat list of questions (backward compatibility)
+                questions = suggested_questions_data.get('suggested_questions', [])
+                logger.info(f"✅ Retrieved {len(questions)} stored suggested questions (OLD FORMAT)")
+                logger.info(f"📝 Questions: {questions}")
+                return questions
             
         except Exception as e:
             logger.error(f"❌ Failed to retrieve suggested questions for {company_name}/{qudemo_id}: {e}")
             import traceback
             logger.error(f"❌ Traceback: {traceback.format_exc()}")
             return None
+    
+    def _shuffle_video_questions(self, video_questions: List[Dict]) -> List[str]:
+        """
+        Intelligently shuffle questions from multiple videos.
+        - If multiple videos: Interleave questions (round-robin from different videos)
+        - If single video: Return questions as-is
+        """
+        try:
+            if not video_questions:
+                return []
+            
+            # Single video: No shuffling needed
+            if len(video_questions) == 1:
+                questions = video_questions[0].get('questions', [])
+                logger.info(f"🎯 Single video: Returning {len(questions)} questions as-is")
+                return questions
+            
+            # Multiple videos: Interleave questions (round-robin)
+            logger.info(f"🔀 Multiple videos ({len(video_questions)}): Applying round-robin shuffling")
+            
+            shuffled = []
+            max_questions = max(len(vq.get('questions', [])) for vq in video_questions)
+            
+            # Round-robin through all videos
+            for i in range(max_questions):
+                for video_data in video_questions:
+                    questions = video_data.get('questions', [])
+                    if i < len(questions):
+                        shuffled.append(questions[i])
+                        logger.info(f"  Added Q{i+1} from video: {video_data.get('video_title', 'Unknown')}")
+            
+            logger.info(f"✅ Shuffled result: {len(shuffled)} questions from {len(video_questions)} videos")
+            return shuffled
+            
+        except Exception as e:
+            logger.error(f"❌ Error shuffling questions: {e}")
+            # Fallback: Just flatten all questions
+            flat = []
+            for vq in video_questions:
+                flat.extend(vq.get('questions', []))
+            return flat
     
     def get_qa_answers(self, company_name: str, qudemo_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve Q&A answers from Google Cloud Storage with company/qudemo structure"""

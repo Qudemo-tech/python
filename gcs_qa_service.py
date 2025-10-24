@@ -2,6 +2,42 @@
 """
 Google Cloud Storage Q&A Service
 Handles Q&A functionality using Google Cloud Storage instead of Pinecone
+
+=== SUGGESTED QUESTIONS SYSTEM (v2.0) ===
+
+NEW ARCHITECTURE (Per-Video Generation with Validation):
+
+1. DYNAMIC QUESTION GENERATION PER VIDEO:
+   - Each video in a QuDemo gets its own questions generated separately
+   - Question count is DYNAMIC based on video length:
+     * Short videos (<5k chars): 3 questions
+     * Medium videos (5k-15k chars): 5 questions
+     * Long videos (15k-30k chars): 7 questions
+     * Very long videos (>30k chars): 9 questions
+
+2. STRICT VALIDATION:
+   - Every generated question is tested by actually asking it to the video
+   - Questions are ONLY kept if they have valid answers
+   - Invalid responses filtered out (e.g., "no relevant content", "not mentioned")
+   - Ensures minimum answer length (25+ characters)
+   - This prevents the "no relevant answers found" problem
+
+3. INTELLIGENT STORAGE WITH METADATA:
+   - Questions stored in NEW FORMAT (version 2.0) with video metadata
+   - Structure: {video_id, video_index, video_title, questions[]}
+   - Backward compatible with old format (version 1.0)
+
+4. SMART DISPLAY SHUFFLING:
+   - Single video: Questions displayed in order
+   - Multiple videos: Questions INTERLEAVED (round-robin from different videos)
+   - Example with 3 videos:
+     Display order: [V1-Q1, V2-Q1, V3-Q1, V1-Q2, V2-Q2, V3-Q2, ...]
+   - This ensures variety and prevents repetitive questions from same video
+
+5. FRONTEND DISPLAY:
+   - Shows first 4 questions initially
+   - "More..." button reveals remaining questions
+   - Questions are already shuffled when received from backend
 """
 
 import os
@@ -541,44 +577,298 @@ class GCSQAService:
         return self.gcs_service.delete_qudemo_data(company_name, qudemo_id)
 
     def generate_and_store_suggested_questions(self, company_name: str, qudemo_id: str) -> List[str]:
-        """Generate fresh suggested questions for a QuDemo without storing them"""
+        """Generate fresh suggested questions for a QuDemo - PER VIDEO with validation"""
         try:
             logger.info(f"🤖 GENERATING FRESH suggested questions for {company_name}/{qudemo_id}")
-            logger.info(f"🔍 Starting fresh generation process...")
+            logger.info(f"🔍 Starting fresh generation process (PER VIDEO)...")
             
-            # Get combined content from both video transcripts and documents
-            logger.info(f"📚 Getting combined content for suggestions...")
-            combined_content = self._get_combined_content_for_suggestions(company_name, qudemo_id)
+            # Get transcript data to access individual videos
+            transcript_data = self.gcs_service.get_video_transcript(company_name, qudemo_id)
             
-            if not combined_content:
-                logger.warning(f"⚠️ No content found (video or documents) for {company_name}/{qudemo_id}")
+            if not transcript_data:
+                logger.warning(f"⚠️ No transcript data found for {company_name}/{qudemo_id}")
                 return ["What is this about?"]
             
-            logger.info(f"📄 Found content length: {len(combined_content)} characters")
+            # Generate questions PER VIDEO with validation
+            all_video_questions = self._generate_questions_per_video(company_name, qudemo_id, transcript_data)
             
-            # Generate suggested questions using the combined content (fresh every time)
-            logger.info(f"🎯 Generating fresh questions from content...")
-            suggested_questions = self._generate_suggested_questions_from_content(combined_content)
+            if not all_video_questions:
+                logger.warning(f"⚠️ No questions generated for any video")
+                return ["What is this about?"]
             
-            if suggested_questions:
-                logger.info(f"✅ Generated {len(suggested_questions)} FRESH suggested questions for {company_name}/{qudemo_id}")
-                logger.info(f"📝 Questions: {suggested_questions}")
-                
-                # Store the suggested questions
-                storage_success = self.gcs_service.store_suggested_questions(company_name, qudemo_id, suggested_questions)
-                if storage_success:
-                    logger.info(f"💾 Successfully stored suggested questions for {company_name}/{qudemo_id}")
-                else:
-                    logger.warning(f"⚠️ Failed to store suggested questions for {company_name}/{qudemo_id}")
-                
-                return suggested_questions
+            logger.info(f"✅ Generated questions for {len(all_video_questions)} video(s)")
+            
+            # Store the suggested questions with video metadata
+            storage_success = self.gcs_service.store_suggested_questions_with_metadata(
+                company_name, qudemo_id, all_video_questions
+            )
+            
+            if storage_success:
+                logger.info(f"💾 Successfully stored suggested questions for {company_name}/{qudemo_id}")
             else:
-                logger.warning(f"⚠️ No suggested questions generated for {company_name}/{qudemo_id}")
-                return ["What is this about?"]
+                logger.warning(f"⚠️ Failed to store suggested questions for {company_name}/{qudemo_id}")
+            
+            # Return flattened list for backward compatibility
+            flat_questions = []
+            for video_data in all_video_questions:
+                flat_questions.extend(video_data['questions'])
+            
+            return flat_questions if flat_questions else ["What is this about?"]
             
         except Exception as e:
             logger.error(f"❌ Failed to generate suggested questions: {e}")
             return ["What is this about?"]
+    
+    def _generate_questions_per_video(self, company_name: str, qudemo_id: str, transcript_data: Dict[str, Any]) -> List[Dict]:
+        """Generate and validate questions for EACH video separately with dynamic question counts"""
+        try:
+            all_video_questions = []
+            
+            # Handle both single video and multiple videos format
+            videos = transcript_data.get('videos', [])
+            if not videos and 'transcript' in transcript_data:
+                # Single video format - wrap it
+                videos = [{
+                    'transcript': transcript_data['transcript'],
+                    'video_id': transcript_data.get('video_id', 'default'),
+                    'video_url': transcript_data.get('video_url', ''),
+                    'title': transcript_data.get('title', 'Video')
+                }]
+            
+            logger.info(f"📹 Processing {len(videos)} video(s) for suggested questions")
+            
+            for video_index, video in enumerate(videos):
+                video_id = video.get('video_id', f'video_{video_index}')
+                video_title = video.get('title', f'Video {video_index + 1}')
+                transcript = video.get('transcript', '')
+                
+                if not transcript:
+                    logger.warning(f"⚠️ No transcript for video {video_id}")
+                    continue
+                
+                # Calculate dynamic question count based on video length
+                video_length = len(transcript)
+                question_count = self._calculate_question_count(video_length)
+                
+                logger.info(f"📊 Video {video_index + 1} ({video_title}): {video_length} chars → {question_count} questions")
+                
+                # Generate questions for this video
+                raw_questions = self._generate_questions_for_single_video(transcript, question_count)
+                
+                if not raw_questions:
+                    logger.warning(f"⚠️ No questions generated for video {video_id}")
+                    continue
+                
+                logger.info(f"🎯 Generated {len(raw_questions)} raw questions for video {video_id}")
+                
+                # STRICT VALIDATION - Only keep questions with valid answers
+                validated_questions = self._validate_questions_with_answers(
+                    raw_questions, transcript, company_name, qudemo_id
+                )
+                
+                if validated_questions:
+                    logger.info(f"✅ {len(validated_questions)} questions passed validation for video {video_id}")
+                    all_video_questions.append({
+                        'video_id': video_id,
+                        'video_index': video_index,
+                        'video_title': video_title,
+                        'video_url': video.get('video_url', ''),
+                        'questions': validated_questions
+                    })
+                else:
+                    logger.warning(f"❌ No questions passed validation for video {video_id}")
+            
+            return all_video_questions
+            
+        except Exception as e:
+            logger.error(f"❌ Error generating questions per video: {e}")
+            return []
+    
+    def _calculate_question_count(self, video_length: int) -> int:
+        """Calculate dynamic question count based on video length (transcript characters)"""
+        if video_length < 5000:  # Short video (~1-3 min)
+            return 3
+        elif video_length < 15000:  # Medium video (~3-10 min)
+            return 5
+        elif video_length < 30000:  # Long video (~10-20 min)
+            return 7
+        else:  # Very long video (>20 min)
+            return 9
+    
+    def _generate_questions_for_single_video(self, transcript: str, question_count: int) -> List[str]:
+        """Generate questions for a single video"""
+        try:
+            import json
+            import os
+            
+            # Get OpenAI API key
+            api_key = os.getenv('OPENAI_API_KEY')
+            if not api_key:
+                logger.warning("⚠️ OpenAI API key not found")
+                return []
+            
+            # Initialize OpenAI client
+            client = openai.OpenAI(api_key=api_key)
+            
+            # Limit transcript to avoid token limits (use more content per video now)
+            max_chars = 4000  # Increased from 3000
+            transcript_sample = transcript[:max_chars]
+            
+            prompt = f"""You are an expert at analyzing video content to generate helpful suggested questions. 
+
+Generate EXACTLY {question_count} high-quality, specific questions that viewers might ask about this video.
+
+REQUIREMENTS:
+- Generate EXACTLY {question_count} questions
+- Questions MUST be answerable from the video content
+- Questions should be specific and actionable
+- Questions should cover different aspects of the content
+- Questions should be natural and conversational
+- Focus on practical, useful questions
+
+QUESTION TYPES TO INCLUDE:
+- How-to questions (e.g., "How do I...")
+- What questions (e.g., "What is...", "What are...")
+- Why questions (e.g., "Why does...", "Why should I...")
+- Feature questions (e.g., "What features...")
+- Process questions (e.g., "What are the steps to...")
+- Comparison questions (e.g., "What's the difference...")
+
+Return ONLY a JSON array of questions, nothing else:
+["question1?", "question2?", "question3?"]
+
+Video Content:
+{transcript_sample}
+
+Questions:"""
+            
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=600,
+                top_p=0.9,
+                frequency_penalty=0.3,
+                presence_penalty=0.2
+            )
+            
+            # Parse the response
+            response_text = response.choices[0].message.content.strip()
+            
+            # Clean up markdown code blocks
+            if response_text.startswith("```json"):
+                response_text = response_text[7:]
+            if response_text.startswith("```"):
+                response_text = response_text[3:]
+            if response_text.endswith("```"):
+                response_text = response_text[:-3]
+            
+            response_text = response_text.strip()
+            
+            # Parse JSON
+            try:
+                questions = json.loads(response_text)
+                if isinstance(questions, list):
+                    # Clean and validate questions
+                    cleaned_questions = []
+                    for q in questions:
+                        q = q.strip()
+                        if q and not q.endswith('?'):
+                            q += '?'
+                        if q and len(q) > 5:
+                            cleaned_questions.append(q)
+                    
+                    logger.info(f"✅ Generated {len(cleaned_questions)} questions")
+                    return cleaned_questions
+                else:
+                    logger.error("❌ Invalid JSON format")
+                    return []
+            except json.JSONDecodeError as e:
+                logger.error(f"❌ JSON parse error: {e}")
+                return []
+            
+        except Exception as e:
+            logger.error(f"❌ Error generating questions: {e}")
+            return []
+    
+    def _validate_questions_with_answers(self, questions: List[str], transcript: str, 
+                                         company_name: str, qudemo_id: str) -> List[str]:
+        """STRICT VALIDATION - Only keep questions that have valid answers"""
+        try:
+            validated_questions = []
+            
+            logger.info(f"🔍 Validating {len(questions)} questions...")
+            
+            for question in questions:
+                # Test if this question has a valid answer
+                is_valid = self._test_question_has_answer(question, transcript, company_name, qudemo_id)
+                
+                if is_valid:
+                    validated_questions.append(question)
+                    logger.info(f"✅ Valid: {question}")
+                else:
+                    logger.warning(f"❌ Invalid (no good answer): {question}")
+            
+            logger.info(f"✅ Validation complete: {len(validated_questions)}/{len(questions)} passed")
+            return validated_questions
+            
+        except Exception as e:
+            logger.error(f"❌ Error validating questions: {e}")
+            return questions  # Return original if validation fails
+    
+    def _test_question_has_answer(self, question: str, transcript: str, 
+                                   company_name: str, qudemo_id: str) -> bool:
+        """Test if a question has a valid answer from the transcript"""
+        try:
+            # Create a minimal transcript data structure for testing
+            test_transcript_data = {
+                'transcript': transcript,
+                'videos': [{
+                    'transcript': transcript,
+                    'video_id': 'test',
+                    'title': 'Test Video',
+                    'video_url': '',
+                    'video_title': 'Test Video'
+                }]
+            }
+            
+            # Try to answer the question using direct_qa service
+            answer_result = self.direct_qa.search_transcript_directly(test_transcript_data, question)
+            
+            if not answer_result or not answer_result.get('answer'):
+                return False
+            
+            answer = answer_result.get('answer', '').lower()
+            
+            # Check for invalid responses
+            invalid_phrases = [
+                'no relevant content',
+                'no relevant information',
+                'no information',
+                'not mentioned',
+                'does not contain',
+                'transcript does not',
+                'cannot find',
+                'unable to find',
+                'no details',
+                'no specific',
+                'not provided',
+                'not available'
+            ]
+            
+            for phrase in invalid_phrases:
+                if phrase in answer:
+                    return False
+            
+            # Check minimum answer length
+            if len(answer) < 25:
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error testing question: {e}")
+            return False
     
     def _get_combined_content_for_suggestions(self, company_name: str, qudemo_id: str) -> str:
         """Get combined content from both video transcripts and documents for suggestion generation"""

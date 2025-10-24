@@ -281,7 +281,7 @@ class GoogleCloudStorageService:
     
     def store_suggested_questions_with_metadata(self, company_name: str, qudemo_id: str, 
                                                 video_questions: List[Dict]) -> bool:
-        """Store suggested questions WITH VIDEO METADATA for intelligent shuffling"""
+        """Store suggested questions WITH VIDEO METADATA + CACHED ANSWERS for instant retrieval"""
         try:
             # Get company-specific bucket
             bucket = self._get_company_bucket(company_name)
@@ -289,10 +289,10 @@ class GoogleCloudStorageService:
             # Create file path: qudemo_id/suggested_questions.json (within company bucket)
             file_path = f"{qudemo_id}/suggested_questions.json"
             
-            # Create suggested questions data with video metadata
+            # Create suggested questions data with video metadata + cached answers
             suggested_questions_data = {
-                "version": "2.0",  # New format version
-                "video_questions": video_questions,  # Array of {video_id, video_index, video_title, questions}
+                "version": "2.1",  # Updated version for cached answers
+                "video_questions": video_questions,  # Array of {video_id, video_index, video_title, questions_with_answers}
                 "created_at": datetime.now().isoformat(),
                 "qudemo_id": qudemo_id,
                 "company_name": company_name
@@ -305,8 +305,8 @@ class GoogleCloudStorageService:
                 content_type='application/json'
             )
             
-            total_questions = sum(len(vq['questions']) for vq in video_questions)
-            logger.info(f"✅ Stored {total_questions} questions from {len(video_questions)} video(s) for {company_name}/{qudemo_id}")
+            total_questions = sum(len(vq.get('questions_with_answers', [])) for vq in video_questions)
+            logger.info(f"✅ Stored {total_questions} questions WITH CACHED ANSWERS from {len(video_questions)} video(s) for {company_name}/{qudemo_id}")
             return True
             
         except Exception as e:
@@ -350,12 +350,12 @@ class GoogleCloudStorageService:
             # Check version to handle both old and new formats
             version = suggested_questions_data.get('version', '1.0')
             
-            if version == '2.0' and 'video_questions' in suggested_questions_data:
-                # NEW FORMAT: Video-specific questions with metadata
+            if version in ['2.0', '2.1'] and 'video_questions' in suggested_questions_data:
+                # NEW FORMAT: Video-specific questions with metadata (and cached answers in v2.1)
                 video_questions = suggested_questions_data.get('video_questions', [])
-                logger.info(f"✅ Found NEW FORMAT questions from {len(video_questions)} video(s)")
+                logger.info(f"✅ Found NEW FORMAT (v{version}) questions from {len(video_questions)} video(s)")
                 
-                # Apply intelligent shuffling
+                # Apply intelligent shuffling (returns just question strings)
                 shuffled_questions = self._shuffle_video_questions(video_questions)
                 logger.info(f"✅ Shuffled {len(shuffled_questions)} questions for display")
                 return shuffled_questions
@@ -378,30 +378,43 @@ class GoogleCloudStorageService:
         Intelligently shuffle questions from multiple videos.
         - If multiple videos: Interleave questions (round-robin from different videos)
         - If single video: Return questions as-is
+        - Supports both v2.0 (questions array) and v2.1 (questions_with_answers array)
         """
         try:
             if not video_questions:
                 return []
             
+            # Extract questions (handle both v2.0 and v2.1 formats)
+            def extract_questions(video_data):
+                # v2.1 format: questions_with_answers = [{question, answer, ...}]
+                if 'questions_with_answers' in video_data:
+                    return [qa['question'] for qa in video_data['questions_with_answers']]
+                # v2.0 format: questions = ["question1", "question2"]
+                elif 'questions' in video_data:
+                    return video_data['questions']
+                return []
+            
             # Single video: No shuffling needed
             if len(video_questions) == 1:
-                questions = video_questions[0].get('questions', [])
+                questions = extract_questions(video_questions[0])
                 logger.info(f"🎯 Single video: Returning {len(questions)} questions as-is")
                 return questions
             
             # Multiple videos: Interleave questions (round-robin)
             logger.info(f"🔀 Multiple videos ({len(video_questions)}): Applying round-robin shuffling")
             
-            shuffled = []
-            max_questions = max(len(vq.get('questions', [])) for vq in video_questions)
+            # Get questions for each video
+            all_video_questions = [extract_questions(vq) for vq in video_questions]
+            max_questions = max(len(qs) for qs in all_video_questions)
             
+            shuffled = []
             # Round-robin through all videos
             for i in range(max_questions):
-                for video_data in video_questions:
-                    questions = video_data.get('questions', [])
+                for video_idx, questions in enumerate(all_video_questions):
                     if i < len(questions):
                         shuffled.append(questions[i])
-                        logger.info(f"  Added Q{i+1} from video: {video_data.get('video_title', 'Unknown')}")
+                        video_title = video_questions[video_idx].get('video_title', 'Unknown')
+                        logger.info(f"  Added Q{i+1} from video: {video_title}")
             
             logger.info(f"✅ Shuffled result: {len(shuffled)} questions from {len(video_questions)} videos")
             return shuffled
@@ -411,8 +424,64 @@ class GoogleCloudStorageService:
             # Fallback: Just flatten all questions
             flat = []
             for vq in video_questions:
-                flat.extend(vq.get('questions', []))
+                if 'questions_with_answers' in vq:
+                    flat.extend([qa['question'] for qa in vq['questions_with_answers']])
+                elif 'questions' in vq:
+                    flat.extend(vq['questions'])
             return flat
+    
+    def get_cached_answer_for_suggested_question(self, company_name: str, qudemo_id: str, 
+                                                  question: str) -> Optional[Dict[str, Any]]:
+        """Get CACHED answer for a suggested question (INSTANT - NO LLM CALL!)"""
+        try:
+            logger.info(f"⚡ Looking for CACHED answer for: '{question}'")
+            
+            # Get company-specific bucket
+            bucket = self._get_company_bucket(company_name)
+            file_path = f"{qudemo_id}/suggested_questions.json"
+            
+            # Check if file exists
+            blob = bucket.blob(file_path)
+            if not blob.exists():
+                logger.warning(f"⚠️ No suggested questions file found")
+                return None
+            
+            # Download and parse the file
+            content = blob.download_as_text()
+            suggested_questions_data = json.loads(content)
+            
+            # Check version
+            version = suggested_questions_data.get('version', '1.0')
+            
+            if version == '2.1' and 'video_questions' in suggested_questions_data:
+                # v2.1 format has cached answers!
+                video_questions = suggested_questions_data.get('video_questions', [])
+                
+                # Search for the question in all videos
+                for video_data in video_questions:
+                    questions_with_answers = video_data.get('questions_with_answers', [])
+                    for qa in questions_with_answers:
+                        if qa.get('question', '').strip().lower() == question.strip().lower():
+                            logger.info(f"⚡ FOUND CACHED ANSWER! (instant retrieval)")
+                            return {
+                                'answer': qa.get('answer', ''),
+                                'timestamp': qa.get('timestamp', 0),
+                                'formatted_timestamp': qa.get('formatted_timestamp', '00:00'),
+                                'video_url': qa.get('video_url', ''),
+                                'video_title': qa.get('video_title', 'Video'),
+                                'is_cached': True  # Flag to indicate this was instant
+                            }
+                
+                logger.info(f"⚠️ Question not found in cached answers")
+                return None
+            else:
+                # Old format doesn't have cached answers
+                logger.info(f"⚠️ Old format (v{version}) - no cached answers available")
+                return None
+            
+        except Exception as e:
+            logger.error(f"❌ Error retrieving cached answer: {e}")
+            return None
     
     def get_qa_answers(self, company_name: str, qudemo_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve Q&A answers from Google Cloud Storage with company/qudemo structure"""

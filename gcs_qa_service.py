@@ -3,9 +3,9 @@
 Google Cloud Storage Q&A Service
 Handles Q&A functionality using Google Cloud Storage instead of Pinecone
 
-=== SUGGESTED QUESTIONS SYSTEM (v2.0) ===
+=== SUGGESTED QUESTIONS SYSTEM (v2.1) ===
 
-NEW ARCHITECTURE (Per-Video Generation with Validation):
+NEW ARCHITECTURE (Per-Video Generation with Validation + CACHED ANSWERS):
 
 1. DYNAMIC QUESTION GENERATION PER VIDEO:
    - Each video in a QuDemo gets its own questions generated separately
@@ -15,29 +15,37 @@ NEW ARCHITECTURE (Per-Video Generation with Validation):
      * Long videos (15k-30k chars): 7 questions
      * Very long videos (>30k chars): 9 questions
 
-2. STRICT VALIDATION:
+2. STRICT VALIDATION WITH ANSWER CACHING:
    - Every generated question is tested by actually asking it to the video
    - Questions are ONLY kept if they have valid answers
    - Invalid responses filtered out (e.g., "no relevant content", "not mentioned")
    - Ensures minimum answer length (25+ characters)
+   - **NEW**: ANSWERS ARE CACHED during validation! (Zero latency for suggested questions)
    - This prevents the "no relevant answers found" problem
 
-3. INTELLIGENT STORAGE WITH METADATA:
-   - Questions stored in NEW FORMAT (version 2.0) with video metadata
-   - Structure: {video_id, video_index, video_title, questions[]}
-   - Backward compatible with old format (version 1.0)
+3. INSTANT ANSWER RETRIEVAL (ZERO LATENCY):
+   - When user clicks a suggested question → INSTANT answer (no LLM call!)
+   - Answers stored with: {question, answer, timestamp, video_url, video_title}
+   - Cache is checked FIRST before any other search
+   - Fallback to normal search only if question not in cache
 
-4. SMART DISPLAY SHUFFLING:
+4. INTELLIGENT STORAGE WITH METADATA:
+   - Questions stored in NEW FORMAT (version 2.1) with video metadata + cached answers
+   - Structure: {video_id, video_index, video_title, questions_with_answers[]}
+   - Backward compatible with old formats (version 1.0, 2.0)
+
+5. SMART DISPLAY SHUFFLING:
    - Single video: Questions displayed in order
    - Multiple videos: Questions INTERLEAVED (round-robin from different videos)
    - Example with 3 videos:
      Display order: [V1-Q1, V2-Q1, V3-Q1, V1-Q2, V2-Q2, V3-Q2, ...]
    - This ensures variety and prevents repetitive questions from same video
 
-5. FRONTEND DISPLAY:
+6. FRONTEND DISPLAY:
    - Shows first 4 questions initially
    - "More..." button reveals remaining questions
    - Questions are already shuffled when received from backend
+   - Clicking suggested question = INSTANT response (cached)
 """
 
 import os
@@ -79,6 +87,33 @@ class GCSQAService:
         try:
             logger.info(f"❓ Processing question: {question}")
             logger.info(f"🏢 Company: {company_name}, QuDemo: {qudemo_id}")
+            
+            # STEP 0: Check for CACHED answer (suggested questions) - INSTANT!
+            logger.info(f"⚡ Checking for cached answer (suggested questions)...")
+            cached_answer = self.gcs_service.get_cached_answer_for_suggested_question(
+                company_name, qudemo_id, question
+            )
+            
+            if cached_answer and cached_answer.get('is_cached'):
+                logger.info(f"⚡⚡⚡ INSTANT CACHED ANSWER FOUND! (No LLM call needed)")
+                return {
+                    'success': True,  # REQUIRED for endpoint
+                    'answer': cached_answer.get('answer', ''),
+                    'timestamp': cached_answer.get('timestamp', 0),
+                    'formatted_timestamp': cached_answer.get('formatted_timestamp', '00:00'),
+                    'confidence': 1.0,
+                    'sources': [{
+                        'text': cached_answer.get('answer', '')[:500],
+                        'type': 'video',
+                        'relevance_score': 1.0
+                    }],
+                    'video_url': cached_answer.get('video_url', ''),
+                    'video_title': cached_answer.get('video_title', 'Video'),
+                    'is_cached': True,  # Flag for frontend to know this was instant
+                    'cache_hit': True
+                }
+            else:
+                logger.info(f"⚠️ No cached answer found, proceeding with normal search...")
             
             # STEP 1: Search documents, videos, and websites simultaneously (equal priority)
             logger.info(f"📄 Searching document content for: {question}")
@@ -608,10 +643,11 @@ class GCSQAService:
             else:
                 logger.warning(f"⚠️ Failed to store suggested questions for {company_name}/{qudemo_id}")
             
-            # Return flattened list for backward compatibility
+            # Return flattened list of just questions (for backward compatibility)
             flat_questions = []
             for video_data in all_video_questions:
-                flat_questions.extend(video_data['questions'])
+                for qa in video_data['questions_with_answers']:
+                    flat_questions.append(qa['question'])
             
             return flat_questions if flat_questions else ["What is this about?"]
             
@@ -661,19 +697,25 @@ class GCSQAService:
                 
                 logger.info(f"🎯 Generated {len(raw_questions)} raw questions for video {video_id}")
                 
-                # STRICT VALIDATION - Only keep questions with valid answers
-                validated_questions = self._validate_questions_with_answers(
-                    raw_questions, transcript, company_name, qudemo_id
+                # STRICT VALIDATION - Only keep questions with valid answers + CACHE ANSWERS
+                # Pass video data so cached answers have correct video_url and timestamp
+                video_data = {
+                    'video_id': video_id,
+                    'video_url': video.get('video_url', ''),
+                    'video_title': video_title
+                }
+                validated_questions_with_answers = self._validate_questions_with_answers(
+                    raw_questions, transcript, company_name, qudemo_id, video_data
                 )
                 
-                if validated_questions:
-                    logger.info(f"✅ {len(validated_questions)} questions passed validation for video {video_id}")
+                if validated_questions_with_answers:
+                    logger.info(f"✅ {len(validated_questions_with_answers)} questions passed validation with cached answers for video {video_id}")
                     all_video_questions.append({
                         'video_id': video_id,
                         'video_index': video_index,
                         'video_title': video_title,
                         'video_url': video.get('video_url', ''),
-                        'questions': validated_questions
+                        'questions_with_answers': validated_questions_with_answers  # [{question, answer, timestamp, ...}]
                     })
                 else:
                     logger.warning(f"❌ No questions passed validation for video {video_id}")
@@ -792,43 +834,50 @@ Questions:"""
             return []
     
     def _validate_questions_with_answers(self, questions: List[str], transcript: str, 
-                                         company_name: str, qudemo_id: str) -> List[str]:
-        """STRICT VALIDATION - Only keep questions that have valid answers"""
+                                         company_name: str, qudemo_id: str, video_data: Dict) -> List[Dict]:
+        """STRICT VALIDATION - Only keep questions that have valid answers + CACHE THE ANSWERS"""
         try:
-            validated_questions = []
+            validated_questions_with_answers = []
             
-            logger.info(f"🔍 Validating {len(questions)} questions...")
+            logger.info(f"🔍 Validating {len(questions)} questions and caching answers...")
             
             for question in questions:
-                # Test if this question has a valid answer
-                is_valid = self._test_question_has_answer(question, transcript, company_name, qudemo_id)
+                # Test if this question has a valid answer AND get the answer
+                result = self._test_question_and_get_answer(question, transcript, company_name, qudemo_id, video_data)
                 
-                if is_valid:
-                    validated_questions.append(question)
-                    logger.info(f"✅ Valid: {question}")
+                if result and result.get('is_valid'):
+                    validated_questions_with_answers.append({
+                        'question': question,
+                        'answer': result.get('answer', ''),
+                        'timestamp': result.get('timestamp', 0),
+                        'formatted_timestamp': result.get('formatted_timestamp', '00:00'),
+                        'video_url': result.get('video_url', ''),
+                        'video_title': result.get('video_title', 'Video')
+                    })
+                    logger.info(f"✅ Valid + Cached: {question}")
                 else:
                     logger.warning(f"❌ Invalid (no good answer): {question}")
             
-            logger.info(f"✅ Validation complete: {len(validated_questions)}/{len(questions)} passed")
-            return validated_questions
+            logger.info(f"✅ Validation complete: {len(validated_questions_with_answers)}/{len(questions)} passed with cached answers")
+            return validated_questions_with_answers
             
         except Exception as e:
             logger.error(f"❌ Error validating questions: {e}")
-            return questions  # Return original if validation fails
+            return []  # Return empty if validation fails
     
-    def _test_question_has_answer(self, question: str, transcript: str, 
-                                   company_name: str, qudemo_id: str) -> bool:
-        """Test if a question has a valid answer from the transcript"""
+    def _test_question_and_get_answer(self, question: str, transcript: str, 
+                                       company_name: str, qudemo_id: str, video_data: Dict) -> Dict[str, Any]:
+        """Test if a question has a valid answer AND return the cached answer for instant retrieval"""
         try:
-            # Create a minimal transcript data structure for testing
+            # Create transcript data structure with ACTUAL video info (not test data)
             test_transcript_data = {
                 'transcript': transcript,
                 'videos': [{
                     'transcript': transcript,
-                    'video_id': 'test',
-                    'title': 'Test Video',
-                    'video_url': '',
-                    'video_title': 'Test Video'
+                    'video_id': video_data.get('video_id', 'test'),
+                    'title': video_data.get('video_title', 'Video'),
+                    'video_url': video_data.get('video_url', ''),
+                    'video_title': video_data.get('video_title', 'Video')
                 }]
             }
             
@@ -836,9 +885,10 @@ Questions:"""
             answer_result = self.direct_qa.search_transcript_directly(test_transcript_data, question)
             
             if not answer_result or not answer_result.get('answer'):
-                return False
+                return {'is_valid': False}
             
-            answer = answer_result.get('answer', '').lower()
+            answer = answer_result.get('answer', '')
+            answer_lower = answer.lower()
             
             # Check for invalid responses
             invalid_phrases = [
@@ -857,18 +907,26 @@ Questions:"""
             ]
             
             for phrase in invalid_phrases:
-                if phrase in answer:
-                    return False
+                if phrase in answer_lower:
+                    return {'is_valid': False}
             
             # Check minimum answer length
             if len(answer) < 25:
-                return False
+                return {'is_valid': False}
             
-            return True
+            # Valid answer! Return full data for caching
+            return {
+                'is_valid': True,
+                'answer': answer,
+                'timestamp': answer_result.get('timestamp', 0),
+                'formatted_timestamp': answer_result.get('formatted_timestamp', '00:00'),
+                'video_url': answer_result.get('video_url', ''),
+                'video_title': answer_result.get('video_title', 'Video')
+            }
             
         except Exception as e:
             logger.error(f"❌ Error testing question: {e}")
-            return False
+            return {'is_valid': False}
     
     def _get_combined_content_for_suggestions(self, company_name: str, qudemo_id: str) -> str:
         """Get combined content from both video transcripts and documents for suggestion generation"""

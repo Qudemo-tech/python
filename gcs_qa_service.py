@@ -649,7 +649,7 @@ class GCSQAService:
             client = openai.OpenAI(api_key=api_key)
             
             # Use the same high-quality prompt as video-only suggested questions
-            prompt = f"""You are an expert at analyzing content to generate helpful suggested questions. Your task is to create 4-7 high-quality, engaging questions that viewers might want to ask about this content.
+            prompt = f"""You are an expert at analyzing content to generate helpful suggested questions. Your task is to create 4-7 high-quality, engaging questions that viewers might want to ask about this content.Use chatwoot instead of chatwood in the questions.
 
 REQUIREMENTS:
 - Generate 4-7 questions maximum (one will be added automatically)

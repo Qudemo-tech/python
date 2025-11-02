@@ -2344,7 +2344,7 @@ Return ONLY the JSON array, no other text."""
             logger.warning(f"⚠️ Limiting FAQs from {len(all_faqs)} to {MAX_CONTENT_FAQS} for testing (HeyGen credit savings)")
             all_faqs = all_faqs[:MAX_CONTENT_FAQS]
         
-        logger.info(f"📊 Total FAQs AFTER LIMIT: {len(all_faqs)} content FAQs (will add 2 fallback FAQs = {len(all_faqs) + 2} total)")
+        logger.info(f"📊 Total FAQs AFTER LIMIT: {len(all_faqs)} content FAQs (will add 1 intro + 2 fallback FAQs = {len(all_faqs) + 3} total)")
         
         # Store FAQs in GCS (regardless of document availability)
         if gcs_qa_service:
@@ -2353,6 +2353,14 @@ Return ONLY the JSON array, no other text."""
             
             # Add default fallback FAQs for common scenarios
             default_faqs = [
+                {
+                    "id": "faq_intro",
+                    "question": "INTRO_VIDEO",
+                    "answer": f"Welcome! I'm here to guide you through this interactive demo. I'll be answering your questions and showing you everything you need to know. Feel free to ask me anything about our product, features, or how we can help solve your challenges. Let's get started!",
+                    "category": "intro",
+                    "estimated_duration": 15.0,
+                    "is_intro": True
+                },
                 {
                     "id": "faq_fallback_no_answer",
                     "question": "NO_ANSWER_FOUND",
@@ -2398,8 +2406,8 @@ Return ONLY the JSON array, no other text."""
             logger.info(f"   - Content FAQs (after limit): {len(all_faqs)}")
             logger.info(f"     • Video FAQs: {len(video_faqs)}")
             logger.info(f"     • Document FAQs: {len(document_faqs)}")
-            logger.info(f"   - Fallback FAQs: {len(default_faqs)}")
-            logger.info(f"   ⚠️ TESTING MODE: Limited to {MAX_CONTENT_FAQS} content FAQs + {len(default_faqs)} fallback = {len(faq_data['faqs'])} total")
+            logger.info(f"   - Special FAQs: {len(default_faqs)} (1 intro + 2 fallback)")
+            logger.info(f"   ⚠️ TESTING MODE: Limited to {MAX_CONTENT_FAQS} content + {len(default_faqs)} special = {len(faq_data['faqs'])} total videos")
             
             # Generate avatar videos using HeyGen (background task)
             if avatar_video_processor and presenter_photo_url:

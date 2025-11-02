@@ -305,6 +305,48 @@ RULES:
             logger.info(f"🏢 Company: {company_name}, QuDemo: {qudemo_id}")
             
             # STEP 0A: Check for special fallback queries
+            if question == "INTRO_VIDEO":
+                logger.info(f"🎬 Intro video request detected - checking for avatar video")
+                avatar_video_info = await self.check_for_avatar_video(
+                    company_name=company_name,
+                    qudemo_id=qudemo_id,
+                    question="INTRO_VIDEO",
+                    answer="Welcome! I'm here to guide you through this interactive demo"
+                )
+                
+                intro_answer = "Welcome! I'm here to guide you through this interactive demo. I'll be answering your questions and showing you everything you need to know. Feel free to ask me anything about our product, features, or how we can help solve your challenges. Let's get started!"
+                
+                if avatar_video_info and avatar_video_info.get('has_avatar_video'):
+                    logger.info(f"🎬 Using intro avatar video")
+                    return {
+                        'success': True,
+                        'answer': intro_answer,
+                        'timestamp': 0,
+                        'end': 0,
+                        'formatted_timestamp': 'AI Avatar',
+                        'video_url': '',
+                        'video_title': 'AI Avatar Presenter',
+                        'sources': [],
+                        'answer_source': 'intro',
+                        'has_avatar_video': True,
+                        'avatar_video_url': avatar_video_info.get('avatar_video_url'),
+                        'faq_id': 'faq_intro'
+                    }
+                else:
+                    logger.info(f"ℹ️ Intro video not yet generated")
+                    return {
+                        'success': True,
+                        'answer': intro_answer,
+                        'timestamp': 0,
+                        'end': 0,
+                        'formatted_timestamp': '',
+                        'video_url': '',
+                        'video_title': '',
+                        'sources': [],
+                        'answer_source': 'intro',
+                        'has_avatar_video': False
+                    }
+            
             if question == "SALES_INQUIRY":
                 logger.info(f"🤝 Sales inquiry detected - checking for avatar video")
                 avatar_video_info = await self.check_for_avatar_video(

@@ -50,6 +50,7 @@ NEW ARCHITECTURE (Per-Video Generation with Validation + CACHED ANSWERS):
 
 import os
 import json
+import re
 import logging
 from typing import Dict, List, Optional, Any
 import openai
@@ -71,6 +72,221 @@ class GCSQAService:
         self.direct_qa = DirectTranscriptQA()
         self.document_processor = DocumentProcessor()
     
+    def get_faqs(self, company_name: str, qudemo_id: str) -> Optional[Dict[str, Any]]:
+        """Get FAQs from GCS for avatar video generation"""
+        try:
+            logger.info(f"📖 Getting FAQs for {company_name}/{qudemo_id}")
+            
+            # Get company bucket
+            bucket_name = f"qudemo-{company_name.lower().replace(' ', '-')}"
+            bucket = self.gcs_service.client.bucket(bucket_name)
+            
+            # Get FAQs file
+            blob = bucket.blob(f"{company_name}/{qudemo_id}/faqs.json")
+            
+            if not blob.exists():
+                logger.warning(f"⚠️ No FAQs found for {company_name}/{qudemo_id}")
+                return None
+            
+            # Download and parse FAQs
+            content = blob.download_as_text()
+            faqs_data = json.loads(content)
+            
+            logger.info(f"✅ Retrieved {len(faqs_data.get('faqs', []))} FAQs from GCS")
+            return faqs_data
+            
+        except Exception as e:
+            logger.error(f"❌ Error getting FAQs: {e}")
+            return None
+    
+    async def check_for_avatar_video(self, company_name: str, qudemo_id: str, question: str, answer: str) -> Dict[str, Any]:
+        """Check if there's an avatar video for this question/answer"""
+        try:
+            logger.info(f"🎬 Checking for avatar video for question: {question[:50]}...")
+            
+            # Get FAQs from GCS
+            bucket_name = f"qudemo-{company_name.lower().replace(' ', '-')}"
+            bucket = self.gcs_service.client.bucket(bucket_name)
+            
+            # Try to fetch FAQs
+            try:
+                blob = bucket.blob(f"{company_name}/{qudemo_id}/faqs.json")
+                if not blob.exists():
+                    logger.info(f"ℹ️ No FAQs file found - no avatar videos available")
+                    return None
+                
+                faqs_content = blob.download_as_text()
+                faqs_data = json.loads(faqs_content)
+                
+                if not faqs_data or 'faqs' not in faqs_data:
+                    logger.info(f"ℹ️ No FAQs data - no avatar videos available")
+                    return None
+                
+                faqs = faqs_data['faqs']
+                logger.info(f"📊 Found {len(faqs)} FAQs to check")
+                
+                best_match = None
+                best_score = 0.0
+                
+                # PRIORITY 1: Check for exact match on special fallback questions
+                if question in ["NO_ANSWER_FOUND", "SALES_INQUIRY"]:
+                    for faq in faqs:
+                        if faq.get('question', '') == question:
+                            best_match = faq
+                            best_score = 1.0
+                            break
+                    
+                    if best_match:
+                        logger.info(f"✅ Found exact fallback match")
+                
+                # PRIORITY 2: Check for exact question match (for suggested questions)
+                if not best_match:
+                    for faq in faqs:
+                        faq_question = faq.get('question', '')
+                        if question.strip().lower() == faq_question.strip().lower():
+                            best_match = faq
+                            best_score = 1.0
+                            logger.info(f"🎯 EXACT question match found: {faq_question}")
+                            break
+                
+                # PRIORITY 3: Use OpenAI LLM for intelligent semantic matching
+                if not best_match:
+                    logger.info(f"🤖 Using OpenAI LLM for semantic matching...")
+                    
+                    try:
+                        # Get OpenAI client
+                        from openai import OpenAI
+                        openai_api_key = os.getenv('OPENAI_API_KEY')
+                        
+                        if not openai_api_key:
+                            logger.error("❌ OpenAI API key not found - falling back to no match")
+                        else:
+                            openai_client = OpenAI(api_key=openai_api_key)
+                            
+                            # Build FAQ list for LLM
+                            faq_list = []
+                            for i, faq in enumerate(faqs):
+                                faq_list.append(f"{i+1}. Q: {faq.get('question', '')}\n   A: {faq.get('answer', '')[:150]}...")
+                            
+                            faq_text = "\n\n".join(faq_list)
+                            
+                            # Ask LLM to find the best match
+                            prompt = f"""You are matching a user's question to a list of FAQs.
+
+USER QUESTION: "{question}"
+USER ANSWER CONTEXT: "{answer[:200]}"
+
+AVAILABLE FAQs:
+{faq_text}
+
+TASK: Determine which FAQ (if any) best matches the user's question semantically.
+
+RESPOND IN JSON FORMAT:
+{{
+  "match_found": true/false,
+  "faq_number": <number 1-{len(faqs)} or null>,
+  "confidence": <0-100>,
+  "reasoning": "brief explanation"
+}}
+
+RULES:
+- Consider semantic meaning, not just exact words
+- If confidence < 60%, set match_found to false
+- Only match if the questions are truly asking the same thing"""
+
+                            response = openai_client.chat.completions.create(
+                                model="gpt-4o-mini",
+                                messages=[
+                                    {"role": "system", "content": "You are an expert at semantic question matching. Always respond with valid JSON."},
+                                    {"role": "user", "content": prompt}
+                                ],
+                                temperature=0.1,
+                                max_tokens=200
+                            )
+                            
+                            result_text = response.choices[0].message.content.strip()
+                            logger.info(f"🤖 LLM response: {result_text}")
+                            
+                            # Parse JSON response (json and re already imported at module level)
+                            # Extract JSON from markdown code blocks if present
+                            json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', result_text, re.DOTALL)
+                            if json_match:
+                                result_text = json_match.group(1)
+                            
+                            result = json.loads(result_text)
+                            
+                            if result.get('match_found') and result.get('faq_number'):
+                                faq_idx = result['faq_number'] - 1  # Convert to 0-based index
+                                if 0 <= faq_idx < len(faqs):
+                                    best_match = faqs[faq_idx]
+                                    best_score = result.get('confidence', 70) / 100.0
+                                    logger.info(f"✅ LLM found match: FAQ #{result['faq_number']} with {result['confidence']}% confidence")
+                                    logger.info(f"💡 Reasoning: {result.get('reasoning', 'N/A')}")
+                            else:
+                                logger.info(f"ℹ️ LLM found no good match (confidence too low or no semantic match)")
+                                
+                    except Exception as llm_error:
+                        logger.error(f"❌ Error using LLM for matching: {llm_error}")
+                        import traceback
+                        logger.error(f"❌ Traceback: {traceback.format_exc()}")
+                
+                # Check if we found a match
+                if best_match:
+                    logger.info(f"✅ Found matching FAQ with {best_score*100:.1f}% similarity")
+                    logger.info(f"🎬 FAQ ID: {best_match['id']}")
+                    
+                    # Check if avatar video exists in database via Node.js backend
+                    import requests
+                    node_api_url = os.getenv('NODE_API_BASE_URL', 'http://localhost:5000')
+                    
+                    try:
+                        # Use internal query to fetch avatar video
+                        from supabase import create_client
+                        supabase_url = os.getenv('SUPABASE_URL')
+                        supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+                        
+                        if supabase_url and supabase_key:
+                            supabase = create_client(supabase_url, supabase_key)
+                            
+                            result = supabase.table('avatar_videos').select('*').eq(
+                                'qudemo_id', qudemo_id
+                            ).eq(
+                                'faq_id', best_match['id']
+                            ).eq(
+                                'status', 'completed'
+                            ).single().execute()
+                            
+                            if result.data:
+                                avatar_video = result.data
+                                logger.info(f"🎬 Found avatar video: {avatar_video.get('video_url', '')}")
+                                
+                                return {
+                                    'has_avatar_video': True,
+                                    'avatar_video_url': avatar_video.get('video_url'),
+                                    'faq_id': best_match['id'],
+                                    'faq_question': best_match['question'],
+                                    'faq_answer': best_match['answer'],
+                                    'match_score': best_score
+                                }
+                            else:
+                                logger.info(f"⚠️ Avatar video not yet generated for FAQ: {best_match['id']}")
+                                return None
+                                
+                    except Exception as db_error:
+                        logger.error(f"❌ Error checking avatar video in database: {db_error}")
+                        return None
+                else:
+                    logger.info(f"ℹ️ No matching FAQ found (best match: {best_score*100:.1f}%)")
+                    return None
+                    
+            except Exception as gcs_error:
+                logger.error(f"❌ Error fetching FAQs from GCS: {gcs_error}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Error checking for avatar video: {e}")
+            return None
+    
     async def ask_question(self, question: str, company_name: str, qudemo_id: str) -> Dict[str, Any]:
         """
         Answer a question using transcript data from Google Cloud Storage
@@ -88,7 +304,49 @@ class GCSQAService:
             logger.info(f"❓ Processing question: {question}")
             logger.info(f"🏢 Company: {company_name}, QuDemo: {qudemo_id}")
             
-            # STEP 0: Check for CACHED answer (suggested questions) - INSTANT!
+            # STEP 0A: Check for special fallback queries
+            if question == "SALES_INQUIRY":
+                logger.info(f"🤝 Sales inquiry detected - checking for avatar video")
+                avatar_video_info = await self.check_for_avatar_video(
+                    company_name=company_name,
+                    qudemo_id=qudemo_id,
+                    question="SALES_INQUIRY",
+                    answer="I'd be delighted to connect you with our sales team"
+                )
+                
+                sales_answer = "I'd be delighted to connect you with our sales team! They're experts at understanding your specific needs and can provide personalized guidance. Please click on the 'Book a Meeting' button below to schedule a convenient time to chat with one of our team members. We look forward to speaking with you!"
+                
+                if avatar_video_info and avatar_video_info.get('has_avatar_video'):
+                    logger.info(f"🎬 Using fallback avatar video for sales inquiry")
+                    return {
+                        'success': True,
+                        'answer': sales_answer,
+                        'timestamp': 0,
+                        'end': 0,
+                        'formatted_timestamp': 'AI Avatar',
+                        'video_url': '',
+                        'video_title': 'AI Avatar Presenter',
+                        'sources': [],
+                        'answer_source': 'fallback_sales',
+                        'has_avatar_video': True,
+                        'avatar_video_url': avatar_video_info.get('avatar_video_url'),
+                        'faq_id': 'faq_fallback_sales'
+                    }
+                else:
+                    return {
+                        'success': True,
+                        'answer': sales_answer,
+                        'timestamp': 0,
+                        'end': 0,
+                        'formatted_timestamp': '',
+                        'video_url': '',
+                        'video_title': '',
+                        'sources': [],
+                        'answer_source': 'fallback_sales',
+                        'has_avatar_video': False
+                    }
+            
+            # STEP 0B: Check for CACHED answer (suggested questions) - INSTANT!
             logger.info(f"⚡ Checking for cached answer (suggested questions)...")
             cached_answer = self.gcs_service.get_cached_answer_for_suggested_question(
                 company_name, qudemo_id, question
@@ -96,22 +354,57 @@ class GCSQAService:
             
             if cached_answer and cached_answer.get('is_cached'):
                 logger.info(f"⚡⚡⚡ INSTANT CACHED ANSWER FOUND! (No LLM call needed)")
-                return {
-                    'success': True,  # REQUIRED for endpoint
-                    'answer': cached_answer.get('answer', ''),
-                    'timestamp': cached_answer.get('timestamp', 0),
-                    'formatted_timestamp': cached_answer.get('formatted_timestamp', '00:00'),
-                    'confidence': 1.0,
-                    'sources': [{
-                        'text': cached_answer.get('answer', '')[:500],
-                        'type': 'video',
-                        'relevance_score': 1.0
-                    }],
-                    'video_url': cached_answer.get('video_url', ''),
-                    'video_title': cached_answer.get('video_title', 'Video'),
-                    'is_cached': True,  # Flag for frontend to know this was instant
-                    'cache_hit': True
-                }
+                
+                # Check for avatar video even for cached answers
+                avatar_video_info = await self.check_for_avatar_video(
+                    company_name=company_name,
+                    qudemo_id=qudemo_id,
+                    question=question,
+                    answer=cached_answer.get('answer', '')
+                )
+                
+                if avatar_video_info and avatar_video_info.get('has_avatar_video'):
+                    logger.info(f"🎬 Found avatar video for cached answer!")
+                    logger.info(f"✅ Using FAQ answer from video: {avatar_video_info.get('faq_answer', '')[:100]}...")
+                    faq_answer = avatar_video_info.get('faq_answer', cached_answer.get('answer', ''))
+                    return {
+                        'success': True,
+                        'answer': faq_answer,  # Use FAQ answer that matches the video
+                        'timestamp': 0,
+                        'formatted_timestamp': 'AI Avatar',
+                        'confidence': 1.0,
+                        'sources': [{
+                            'text': faq_answer[:500],
+                            'type': 'video',
+                            'relevance_score': 1.0
+                        }],
+                        'video_url': '',
+                        'video_title': 'AI Avatar Presenter',
+                        'is_cached': True,
+                        'cache_hit': True,
+                        'has_avatar_video': True,
+                        'avatar_video_url': avatar_video_info.get('avatar_video_url'),
+                        'faq_id': avatar_video_info.get('faq_id')
+                    }
+                else:
+                    # No avatar video, return with original video URL
+                    return {
+                        'success': True,  # REQUIRED for endpoint
+                        'answer': cached_answer.get('answer', ''),
+                        'timestamp': cached_answer.get('timestamp', 0),
+                        'formatted_timestamp': cached_answer.get('formatted_timestamp', '00:00'),
+                        'confidence': 1.0,
+                        'sources': [{
+                            'text': cached_answer.get('answer', '')[:500],
+                            'type': 'video',
+                            'relevance_score': 1.0
+                        }],
+                        'video_url': cached_answer.get('video_url', ''),
+                        'video_title': cached_answer.get('video_title', 'Video'),
+                        'is_cached': True,  # Flag for frontend to know this was instant
+                        'cache_hit': True,
+                        'has_avatar_video': False
+                    }
             else:
                 logger.info(f"⚠️ No cached answer found, proceeding with normal search...")
             
@@ -390,8 +683,8 @@ class GCSQAService:
                 return return_data
                 
             elif has_video_results:
-                # CASE 2: Found only in video - show video + chat answer
-                logger.info("🎥 Found only in video - showing video with chat answer")
+                # CASE 2: Found only in video - check for avatar video first
+                logger.info("🎥 Found only in video - checking for avatar video...")
                 
                 if video_answer_data:
                     # Store the Q&A answer
@@ -402,21 +695,49 @@ class GCSQAService:
                         answer_data=video_answer_data
                     )
                     
-                    return {
-                        'success': True,
-                        'answer': video_answer_data.get('answer', ''),
-                        'timestamp': video_answer_data.get('timestamp', 0),
-                        'end': video_answer_data.get('end', 0),
-                        'formatted_timestamp': video_answer_data.get('formatted_timestamp', ''),
-                        'video_url': video_answer_data.get('video_url', ''),
-                        'video_title': video_answer_data.get('video_title', ''),
-                        'sources': video_answer_data.get('sources', []),
-                        'answer_source': 'video_only'
-                    }
+                    # Check for avatar video
+                    avatar_video_info = await self.check_for_avatar_video(
+                        company_name=company_name,
+                        qudemo_id=qudemo_id,
+                        question=question,
+                        answer=video_answer_data.get('answer', '')
+                    )
+                    
+                    if avatar_video_info and avatar_video_info.get('has_avatar_video'):
+                        logger.info(f"🎬 Found avatar video for video answer - using AI avatar instead of timestamp!")
+                        logger.info(f"✅ Using FAQ answer from video: {avatar_video_info.get('faq_answer', '')[:100]}...")
+                        return {
+                            'success': True,
+                            'answer': avatar_video_info.get('faq_answer', video_answer_data.get('answer', '')),  # Use FAQ answer that matches the video
+                            'timestamp': 0,
+                            'end': 0,
+                            'formatted_timestamp': 'AI Avatar',
+                            'video_url': '',
+                            'video_title': 'AI Avatar Presenter',
+                            'sources': video_answer_data.get('sources', []),
+                            'answer_source': 'video_with_avatar',
+                            'has_avatar_video': True,
+                            'avatar_video_url': avatar_video_info.get('avatar_video_url'),
+                            'faq_id': avatar_video_info.get('faq_id')
+                        }
+                    else:
+                        # No avatar video, show original video with timestamp
+                        return {
+                            'success': True,
+                            'answer': video_answer_data.get('answer', ''),
+                            'timestamp': video_answer_data.get('timestamp', 0),
+                            'end': video_answer_data.get('end', 0),
+                            'formatted_timestamp': video_answer_data.get('formatted_timestamp', ''),
+                            'video_url': video_answer_data.get('video_url', ''),
+                            'video_title': video_answer_data.get('video_title', ''),
+                            'sources': video_answer_data.get('sources', []),
+                            'answer_source': 'video_only',
+                            'has_avatar_video': False
+                        }
                 
             elif has_document_results:
-                # CASE 3: Found only in document - show only chat answer (no video)
-                logger.info("📄 Found only in document - showing text answer only")
+                # CASE 3: Found only in document - show only chat answer (no video, or avatar video if available)
+                logger.info("📄 Found only in document - checking for avatar video...")
                 
                 if document_answer_data:
                     # Store the Q&A answer
@@ -427,22 +748,51 @@ class GCSQAService:
                         answer_data=document_answer_data
                     )
                     
-                    return {
-                        'success': True,
-                        'answer': document_answer_data.get('answer', ''),
-                        'timestamp': 0,  # Documents don't have timestamps
-                        'end': 0,
-                        'formatted_timestamp': 'Document',
-                        'video_url': '',  # No video for document answers
-                        'video_title': 'Document Content',
-                        'confidence': document_answer_data.get('confidence', 0.8),
-                        'sources': document_answer_data.get('sources', []),
-                        'answer_source': 'document_only'
-                    }
+                    # Check for avatar video
+                    avatar_video_info = await self.check_for_avatar_video(
+                        company_name=company_name,
+                        qudemo_id=qudemo_id,
+                        question=question,
+                        answer=document_answer_data.get('answer', '')
+                    )
+                    
+                    if avatar_video_info and avatar_video_info.get('has_avatar_video'):
+                        logger.info(f"🎬 Found avatar video for document answer!")
+                        logger.info(f"✅ Using FAQ answer from video: {avatar_video_info.get('faq_answer', '')[:100]}...")
+                        return {
+                            'success': True,
+                            'answer': avatar_video_info.get('faq_answer', document_answer_data.get('answer', '')),  # Use FAQ answer that matches the video
+                            'timestamp': 0,
+                            'end': 0,
+                            'formatted_timestamp': 'AI Avatar',
+                            'video_url': '',  # No original video
+                            'video_title': 'AI Avatar Presenter',
+                            'confidence': document_answer_data.get('confidence', 0.8),
+                            'sources': document_answer_data.get('sources', []),
+                            'answer_source': 'document_with_avatar',
+                            'has_avatar_video': True,
+                            'avatar_video_url': avatar_video_info.get('avatar_video_url'),
+                            'faq_id': avatar_video_info.get('faq_id')
+                        }
+                    else:
+                        logger.info(f"ℹ️ No avatar video found for document answer")
+                        return {
+                            'success': True,
+                            'answer': document_answer_data.get('answer', ''),
+                            'timestamp': 0,
+                            'end': 0,
+                            'formatted_timestamp': 'Document',
+                            'video_url': '',  # No video for document answers
+                            'video_title': 'Document Content',
+                            'confidence': document_answer_data.get('confidence', 0.8),
+                            'sources': document_answer_data.get('sources', []),
+                            'answer_source': 'document_only',
+                            'has_avatar_video': False
+                        }
             
             elif has_website_results:
-                # CASE 4: Found only in website - show only chat answer (no video)
-                logger.info("🌐 Found only in website - showing text answer only")
+                # CASE 4: Found only in website - show only chat answer (no video, or avatar video if available)
+                logger.info("🌐 Found only in website - checking for avatar video...")
                 
                 if website_answer_data:
                     # Store the Q&A answer
@@ -453,33 +803,91 @@ class GCSQAService:
                         answer_data=website_answer_data
                     )
                     
-                    return {
-                        'success': True,
-                        'answer': website_answer_data.get('answer', ''),
-                        'timestamp': 0,  # Websites don't have timestamps
-                        'end': 0,
-                        'formatted_timestamp': 'Website',
-                        'video_url': '',  # No video for website answers
-                        'video_title': 'Website Content',
-                        'confidence': website_answer_data.get('confidence', 0.8),
-                        'sources': website_answer_data.get('sources', []),
-                        'answer_source': 'website_only'
-                    }
+                    # Check for avatar video
+                    avatar_video_info = await self.check_for_avatar_video(
+                        company_name=company_name,
+                        qudemo_id=qudemo_id,
+                        question=question,
+                        answer=website_answer_data.get('answer', '')
+                    )
+                    
+                    if avatar_video_info and avatar_video_info.get('has_avatar_video'):
+                        logger.info(f"🎬 Found avatar video for website answer!")
+                        logger.info(f"✅ Using FAQ answer from video: {avatar_video_info.get('faq_answer', '')[:100]}...")
+                        return {
+                            'success': True,
+                            'answer': avatar_video_info.get('faq_answer', website_answer_data.get('answer', '')),  # Use FAQ answer that matches the video
+                            'timestamp': 0,
+                            'end': 0,
+                            'formatted_timestamp': 'AI Avatar',
+                            'video_url': '',  # No original video
+                            'video_title': 'AI Avatar Presenter',
+                            'confidence': website_answer_data.get('confidence', 0.8),
+                            'sources': website_answer_data.get('sources', []),
+                            'answer_source': 'website_with_avatar',
+                            'has_avatar_video': True,
+                            'avatar_video_url': avatar_video_info.get('avatar_video_url'),
+                            'faq_id': avatar_video_info.get('faq_id')
+                        }
+                    else:
+                        logger.info(f"ℹ️ No avatar video found for website answer")
+                        return {
+                            'success': True,
+                            'answer': website_answer_data.get('answer', ''),
+                            'timestamp': 0,
+                            'end': 0,
+                            'formatted_timestamp': 'Website',
+                            'video_url': '',  # No video for website answers
+                            'video_title': 'Website Content',
+                            'confidence': website_answer_data.get('confidence', 0.8),
+                            'sources': website_answer_data.get('sources', []),
+                            'answer_source': 'website_only',
+                            'has_avatar_video': False
+                        }
             
             else:
-                # CASE 5: Found in none - return no results
+                # CASE 5: Found in none - check for fallback avatar video
                 logger.info("❌ No relevant information found in any source")
-                return {
-                    'success': False,
-                    'answer': 'No relevant information found in the available content.',
-                    'timestamp': 0,
-                    'end': 0,
-                    'formatted_timestamp': '',
-                    'video_url': '',
-                    'video_title': '',
-                    'sources': [],
-                    'answer_source': 'none'
-                }
+                
+                # Check for "no answer" fallback avatar
+                avatar_video_info = await self.check_for_avatar_video(
+                    company_name=company_name,
+                    qudemo_id=qudemo_id,
+                    question="NO_ANSWER_FOUND",  # Special fallback identifier
+                    answer="I apologize, but I don't have specific information"
+                )
+                
+                fallback_answer = "I apologize, but I don't have specific information about that in our knowledge base. However, I'd be happy to connect you with our team who can help answer your questions in detail. Please use the 'Book a Meeting' option below to schedule a call with our experts."
+                
+                if avatar_video_info and avatar_video_info.get('has_avatar_video'):
+                    logger.info(f"🎬 Using fallback avatar video for 'no answer' scenario")
+                    return {
+                        'success': True,
+                        'answer': fallback_answer,
+                        'timestamp': 0,
+                        'end': 0,
+                        'formatted_timestamp': 'AI Avatar',
+                        'video_url': '',
+                        'video_title': 'AI Avatar Presenter',
+                        'sources': [],
+                        'answer_source': 'fallback_no_answer',
+                        'has_avatar_video': True,
+                        'avatar_video_url': avatar_video_info.get('avatar_video_url'),
+                        'faq_id': 'faq_fallback_no_answer'
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'answer': fallback_answer,
+                        'timestamp': 0,
+                        'end': 0,
+                        'formatted_timestamp': '',
+                        'video_url': '',
+                        'video_title': '',
+                        'sources': [],
+                        'answer_source': 'none',
+                        'has_avatar_video': False
+                    }
             
             # This should not be reached due to the if/elif/else structure above
             # But keeping as fallback for safety

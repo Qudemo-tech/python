@@ -79,6 +79,18 @@ class GoogleCloudStorageService:
                 # Create the bucket
                 bucket = self.client.create_bucket(bucket_name)
                 logger.info(f"✅ Created company bucket: {bucket_name}")
+                
+                # Make bucket publicly readable for all objects
+                try:
+                    policy = bucket.get_iam_policy(requested_policy_version=3)
+                    policy.bindings.append({
+                        "role": "roles/storage.objectViewer",
+                        "members": {"allUsers"}
+                    })
+                    bucket.set_iam_policy(policy)
+                    logger.info(f"🌍 Made bucket publicly readable: {bucket_name}")
+                except Exception as policy_error:
+                    logger.warning(f"⚠️ Could not set public access on bucket: {policy_error}")
             else:
                 logger.info(f"✅ Connected to existing company bucket: {bucket_name}")
             
@@ -139,8 +151,8 @@ class GoogleCloudStorageService:
             # Get company-specific bucket
             bucket = self._get_company_bucket(company_name)
             
-            # Create file path: qudemo_id/transcript.json (within company bucket)
-            file_path = f"{qudemo_id}/transcript.json"
+            # Create file path: company_name/qudemo_id/transcript.json (within company bucket)
+            file_path = f"{company_name}/{qudemo_id}/transcript.json"
             
             # Get existing transcript data or create new
             existing_data = self.get_video_transcript(company_name, qudemo_id) or {
@@ -189,8 +201,8 @@ class GoogleCloudStorageService:
             # Get company-specific bucket
             bucket = self._get_company_bucket(company_name)
             
-            # Create file path: qudemo_id/transcript.json (within company bucket)
-            file_path = f"{qudemo_id}/transcript.json"
+            # Create file path: company_name/qudemo_id/transcript.json (within company bucket)
+            file_path = f"{company_name}/{qudemo_id}/transcript.json"
             blob = bucket.blob(file_path)
             
             if not blob.exists():
@@ -206,6 +218,34 @@ class GoogleCloudStorageService:
             
         except Exception as e:
             logger.error(f"❌ Failed to retrieve transcript: {e}")
+            return None
+    
+    def get_faqs(self, company_name: str, qudemo_id: str) -> Optional[List[Dict[str, Any]]]:
+        """Retrieve FAQs data from Google Cloud Storage with company/qudemo structure"""
+        try:
+            # Get company-specific bucket
+            bucket = self._get_company_bucket(company_name)
+            
+            # Create file path: company_name/qudemo_id/faqs.json
+            file_path = f"{company_name}/{qudemo_id}/faqs.json"
+            blob = bucket.blob(file_path)
+            
+            if not blob.exists():
+                logger.warning(f"⚠️ FAQs not found: {file_path}")
+                return None
+            
+            # Download and parse JSON
+            content = blob.download_as_text()
+            faqs_data = json.loads(content)
+            
+            # Extract the 'faqs' array from the structure
+            faqs_list = faqs_data.get('faqs', []) if isinstance(faqs_data, dict) else faqs_data
+            
+            logger.info(f"✅ Retrieved {len(faqs_list)} FAQs for {company_name}/{qudemo_id} from GCS")
+            return faqs_list
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to retrieve FAQs: {e}")
             return None
     
     def store_qa_answer(self, company_name: str, qudemo_id: str, 
@@ -312,6 +352,34 @@ class GoogleCloudStorageService:
         except Exception as e:
             logger.error(f"❌ Failed to store suggested questions with metadata: {e}")
             return False
+    
+    def get_suggested_questions_with_metadata(self, company_name: str, qudemo_id: str) -> Optional[Dict[str, Any]]:
+        """Get stored suggested questions WITH FULL METADATA (questions + answers + video info)"""
+        try:
+            logger.info(f"🔍 GETTING suggested questions with metadata for company: '{company_name}', qudemo: '{qudemo_id}'")
+            
+            # Get company-specific bucket
+            bucket = self._get_company_bucket(company_name)
+            
+            # Create file path: qudemo_id/suggested_questions.json (within company bucket)
+            file_path = f"{qudemo_id}/suggested_questions.json"
+            
+            # Check if file exists
+            blob = bucket.blob(file_path)
+            if not blob.exists():
+                logger.warning(f"⚠️ No stored suggested questions found for {company_name}/{qudemo_id}")
+                return None
+            
+            # Download and parse the file
+            content = blob.download_as_text()
+            suggested_questions_data = json.loads(content)
+            
+            logger.info(f"✅ Retrieved suggested questions with metadata from GCS")
+            return suggested_questions_data
+            
+        except Exception as e:
+            logger.error(f"❌ Error retrieving suggested questions with metadata: {e}")
+            return None
     
     def get_suggested_questions(self, company_name: str, qudemo_id: str) -> Optional[List[str]]:
         """Get stored suggested questions with INTELLIGENT SHUFFLING for multiple videos"""

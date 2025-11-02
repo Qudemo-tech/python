@@ -7,8 +7,11 @@ Optimized for Q&A, video processing, and web scraping
 import os
 import logging
 import json
+import asyncio
 from typing import List, Optional, Dict
 from datetime import datetime
+from openai import OpenAI
+import requests
 
 # FastAPI imports
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
@@ -21,11 +24,14 @@ import shutil
 # Enhanced components
 # from final_gemini_scraper import FinalGeminiScraper  # Removed - requires Playwright vds
 from gcs_qa_service import GCSQAService
+from google_cloud_storage_service import GoogleCloudStorageService
 from simple_gemini_transcriber import SimpleGeminiTranscriber
 from document_processor import DocumentProcessor
 from company_api import router as company_router
 from company_bucket_service import initialize_company_bucket_service, get_company_bucket_service
 from website_scraper import WebsiteScraper
+from heygen_service import HeyGenService
+from avatar_video_processor import AvatarVideoProcessor
 # from enhanced_scraper_with_failure_handling import initialize_enhanced_scraper, get_enhanced_scraper
 
 # New universal scraper system
@@ -49,11 +55,14 @@ simple_transcriber = None
 document_processor = None
 company_bucket_service = None
 website_scraper = None
+heygen_service = None
+avatar_video_processor = None
+openai_client = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for FastAPI"""
-    global loom_processor_gcs, gcs_qa_service, simple_transcriber, document_processor, company_bucket_service, website_scraper
+    global loom_processor_gcs, gcs_qa_service, simple_transcriber, document_processor, company_bucket_service, website_scraper, heygen_service, avatar_video_processor, openai_client
     
     try:
         logger.info("🚀 Starting Enhanced QuDemo Python Backend (GCS-based)...")
@@ -140,6 +149,35 @@ async def lifespan(app: FastAPI):
             logger.error(f"❌ Document Processor initialization error: {e}")
             document_processor = None
         
+        # Initialize HeyGen Service for AI Avatar Videos
+        try:
+            heygen_service = HeyGenService()
+            logger.info("✅ HeyGen Service initialized (AI Avatar Videos)")
+            
+            # Initialize Avatar Video Processor
+            if heygen_service and gcs_qa_service:
+                # Get Supabase client for database updates
+                try:
+                    from supabase import create_client
+                    supabase_url = os.getenv('SUPABASE_URL')
+                    supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+                    supabase_client = create_client(supabase_url, supabase_key) if supabase_url and supabase_key else None
+                except:
+                    supabase_client = None
+                
+                avatar_video_processor = AvatarVideoProcessor(
+                    heygen_service=heygen_service,
+                    gcs_service=gcs_qa_service.gcs_service,
+                    supabase_client=supabase_client
+                )
+                logger.info("✅ Avatar Video Processor initialized")
+            else:
+                logger.warning("⚠️ Avatar Video Processor not initialized (missing dependencies)")
+        except Exception as e:
+            logger.error(f"❌ HeyGen Service initialization error: {e}")
+            heygen_service = None
+            avatar_video_processor = None
+        
         # Set GOOGLE_APPLICATION_CREDENTIALS if service account file exists
         if os.path.exists('service-account-key.json'):
             os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = 'service-account-key.json'
@@ -157,9 +195,21 @@ async def lifespan(app: FastAPI):
             logger.error(f"❌ Company Bucket Service initialization error: {e}")
             company_bucket_service = None
         
-        # Initialize GCS-based Loom Video Processor (NEW - Replaces Pinecone-based processor)
+        # Initialize OpenAI Client
         try:
             openai_api_key = os.getenv('OPENAI_API_KEY')
+            if openai_api_key:
+                openai_client = OpenAI(api_key=openai_api_key)
+                logger.info("✅ OpenAI Client initialized")
+            else:
+                logger.warning("⚠️ OpenAI API key not found - OpenAI features will be limited")
+                openai_client = None
+        except Exception as e:
+            logger.error(f"❌ OpenAI Client initialization error: {e}")
+            openai_client = None
+        
+        # Initialize GCS-based Loom Video Processor (NEW - Replaces Pinecone-based processor)
+        try:
             if openai_api_key:
                 loom_processor_gcs = LoomVideoProcessorGCS(
                     openai_api_key=openai_api_key
@@ -334,11 +384,20 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
         )
         
         if answer_result['success']:
-            # Fix branding: Replace "Q-Demo" with "Qudemo" in the answer
+            # Fix branding: Replace "Q-Demo" with "Qudemo" and fix "Chatwoot" spelling
             answer_text = answer_result['answer']
             answer_text = answer_text.replace("Q-Demo", "Qudemo")
             answer_text = answer_text.replace("Q-demo", "Qudemo")
             answer_text = answer_text.replace("q-demo", "Qudemo")
+            
+            # Fix Chatwoot spelling variations
+            answer_text = answer_text.replace("Chatwood", "Chatwoot")
+            answer_text = answer_text.replace("chatwood", "Chatwoot")
+            answer_text = answer_text.replace("Chat wood", "Chatwoot")
+            answer_text = answer_text.replace("chat wood", "Chatwoot")
+            answer_text = answer_text.replace("Chat Wood", "Chatwoot")
+            answer_text = answer_text.replace("Chatwot", "Chatwoot")
+            answer_text = answer_text.replace("chatwot", "Chatwoot")
             
             return {
                 'success': True,
@@ -356,7 +415,11 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
                 'video_title': answer_result.get('video_title', '') if gcs_qa_service else (answer_result.get('sources', [{}])[0].get('video_title', '') if answer_result.get('sources') else ''),
                 'timestamp': answer_result.get('timestamp', 0) if gcs_qa_service else (answer_result.get('timestamp', {}).get('start_time', 0) if answer_result.get('timestamp') else (answer_result.get('sources', [{}])[0].get('start_timestamp', 0) if answer_result.get('sources') else 0)),
                 'formatted_timestamp': answer_result.get('formatted_timestamp', '') if gcs_qa_service else (answer_result.get('timestamp', {}).get('formatted_start', '') if answer_result.get('timestamp') else ''),
-                'answer_source': 'gcs_transcript_search'
+                'answer_source': 'gcs_transcript_search',
+                # Avatar video fields for AI-generated video answers
+                'has_avatar_video': answer_result.get('has_avatar_video', False),
+                'avatar_video_url': answer_result.get('avatar_video_url', ''),
+                'faq_id': answer_result.get('faq_id', '')
             }
         else:
             # Check if this is a "no relevant content" case vs actual error
@@ -369,6 +432,12 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
                 no_content_msg = no_content_msg.replace("Q-Demo", "Qudemo")
                 no_content_msg = no_content_msg.replace("Q-demo", "Qudemo")
                 no_content_msg = no_content_msg.replace("q-demo", "Qudemo")
+                
+                # Fix Chatwoot spelling variations in error messages
+                no_content_msg = no_content_msg.replace("Chatwood", "Chatwoot")
+                no_content_msg = no_content_msg.replace("chatwood", "Chatwoot")
+                no_content_msg = no_content_msg.replace("Chat wood", "Chatwoot")
+                no_content_msg = no_content_msg.replace("chat wood", "Chatwoot")
                 
                 return {
                     'success': False,
@@ -392,6 +461,10 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
                 # Fix branding in error messages
                 fixed_error = error_message.replace("Q-Demo", "Qudemo").replace("Q-demo", "Qudemo").replace("q-demo", "Qudemo")
                 fixed_answer = answer_result.get('answer', '').replace("Q-Demo", "Qudemo").replace("Q-demo", "Qudemo").replace("q-demo", "Qudemo")
+                
+                # Fix Chatwoot spelling variations in error messages
+                fixed_error = fixed_error.replace("Chatwood", "Chatwoot").replace("chatwood", "Chatwoot").replace("Chat wood", "Chatwoot").replace("chat wood", "Chatwoot")
+                fixed_answer = fixed_answer.replace("Chatwood", "Chatwoot").replace("chatwood", "Chatwoot").replace("Chat wood", "Chatwoot").replace("chat wood", "Chatwoot")
                 
                 return {
                     'success': False,
@@ -451,20 +524,63 @@ async def generate_suggested_questions(company_name: str, qudemo_id: str):
 
 @app.get("/suggested-questions/{company_name}/{qudemo_id}")
 async def get_suggested_questions(company_name: str, qudemo_id: str):
-    """Get stored suggested questions for a QuDemo"""
+    """Get stored suggested questions for a QuDemo (from FAQs, excluding fallbacks)"""
     try:
         if not gcs_qa_service:
             raise HTTPException(status_code=500, detail="GCS Q&A service not available")
         
-        logger.info(f"📖 FETCHING STORED suggested questions for {company_name}/{qudemo_id}")
+        logger.info(f"📖 FETCHING FAQ questions for {company_name}/{qudemo_id}")
         
-        # Get stored suggested questions
+        # First, try to get FAQs (which include video FAQs + suggested question FAQs)
+        try:
+            faqs_data = gcs_qa_service.get_faqs(company_name, qudemo_id)
+            
+            if faqs_data and 'faqs' in faqs_data:
+                # Extract questions from FAQs, excluding fallback FAQs
+                faq_questions = [
+                    faq['question'] 
+                    for faq in faqs_data['faqs'] 
+                    if not faq.get('is_fallback', False) and faq.get('question') not in ['NO_ANSWER_FOUND', 'SALES_INQUIRY']
+                ]
+                
+                if faq_questions:
+                    logger.info(f"✅ Retrieved {len(faq_questions)} FAQ questions (excluding {len(faqs_data['faqs']) - len(faq_questions)} fallback FAQs)")
+                    
+                    # Fix branding
+                    fixed_questions = []
+                    for question in faq_questions:
+                        fixed_question = question.replace("Q-Demo", "Qudemo")
+                        fixed_question = fixed_question.replace("Q-demo", "Qudemo")
+                        fixed_question = fixed_question.replace("q-demo", "Qudemo")
+                        fixed_question = fixed_question.replace("Chatwood", "Chatwoot")
+                        fixed_question = fixed_question.replace("chatwood", "Chatwoot")
+                        fixed_question = fixed_question.replace("Chat wood", "Chatwoot")
+                        fixed_question = fixed_question.replace("chat wood", "Chatwoot")
+                        fixed_question = fixed_question.replace("Chat Wood", "Chatwoot")
+                        fixed_question = fixed_question.replace("Chatwot", "Chatwoot")
+                        fixed_question = fixed_question.replace("chatwot", "Chatwoot")
+                        fixed_questions.append(fixed_question)
+                    
+                    logger.info(f"✅ Returning {len(fixed_questions)} FAQ questions")
+                    return {
+                        "success": True,
+                        "questions": fixed_questions,
+                        "suggested_questions": fixed_questions  # For backward compatibility
+                    }
+        except Exception as faq_error:
+            logger.error(f"❌ Error retrieving FAQs: {faq_error}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+            logger.warning(f"⚠️ Falling back to old suggested questions format")
+        
+        # Fallback: Get old suggested questions if FAQs not available
+        logger.info(f"📖 Falling back to old suggested questions format")
         stored_questions = gcs_qa_service.gcs_service.get_suggested_questions(company_name, qudemo_id)
         
         if stored_questions:
             logger.info(f"✅ Retrieved {len(stored_questions)} stored suggested questions (PRE-SHUFFLED if multiple videos)")
             
-            # Fix branding: Replace "Q-Demo" with "Qudemo" in all questions
+            # Fix branding: Replace "Q-Demo" with "Qudemo" and fix "Chatwoot" spelling in all questions
             # This is especially important for the welcome Qudemo (ID: 48b29bfb-b290-4669-9f25-ee411cdb1d9d)
             fixed_questions = []
             for question in stored_questions:
@@ -472,6 +588,16 @@ async def get_suggested_questions(company_name: str, qudemo_id: str):
                 fixed_question = question.replace("Q-Demo", "Qudemo")
                 fixed_question = fixed_question.replace("Q-demo", "Qudemo")
                 fixed_question = fixed_question.replace("q-demo", "Qudemo")
+                
+                # Fix Chatwoot spelling variations
+                fixed_question = fixed_question.replace("Chatwood", "Chatwoot")
+                fixed_question = fixed_question.replace("chatwood", "Chatwoot")
+                fixed_question = fixed_question.replace("Chat wood", "Chatwoot")
+                fixed_question = fixed_question.replace("chat wood", "Chatwoot")
+                fixed_question = fixed_question.replace("Chat Wood", "Chatwoot")
+                fixed_question = fixed_question.replace("Chatwot", "Chatwoot")
+                fixed_question = fixed_question.replace("chatwot", "Chatwoot")
+                
                 fixed_questions.append(fixed_question)
             
             logger.info(f"✅ Returning {len(fixed_questions)} questions for {company_name}/{qudemo_id}")
@@ -795,6 +921,55 @@ async def process_video_enhanced(company_name: str, qudemo_id: str, request: QuD
         logger.error(f"❌ Enhanced video processing failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/upload-presenter-photo")
+async def upload_presenter_photo(
+    presenterPhoto: UploadFile = File(...),
+    qudemoId: str = Form(...),
+    companyName: str = Form(...)
+):
+    """Upload presenter photo to GCS and return public URL"""
+    try:
+        logger.info(f"📸 Uploading presenter photo for QuDemo: {qudemoId}, Company: {companyName}")
+        
+        # Read file content
+        file_content = await presenterPhoto.read()
+        logger.info(f"📊 Read {len(file_content)} bytes from file: {presenterPhoto.filename}")
+        
+        # Validate file size (max 5MB)
+        if len(file_content) > 5 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File size exceeds 5MB limit")
+        
+        # Upload to GCS
+        if gcs_qa_service:
+            file_path = f"{companyName}/{qudemoId}/presenter_photo.jpg"
+            
+            # Get company bucket
+            bucket = gcs_qa_service.gcs_service.client.bucket(f"qudemo-{companyName.lower().replace(' ', '-')}")
+            if not bucket.exists():
+                bucket = gcs_qa_service.gcs_service.client.create_bucket(bucket.name)
+                logger.info(f"✅ Created bucket for company: {bucket.name}")
+            
+            # Upload file
+            blob = bucket.blob(file_path)
+            blob.upload_from_string(file_content, content_type=presenterPhoto.content_type or 'image/jpeg')
+            blob.make_public()
+            
+            public_url = blob.public_url
+            logger.info(f"✅ Presenter photo uploaded successfully: {public_url}")
+            
+            return {
+                "success": True,
+                "presenter_photo_url": public_url,
+                "qudemo_id": qudemoId,
+                "company_name": companyName
+            }
+        else:
+            raise HTTPException(status_code=500, detail="GCS service not initialized")
+            
+    except Exception as e:
+        logger.error(f"❌ Error uploading presenter photo: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/process-document")
 async def process_document(
     file: UploadFile = File(...),
@@ -839,6 +1014,12 @@ async def process_document(
                 logger.info(f"✅ Generated {len(suggested_questions)} suggested questions after document processing")
             except Exception as e:
                 logger.error(f"❌ Error generating suggested questions after document processing: {e}")
+            
+            # Check if presenter photo exists and generate FAQs for avatar videos
+            try:
+                await generate_faq_for_avatar_videos(company_name, qudemo_id)
+            except Exception as faq_error:
+                logger.error(f"❌ Error generating FAQs for avatar videos: {faq_error}")
             
             # Notify Node.js backend of successful processing
             try:
@@ -1308,12 +1489,14 @@ async def process_qudemo_content(company_name: str, qudemo_id: str, request: QuD
             notification_data = {
                 'qudemo_id': qudemo_id,
                 'company_name': company_name,
+                'success': True,  # ⚠️ CRITICAL: Node.js backend checks this field!
                 'processing_complete': True,
                 'total_chunks_stored': total_chunks,
                 'videos': [video['url'] for video in successful_content['videos']],
                 'websites': [website['url'] for website in successful_content['websites']],
                 'videos_processed': len(successful_content['videos']),
                 'website_processed': len(successful_content['websites']),
+                'documents_processed': 0,  # Add this for completeness
                 'processing_order': processing_order,
                 # Add error information for the frontend
                 'processing_errors': processing_errors,
@@ -1470,6 +1653,154 @@ async def get_gcs_status():
         logger.error(f"❌ Error getting GCS status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/generate-faqs/{company_name}/{qudemo_id}")
+async def manually_generate_faqs(company_name: str, qudemo_id: str):
+    """Manually generate FAQs for an existing QuDemo (useful for QuDemos created before FAQ feature)"""
+    try:
+        logger.info(f"🔨 Manually generating FAQs for: {company_name}/{qudemo_id}")
+        
+        # Generate FAQs (function fetches presenter photo internally)
+        result = await generate_faq_for_avatar_videos(
+            company_name=company_name,
+            qudemo_id=qudemo_id
+        )
+        
+        if result:
+            return {
+                "success": True,
+                "message": f"Generated {len(result.get('faqs', []))} FAQs successfully",
+                "qudemo_id": qudemo_id,
+                "company_name": company_name,
+                "faq_count": len(result.get('faqs', [])),
+                "faqs": result.get('faqs', [])
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Failed to generate FAQs"
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Error manually generating FAQs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/test-zapier-webhook/{company_name}/{qudemo_id}")
+async def test_zapier_webhook(company_name: str, qudemo_id: str):
+    """Test endpoint to manually trigger Zapier webhook with FAQs for avatar video generation"""
+    try:
+        logger.info(f"🧪 Testing Zapier webhook for: {company_name}/{qudemo_id}")
+        
+        # Get Zapier webhook URL from environment
+        zapier_webhook_url = os.getenv('ZAPIER_HEYGEN_WEBHOOK_URL')
+        if not zapier_webhook_url:
+            return {
+                "success": False,
+                "error": "ZAPIER_HEYGEN_WEBHOOK_URL not configured in .env file",
+                "message": "Please add your Zapier webhook URL to backend/pythonn/.env"
+            }
+        
+        logger.info(f"✅ Zapier webhook URL found: {zapier_webhook_url[:50]}...")
+        
+        # Get presenter photo URL from Supabase
+        presenter_photo_url = None
+        try:
+            from supabase import create_client
+            supabase_url = os.getenv('SUPABASE_URL')
+            supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+            
+            if supabase_url and supabase_key:
+                supabase = create_client(supabase_url, supabase_key)
+                response = supabase.table('qudemos_new').select('presenter_photo_url').eq('id', qudemo_id).single().execute()
+                presenter_photo_url = response.data.get('presenter_photo_url') if response.data else None
+                logger.info(f"📸 Presenter photo URL: {presenter_photo_url}")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not fetch presenter photo: {e}")
+        
+        # Fetch FAQs from GCS
+        try:
+            faqs_data = gcs_qa_service.gcs_service.get_faqs(company_name, qudemo_id)
+            
+            if not faqs_data:
+                return {
+                    "success": False,
+                    "error": "No FAQs found for this QuDemo",
+                    "message": f"FAQs not generated yet for {company_name}/{qudemo_id}. Create a QuDemo with documents to generate FAQs."
+                }
+            
+            logger.info(f"📋 Found {len(faqs_data)} FAQs to send to Zapier")
+            
+        except Exception as e:
+            logger.error(f"❌ Error fetching FAQs: {e}")
+            return {
+                "success": False,
+                "error": f"Failed to fetch FAQs: {str(e)}"
+            }
+        
+        # Send each FAQ to Zapier webhook
+        results = []
+        import requests
+        
+        for faq in faqs_data:
+            faq_data = {
+                "qudemoId": qudemo_id,
+                "companyName": company_name,
+                "faqId": faq.get('id', 'unknown'),
+                "question": faq.get('question', ''),
+                "answer": faq.get('answer', ''),
+                "presenterPhotoUrl": presenter_photo_url or "",
+                "source": faq.get('source', 'unknown')
+            }
+            
+            logger.info(f"📤 Sending FAQ to Zapier: {faq.get('id', 'unknown')}")
+            
+            try:
+                response = requests.post(
+                    zapier_webhook_url,
+                    json=faq_data,
+                    timeout=10
+                )
+                
+                if response.status_code in [200, 201]:
+                    logger.info(f"✅ FAQ sent successfully: {faq.get('id')}")
+                    results.append({
+                        "faq_id": faq.get('id'),
+                        "status": "success",
+                        "status_code": response.status_code
+                    })
+                else:
+                    logger.warning(f"⚠️ Zapier returned status {response.status_code} for FAQ {faq.get('id')}")
+                    results.append({
+                        "faq_id": faq.get('id'),
+                        "status": "warning",
+                        "status_code": response.status_code,
+                        "response": response.text[:200]
+                    })
+                    
+            except Exception as e:
+                logger.error(f"❌ Error sending FAQ to Zapier: {e}")
+                results.append({
+                    "faq_id": faq.get('id'),
+                    "status": "error",
+                    "error": str(e)
+                })
+        
+        success_count = len([r for r in results if r['status'] == 'success'])
+        
+        return {
+            "success": True,
+            "message": f"Sent {success_count}/{len(faqs_data)} FAQs to Zapier webhook",
+            "webhook_url": zapier_webhook_url[:50] + "...",
+            "qudemo_id": qudemo_id,
+            "company_name": company_name,
+            "presenter_photo_url": presenter_photo_url,
+            "total_faqs": len(faqs_data),
+            "results": results
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error testing Zapier webhook: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.delete("/cleanup-qudemo/{company_name}/{qudemo_id}")
 async def cleanup_qudemo_data(company_name: str, qudemo_id: str):
     """Clean up all GCS data for a specific QuDemo (replaces Pinecone cleanup)"""
@@ -1593,6 +1924,551 @@ async def delete_company_data(company_name: str):
 # Universal Scraper Endpoints (disabled - module deleted)
 
 # Request models moved to top of file
+
+# ============================================================================
+# HELPER FUNCTIONS FOR AVATAR VIDEO FEATURE
+# ============================================================================
+
+async def generate_faq_for_avatar_videos(company_name: str, qudemo_id: str):
+    """Generate FAQ pairs from documents for avatar video generation"""
+    try:
+        logger.info(f"🤖 Checking if FAQ generation needed for {company_name}/{qudemo_id}")
+        
+        # Check if presenter photo exists (query Supabase directly)
+        presenter_photo_url = None
+        presenter_name = None
+        
+        try:
+            # Get QuDemo details from Supabase
+            from supabase import create_client
+            supabase_url = os.getenv('SUPABASE_URL')
+            supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+            
+            if not supabase_url or not supabase_key:
+                logger.error(f"❌ Supabase credentials not found in .env")
+                return
+            
+            supabase = create_client(supabase_url, supabase_key)
+            response = supabase.table('qudemos_new').select('presenter_photo_url, presenter_name').eq('id', qudemo_id).single().execute()
+            
+            if response.data:
+                presenter_photo_url = response.data.get('presenter_photo_url')
+                presenter_name = response.data.get('presenter_name') or 'Presenter'
+                logger.info(f"📸 Presenter photo: {presenter_photo_url}")
+                logger.info(f"👤 Presenter name: {presenter_name}")
+            
+            if not presenter_photo_url:
+                logger.info(f"ℹ️ No presenter photo found - skipping FAQ generation")
+                return
+            
+            logger.info(f"✅ Presenter photo found: {presenter_photo_url}")
+            logger.info(f"🎬 Generating FAQs for avatar videos...")
+            
+        except Exception as e:
+            logger.error(f"❌ Error checking presenter photo: {e}")
+            import traceback
+            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+            return
+        
+        # Get all content (documents + video transcripts)
+        all_faqs = []
+        
+        # 1. Generate FAQs from VIDEO TRANSCRIPTS
+        logger.info(f"📹 Generating FAQs from video transcripts...")
+        video_faqs = []
+        
+        if gcs_qa_service:
+            try:
+                transcript_data = gcs_qa_service.gcs_service.get_video_transcript(company_name, qudemo_id)
+                
+                if transcript_data and 'videos' in transcript_data and len(transcript_data['videos']) > 0:
+                    # Get chunks/segments from the first video
+                    video_data = transcript_data['videos'][0]
+                    chunks = video_data.get('chunks', [])
+                    segments = video_data.get('segments', [])
+                    
+                    # Use chunks (YouTube/Gemini) or segments (Loom/Whisper)
+                    if chunks:
+                        # Combine all transcript chunks (YouTube/Gemini format)
+                        transcript_text = "\n\n".join([
+                            f"[{chunk.get('start_time', '')}-{chunk.get('end_time', '')}] {chunk.get('text', '')}"
+                            for chunk in chunks
+                        ])
+                        logger.info(f"📹 Using chunks from YouTube/Gemini transcript ({len(chunks)} chunks)")
+                    elif segments:
+                        # Combine all transcript segments (Loom/Whisper format)
+                        transcript_text = "\n\n".join([
+                            f"[{seg.get('formatted_start', '')}-{seg.get('formatted_end', '')}] {seg.get('text', '')}"
+                            for seg in segments
+                        ])
+                        logger.info(f"📹 Using segments from Loom/Whisper transcript ({len(segments)} segments)")
+                    else:
+                        transcript_text = ""
+                    
+                    if transcript_text:
+                        transcript_text = transcript_text[:15000]  # Limit to 15k chars
+                        
+                        logger.info(f"🎥 Video transcript length: {len(transcript_text)} characters")
+                        
+                        # STEP 1: Identify all distinct topics/concepts (for comprehensive coverage)
+                        logger.info(f"🔍 Step 1: Identifying all topics in video...")
+                        
+                        topics_prompt = f"""Analyze this video transcript and identify ALL distinct topics, features, concepts, or processes discussed.
+
+Video transcript:
+{transcript_text}
+
+Return a JSON array of topics (3-8 topics):
+[
+  {{"topic": "Feature name or concept", "importance": "high/medium"}},
+  ...
+]
+
+Focus on:
+- Main features or tools introduced
+- Processes or workflows explained
+- Benefits or use cases mentioned
+- Technical details or commands shown
+- Problems solved or improvements made
+
+Return ONLY the JSON array."""
+
+                        try:
+                            topics_response = openai_client.chat.completions.create(
+                                model="gpt-4o-mini",
+                                messages=[{"role": "user", "content": topics_prompt}],
+                                temperature=0.3,
+                                max_tokens=500
+                            )
+                            
+                            topics_json = topics_response.choices[0].message.content.strip()
+                            if topics_json.startswith("```json"):
+                                topics_json = topics_json.replace("```json", "").replace("```", "").strip()
+                            
+                            topics = json.loads(topics_json)
+                            logger.info(f"✅ Identified {len(topics)} topics")
+                            for i, topic in enumerate(topics, 1):
+                                logger.info(f"   Topic {i}: {topic.get('topic', 'Unknown')} ({topic.get('importance', 'medium')} importance)")
+                            
+                        except Exception as topic_error:
+                            logger.error(f"❌ Error identifying topics: {topic_error}")
+                            topics = []
+                        
+                        # STEP 2: Generate comprehensive FAQs covering all topics
+                        logger.info(f"🤖 Step 2: Generating FAQs to cover all {len(topics)} topics...")
+                        
+                        topics_list = "\n".join([f"- {t.get('topic', '')}" for t in topics])
+                        
+                        prompt = f"""Generate comprehensive FAQ questions and answers from this video transcript.
+
+IDENTIFIED TOPICS TO COVER:
+{topics_list}
+
+REQUIREMENTS:
+1. Create 1 FAQ for EACH topic above (ensure 100% topic coverage)
+2. Each answer should be detailed and comprehensive (150-200 words, ~1 minute to speak)
+3. Include ALL relevant information for that topic from the transcript
+4. Answers should be natural, conversational, and presenter-friendly
+5. Present information in a clear, logical flow with context
+6. Synthesize and explain - DON'T just copy transcript text
+7. Maximum 1000 characters per answer
+8. If a topic has multiple aspects, combine them into one comprehensive FAQ
+
+FORMAT as JSON array:
+[
+  {{
+    "question": "Clear, specific question about the topic",
+    "answer": "Comprehensive, well-structured answer covering all aspects of this topic from the video",
+    "category": "video",
+    "source": "video_transcript"
+  }}
+]
+
+Video transcript:
+{transcript_text}
+
+Return ONLY the JSON array, no other text."""
+
+                        try:
+                            if not openai_client:
+                                logger.error("❌ OpenAI client not initialized")
+                                video_faqs = []
+                            else:
+                                response = openai_client.chat.completions.create(
+                                    model="gpt-4",
+                                    messages=[{"role": "user", "content": prompt}],
+                                    temperature=0.7,
+                                    max_tokens=4000
+                                )
+                                
+                                faq_json = response.choices[0].message.content.strip()
+                                
+                                if faq_json.startswith("```json"):
+                                    faq_json = faq_json.replace("```json", "").replace("```", "").strip()
+                                
+                                video_faqs = json.loads(faq_json)
+                                logger.info(f"✅ Generated {len(video_faqs)} FAQ pairs from video transcript")
+                                
+                                # Log the generated FAQs
+                                logger.info(f"📋 Generated Video FAQs:")
+                                for i, faq in enumerate(video_faqs, 1):
+                                    q = faq.get('question', 'N/A')
+                                    a = faq.get('answer', 'N/A')
+                                    logger.info(f"   FAQ {i}:")
+                                    logger.info(f"   Q: {q}")
+                                    logger.info(f"   A: {a[:100]}... ({len(a)} chars)")
+                            
+                        except Exception as gpt_error:
+                            logger.error(f"❌ Error calling GPT-4 for video FAQs: {gpt_error}")
+                            video_faqs = []
+                    else:
+                        logger.info(f"ℹ️ No transcript text available (no chunks or segments found)")
+                else:
+                    logger.info(f"ℹ️ No video transcript found")
+                    
+            except Exception as e:
+                logger.error(f"❌ Error processing video transcript: {e}")
+                video_faqs = []
+        
+        all_faqs.extend(video_faqs)
+        
+        # 2. Generate FAQs from DOCUMENTS
+        logger.info(f"📄 Generating FAQs from documents...")
+        document_faqs = []
+        
+        if document_processor:
+            all_documents = document_processor.search_document_content(
+                company_name=company_name,
+                qudemo_id=qudemo_id,
+                query=""  # Empty query returns all content
+            )
+            
+            if all_documents:
+                # Combine all document content
+                combined_content = "\n\n".join([doc.get('content', '') for doc in all_documents])
+                combined_content = combined_content[:15000]  # Limit to 15k chars for GPT-4
+                
+                logger.info(f"📄 Combined document content length: {len(combined_content)} characters")
+                
+                # STEP 1: Identify all distinct topics/concepts in documents
+                logger.info(f"🔍 Step 1: Identifying all topics in documents...")
+                
+                doc_topics_prompt = f"""Analyze this document content and identify ALL distinct topics, features, benefits, or concepts discussed.
+
+Document content:
+{combined_content}
+
+Return a JSON array of topics (3-10 topics):
+[
+  {{"topic": "Feature or concept name", "importance": "high/medium"}},
+  ...
+]
+
+Focus on:
+- Product features or capabilities
+- Benefits or value propositions
+- Use cases or applications
+- Technical specifications
+- Pricing or plans
+- Processes or workflows
+
+Return ONLY the JSON array."""
+
+                try:
+                    doc_topics_response = openai_client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[{"role": "user", "content": doc_topics_prompt}],
+                        temperature=0.3,
+                        max_tokens=500
+                    )
+                    
+                    doc_topics_json = doc_topics_response.choices[0].message.content.strip()
+                    if doc_topics_json.startswith("```json"):
+                        doc_topics_json = doc_topics_json.replace("```json", "").replace("```", "").strip()
+                    
+                    doc_topics = json.loads(doc_topics_json)
+                    logger.info(f"✅ Identified {len(doc_topics)} topics in documents")
+                    for i, topic in enumerate(doc_topics, 1):
+                        logger.info(f"   Topic {i}: {topic.get('topic', 'Unknown')} ({topic.get('importance', 'medium')} importance)")
+                    
+                except Exception as doc_topic_error:
+                    logger.error(f"❌ Error identifying document topics: {doc_topic_error}")
+                    doc_topics = []
+                
+                # STEP 2: Generate comprehensive FAQs covering all document topics
+                logger.info(f"🤖 Step 2: Generating FAQs to cover all {len(doc_topics)} document topics...")
+                
+                doc_topics_list = "\n".join([f"- {t.get('topic', '')}" for t in doc_topics])
+                
+                prompt = f"""Generate comprehensive FAQ questions and answers from this document content.
+
+IDENTIFIED TOPICS TO COVER:
+{doc_topics_list}
+
+REQUIREMENTS:
+1. Create 1 FAQ for EACH topic above (ensure 100% topic coverage)
+2. Each answer should be detailed and comprehensive (150-200 words, ~1 minute to speak)
+3. Include ALL relevant information for that topic from the documents
+4. Answers should be natural, conversational, and presenter-friendly
+5. Present information in a clear, logical flow with context
+6. Synthesize and explain - DON'T just copy raw document text
+7. Maximum 1000 characters per answer
+8. If a topic has multiple aspects, combine them into one comprehensive FAQ
+
+FORMAT as JSON array:
+[
+  {{
+    "question": "Clear, specific question about the topic",
+    "answer": "Comprehensive, well-structured answer covering all aspects of this topic from the documents",
+    "category": "features",
+    "source": "document"
+  }}
+]
+
+Document content:
+{combined_content}
+
+Return ONLY the JSON array, no other text."""
+
+                try:
+                    if not openai_client:
+                        logger.error("❌ OpenAI client not initialized")
+                        document_faqs = []
+                    else:
+                        response = openai_client.chat.completions.create(
+                            model="gpt-4",
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.7,
+                            max_tokens=4000
+                        )
+                        
+                        faq_json = response.choices[0].message.content.strip()
+                        
+                        if faq_json.startswith("```json"):
+                            faq_json = faq_json.replace("```json", "").replace("```", "").strip()
+                        
+                        document_faqs = json.loads(faq_json)
+                        logger.info(f"✅ Generated {len(document_faqs)} FAQ pairs from documents")
+                        
+                        # Log the generated FAQs
+                        logger.info(f"📋 Generated Document FAQs:")
+                        for i, faq in enumerate(document_faqs, 1):
+                            q = faq.get('question', 'N/A')
+                            a = faq.get('answer', 'N/A')
+                            logger.info(f"   FAQ {i}:")
+                            logger.info(f"   Q: {q}")
+                            logger.info(f"   A: {a[:100]}... ({len(a)} chars)")
+                    
+                except Exception as gpt_error:
+                    logger.error(f"❌ Error calling GPT-4 for document FAQs: {gpt_error}")
+                    document_faqs = []
+            else:
+                logger.info(f"ℹ️ No documents found")
+        else:
+            logger.info(f"ℹ️ Document processor not available")
+        
+        all_faqs.extend(document_faqs)
+        
+        # 3. Generate FAQs from SUGGESTED QUESTIONS (with cached answers)
+        logger.info(f"🎯 Generating FAQs from suggested questions...")
+        suggested_faqs = []
+        
+        if gcs_qa_service:
+            try:
+                # Get suggested questions from GCS
+                suggested_data = gcs_qa_service.gcs_service.get_suggested_questions_with_metadata(company_name, qudemo_id)
+                
+                if suggested_data and 'video_questions' in suggested_data:
+                    logger.info(f"📥 Found suggested questions in GCS")
+                    
+                    # Extract all questions with answers
+                    for video_data in suggested_data['video_questions']:
+                        questions_with_answers = video_data.get('questions_with_answers', [])
+                        
+                        for qa in questions_with_answers:
+                            question = qa.get('question', '')
+                            answer = qa.get('answer', '')
+                            
+                            if question and answer:
+                                # Limit answer to 1000 characters
+                                if len(answer) > 1000:
+                                    # Try to end at a sentence
+                                    truncated = answer[:1000]
+                                    last_period = truncated.rfind('.')
+                                    if last_period > 900:  # Only use if we're close to 1000
+                                        answer = truncated[:last_period + 1]
+                                    else:
+                                        answer = truncated + "..."
+                                
+                                suggested_faqs.append({
+                                    "question": question,
+                                    "answer": answer,
+                                    "category": "suggested_question",
+                                    "source": "video_suggested",
+                                    "video_url": qa.get('video_url', ''),
+                                    "timestamp": qa.get('timestamp', 0)
+                                })
+                    
+                    logger.info(f"✅ Generated {len(suggested_faqs)} FAQs from suggested questions")
+                    
+                    # Log a few examples
+                    logger.info(f"📋 Sample Suggested Question FAQs:")
+                    for i, faq in enumerate(suggested_faqs[:3], 1):
+                        q = faq.get('question', 'N/A')
+                        a = faq.get('answer', 'N/A')
+                        logger.info(f"   FAQ {i}:")
+                        logger.info(f"   Q: {q}")
+                        logger.info(f"   A: {a[:100]}... ({len(a)} chars)")
+                else:
+                    logger.info(f"ℹ️ No suggested questions found in GCS")
+                    
+            except Exception as e:
+                logger.error(f"❌ Error processing suggested questions: {e}")
+                import traceback
+                logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+                suggested_faqs = []
+        else:
+            logger.info(f"ℹ️ GCS QA service not available")
+        
+        all_faqs.extend(suggested_faqs)
+        
+        logger.info(f"📊 Total FAQs generated: {len(all_faqs)} (Videos: {len(video_faqs)}, Documents: {len(document_faqs)}, Suggested: {len(suggested_faqs)})")
+        
+        # Store FAQs in GCS (regardless of document availability)
+        if gcs_qa_service:
+            bucket_name = f"qudemo-{company_name.lower().replace(' ', '-')}"
+            bucket = gcs_qa_service.gcs_service.client.bucket(bucket_name)
+            
+            # Add default fallback FAQs for common scenarios
+            default_faqs = [
+                {
+                    "id": "faq_fallback_no_answer",
+                    "question": "NO_ANSWER_FOUND",
+                    "answer": "I apologize, but I don't have specific information about that in our knowledge base. However, I'd be happy to connect you with our team who can help answer your questions in detail. Please use the 'Book a Meeting' option below to schedule a call with our experts.",
+                    "category": "fallback",
+                    "estimated_duration": 15.0,
+                    "is_fallback": True
+                },
+                {
+                    "id": "faq_fallback_sales",
+                    "question": "SALES_INQUIRY",
+                    "answer": "I'd be delighted to connect you with our sales team! They're experts at understanding your specific needs and can provide personalized guidance. Please click on the 'Book a Meeting' button below to schedule a convenient time to chat with one of our team members. We look forward to speaking with you!",
+                    "category": "fallback",
+                    "estimated_duration": 18.0,
+                    "is_fallback": True
+                }
+            ]
+            
+            faq_data = {
+                "version": "1.0",
+                "qudemo_id": qudemo_id,
+                "company_name": company_name,
+                "presenter_name": presenter_name,
+                "presenter_photo_url": presenter_photo_url,
+                "generated_at": datetime.now().isoformat(),
+                "faqs": [
+                    {
+                        "id": f"faq_{str(i+1).zfill(3)}",
+                        "question": faq["question"],
+                        "answer": faq["answer"],
+                        "category": faq.get("category", "general"),
+                        "source": faq.get("source", "unknown"),
+                        "estimated_duration": len(faq["answer"].split()) * 0.4  # ~0.4 seconds per word
+                    }
+                    for i, faq in enumerate(all_faqs)
+                ] + default_faqs  # Add default fallback FAQs
+            }
+            
+            # Store in GCS
+            blob = bucket.blob(f"{company_name}/{qudemo_id}/faqs.json")
+            blob.upload_from_string(json.dumps(faq_data, indent=2), content_type='application/json')
+            logger.info(f"✅ Stored {len(faq_data['faqs'])} FAQs in GCS: {blob.name}")
+            logger.info(f"   - Video FAQs: {len(video_faqs)}")
+            logger.info(f"   - Document FAQs: {len(document_faqs)}")
+            logger.info(f"   - Fallback FAQs: {len(default_faqs)}")
+            
+            # Generate avatar videos using HeyGen (background task)
+            if avatar_video_processor and presenter_photo_url:
+                logger.info(f"🎬 Starting avatar video generation for {len(faq_data['faqs'])} FAQs...")
+                logger.info(f"⏱️ Estimated time: 3-5 minutes per video ({len(faq_data['faqs'])} videos total)")
+                logger.info(f"🔄 Videos will be generated in the background")
+                
+                # Run video generation in background (don't block the response)
+                asyncio.create_task(
+                    avatar_video_processor.process_faq_videos(
+                        company_name=company_name,
+                        qudemo_id=qudemo_id,
+                        presenter_photo_url=presenter_photo_url,
+                        faqs=faq_data["faqs"]
+                    )
+                )
+                
+                logger.info(f"✅ Background video generation task started")
+            else:
+                if not avatar_video_processor:
+                    logger.warning("⚠️ Avatar video processor not available - skipping video generation")
+                if not presenter_photo_url:
+                    logger.warning("⚠️ No presenter photo - skipping video generation")
+            
+            return faq_data
+            
+    except Exception as e:
+        logger.error(f"❌ Error generating FAQs for avatar videos: {e}")
+        import traceback
+        logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+        return None
+
+async def trigger_zapier_heygen(
+    company_name: str,
+    qudemo_id: str,
+    presenter_photo_url: str,
+    presenter_name: str,
+    faqs: List[Dict]
+):
+    """Trigger Zapier webhook to generate HeyGen avatar videos"""
+    try:
+        zapier_webhook_url = os.getenv('ZAPIER_HEYGEN_WEBHOOK_URL')
+        
+        if not zapier_webhook_url:
+            logger.warning("⚠️ ZAPIER_HEYGEN_WEBHOOK_URL not set - skipping Zapier trigger")
+            logger.info("ℹ️ FAQs have been generated and stored in GCS")
+            logger.info("ℹ️ Set ZAPIER_HEYGEN_WEBHOOK_URL environment variable to enable automatic avatar video generation")
+            return
+        
+        logger.info(f"🔗 Triggering Zapier webhook for HeyGen avatar video generation...")
+        logger.info(f"📊 Triggering for {len(faqs)} FAQs")
+        
+        # Prepare webhook payload
+        node_api_url = os.getenv('NODE_API_BASE_URL', 'http://localhost:5000')
+        callback_url = f"{node_api_url}/api/qudemos/heygen-callback"
+        
+        payload = {
+            "company_name": company_name,
+            "qudemo_id": qudemo_id,
+            "presenter_photo_url": presenter_photo_url,
+            "presenter_name": presenter_name,
+            "callback_url": callback_url,
+            "total_faqs": len(faqs),
+            "faqs": faqs
+        }
+        
+        # Send webhook
+        response = requests.post(
+            zapier_webhook_url,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.ok:
+            logger.info(f"✅ Zapier webhook triggered successfully")
+            logger.info(f"📹 HeyGen will generate {len(faqs)} avatar videos")
+            logger.info(f"⏱️ Estimated time: {len(faqs) * 5} minutes")
+        else:
+            logger.error(f"❌ Zapier webhook failed: {response.status_code} - {response.text}")
+            
+    except Exception as e:
+        logger.error(f"❌ Error triggering Zapier webhook: {e}")
+        logger.info("ℹ️ FAQs are still available in GCS even though Zapier trigger failed")
 
 def _generate_processing_status_message(successful_content: Dict, processing_errors: List[Dict], total_chunks: int) -> str:
     """Generate user-friendly processing status message"""
@@ -1750,6 +2626,38 @@ async def delete_company_bucket(request: dict):
     except Exception as e:
         logger.error(f"❌ Delete company bucket error: {e}")
         return {"success": False, "error": str(e)}
+
+@app.post("/make-bucket-public/{company_name}")
+async def make_bucket_public(company_name: str):
+    """Make an existing GCS bucket publicly readable (one-time fix for existing buckets)"""
+    try:
+        logger.info(f"🌍 Making bucket public for company: {company_name}")
+        
+        gcs_service = GoogleCloudStorageService()
+        bucket = gcs_service._get_company_bucket(company_name)
+        
+        # Set IAM policy to make bucket publicly readable
+        policy = bucket.get_iam_policy(requested_policy_version=3)
+        policy.bindings.append({
+            "role": "roles/storage.objectViewer",
+            "members": {"allUsers"}
+        })
+        bucket.set_iam_policy(policy)
+        
+        logger.info(f"✅ Made bucket publicly readable: {bucket.name}")
+        
+        return {
+            "success": True,
+            "message": f"Bucket {bucket.name} is now publicly readable",
+            "bucket_name": bucket.name
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error making bucket public: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 if __name__ == "__main__":
     import uvicorn

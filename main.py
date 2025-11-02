@@ -2018,11 +2018,13 @@ async def generate_faq_for_avatar_videos(company_name: str, qudemo_id: str):
 Video transcript:
 {transcript_text}
 
-Return a JSON array of topics (3-8 topics):
+Return a JSON array of topics (MAXIMUM 3 topics for testing):
 [
   {{"topic": "Feature name or concept", "importance": "high/medium"}},
   ...
 ]
+
+⚠️ LIMIT: Return only the TOP 3 most important topics to save HeyGen credits during testing.
 
 Focus on:
 - Main features or tools introduced
@@ -2158,11 +2160,13 @@ Return ONLY the JSON array, no other text."""
 Document content:
 {combined_content}
 
-Return a JSON array of topics (3-10 topics):
+Return a JSON array of topics (MAXIMUM 3 topics for testing):
 [
   {{"topic": "Feature or concept name", "importance": "high/medium"}},
   ...
 ]
+
+⚠️ LIMIT: Return only the TOP 3 most important topics to save HeyGen credits during testing.
 
 Focus on:
 - Product features or capabilities
@@ -2332,7 +2336,15 @@ Return ONLY the JSON array, no other text."""
         
         all_faqs.extend(suggested_faqs)
         
-        logger.info(f"📊 Total FAQs generated: {len(all_faqs)} (Videos: {len(video_faqs)}, Documents: {len(document_faqs)}, Suggested: {len(suggested_faqs)})")
+        logger.info(f"📊 Total FAQs generated BEFORE LIMIT: {len(all_faqs)} (Videos: {len(video_faqs)}, Documents: {len(document_faqs)}, Suggested: {len(suggested_faqs)})")
+        
+        # ⚠️ TESTING LIMIT: Cap at 3 content FAQs to save HeyGen credits (+ 2 fallback = 5 total)
+        MAX_CONTENT_FAQS = 3
+        if len(all_faqs) > MAX_CONTENT_FAQS:
+            logger.warning(f"⚠️ Limiting FAQs from {len(all_faqs)} to {MAX_CONTENT_FAQS} for testing (HeyGen credit savings)")
+            all_faqs = all_faqs[:MAX_CONTENT_FAQS]
+        
+        logger.info(f"📊 Total FAQs AFTER LIMIT: {len(all_faqs)} content FAQs (will add 2 fallback FAQs = {len(all_faqs) + 2} total)")
         
         # Store FAQs in GCS (regardless of document availability)
         if gcs_qa_service:
@@ -2383,9 +2395,11 @@ Return ONLY the JSON array, no other text."""
             blob = bucket.blob(f"{company_name}/{qudemo_id}/faqs.json")
             blob.upload_from_string(json.dumps(faq_data, indent=2), content_type='application/json')
             logger.info(f"✅ Stored {len(faq_data['faqs'])} FAQs in GCS: {blob.name}")
-            logger.info(f"   - Video FAQs: {len(video_faqs)}")
-            logger.info(f"   - Document FAQs: {len(document_faqs)}")
+            logger.info(f"   - Content FAQs (after limit): {len(all_faqs)}")
+            logger.info(f"     • Video FAQs: {len(video_faqs)}")
+            logger.info(f"     • Document FAQs: {len(document_faqs)}")
             logger.info(f"   - Fallback FAQs: {len(default_faqs)}")
+            logger.info(f"   ⚠️ TESTING MODE: Limited to {MAX_CONTENT_FAQS} content FAQs + {len(default_faqs)} fallback = {len(faq_data['faqs'])} total")
             
             # Generate avatar videos using HeyGen (background task)
             if avatar_video_processor and presenter_photo_url:

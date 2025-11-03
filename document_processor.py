@@ -253,37 +253,50 @@ class DocumentProcessor:
                         
                         logger.info(f"📄 Document {document_id}: {len(text)} characters of text")
                         
-                        # Intelligent text search using key terms
-                        search_terms = self._extract_search_terms(query_lower)
-                        logger.info(f"🔍 Extracted search terms: {search_terms}")
-                        print(f"DEBUG: Extracted {len(search_terms)} search terms: {search_terms[:5]}...")
-                        
-                        # Check if any search terms are found in the text
-                        found_terms = []
-                        for term in search_terms:
-                            if term in text.lower():
-                                found_terms.append(term)
-                        
-                        print(f"DEBUG: Found {len(found_terms)} matching terms: {found_terms}")
-                        
-                        if found_terms:
-                            logger.info(f"✅ Found terms {found_terms} in document {document_id}")
-                            # Find relevant sections using the most relevant term
-                            best_term = found_terms[0]  # Use the first found term
-                            relevant_sections = self._find_relevant_sections(text, best_term)
-                            
+                        # If query is empty, return ALL document content (for FAQ generation)
+                        if not query or query.strip() == "":
+                            logger.info(f"📋 Empty query - returning ALL content from document {document_id}")
                             results.append({
                                 'document_id': document_id,
                                 'filename': doc_info.get('filename', '').split('/')[-1],
                                 'mime_type': doc_info.get('mime_type', ''),
-                                'relevant_sections': relevant_sections,
+                                'content': text,  # Return full text
                                 'source': 'document',
-                                'matched_terms': found_terms
+                                'matched_terms': []
                             })
-                            
-                            logger.info(f"📄 Added {len(relevant_sections)} relevant sections from document {document_id}")
+                            logger.info(f"✅ Added full document content ({len(text)} chars) from {document_id}")
                         else:
-                            logger.info(f"❌ No search terms found in document {document_id}")
+                            # Intelligent text search using key terms
+                            search_terms = self._extract_search_terms(query_lower)
+                            logger.info(f"🔍 Extracted search terms: {search_terms}")
+                            print(f"DEBUG: Extracted {len(search_terms)} search terms: {search_terms[:5]}...")
+                            
+                            # Check if any search terms are found in the text
+                            found_terms = []
+                            for term in search_terms:
+                                if term in text.lower():
+                                    found_terms.append(term)
+                            
+                            print(f"DEBUG: Found {len(found_terms)} matching terms: {found_terms}")
+                            
+                            if found_terms:
+                                logger.info(f"✅ Found terms {found_terms} in document {document_id}")
+                                # Find relevant sections using the most relevant term
+                                best_term = found_terms[0]  # Use the first found term
+                                relevant_sections = self._find_relevant_sections(text, best_term)
+                                
+                                results.append({
+                                    'document_id': document_id,
+                                    'filename': doc_info.get('filename', '').split('/')[-1],
+                                    'mime_type': doc_info.get('mime_type', ''),
+                                    'relevant_sections': relevant_sections,
+                                    'source': 'document',
+                                    'matched_terms': found_terms
+                                })
+                                
+                                logger.info(f"📄 Added {len(relevant_sections)} relevant sections from document {document_id}")
+                            else:
+                                logger.info(f"❌ No search terms found in document {document_id}")
                             
                     except json.JSONDecodeError as e:
                         logger.error(f"❌ JSON decode error for document {document_id}: {e}")

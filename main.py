@@ -540,7 +540,9 @@ async def get_suggested_questions(company_name: str, qudemo_id: str):
                 faq_questions = [
                     faq['question'] 
                     for faq in faqs_data['faqs'] 
-                    if not faq.get('is_fallback', False) and faq.get('question') not in ['NO_ANSWER_FOUND', 'SALES_INQUIRY']
+                    if not faq.get('is_fallback', False) 
+                    and not faq.get('is_intro', False)
+                    and faq.get('question') not in ['NO_ANSWER_FOUND', 'SALES_INQUIRY', 'INTRO_VIDEO']
                 ]
                 
                 if faq_questions:
@@ -2013,25 +2015,40 @@ async def generate_faq_for_avatar_videos(company_name: str, qudemo_id: str):
                         # STEP 1: Identify all distinct topics/concepts (for comprehensive coverage)
                         logger.info(f"🔍 Step 1: Identifying all topics in video...")
                         
-                        topics_prompt = f"""Analyze this video transcript and identify ALL distinct topics, features, concepts, or processes discussed.
+                        topics_prompt = f"""Analyze this video transcript and identify topics for creating customer-facing FAQs.
 
 Video transcript:
 {transcript_text}
 
-Return a JSON array of topics (MAXIMUM 2 topics for testing):
+PRIORITIZE HIGH-LEVEL, STRATEGIC TOPICS (Always include these first):
+1. Product uniqueness/differentiators (what makes it special)
+2. Target audience/ideal customer (who it's for)
+3. Core value proposition (main benefit/promise)
+4. Top customer benefits overview (why they should care)
+5. Time/cost savings (specific advantages)
+
+THEN add specific topics if space remains:
+6. Key features
+7. Implementation details
+8. Technical specifications
+
+GOOD TOPIC EXAMPLES (High-level):
+✅ "Product uniqueness and differentiation"
+✅ "Target audience and ideal use cases"
+✅ "Core value proposition"
+✅ "Customer benefits overview"
+✅ "Time savings and efficiency gains"
+
+BAD TOPIC EXAMPLES (Too specific/technical):
+❌ "Visa application processing workflow"
+❌ "Employee documentation management system"
+❌ "Regulatory compliance automation details"
+
+Return a JSON array (MAXIMUM 10 topics):
 [
-  {{"topic": "Feature name or concept", "importance": "high/medium"}},
+  {{"topic": "High-level topic description", "importance": "high/medium"}},
   ...
 ]
-
-⚠️ LIMIT: Return only the TOP 2 most important topics to save HeyGen credits during testing.
-
-Focus on:
-- Main features or tools introduced
-- Processes or workflows explained
-- Benefits or use cases mentioned
-- Technical details or commands shown
-- Problems solved or improvements made
 
 Return ONLY the JSON array."""
 
@@ -2061,26 +2078,60 @@ Return ONLY the JSON array."""
                         
                         topics_list = "\n".join([f"- {t.get('topic', '')}" for t in topics])
                         
-                        prompt = f"""Generate comprehensive FAQ questions and answers from this video transcript.
+                        prompt = f"""Generate FAQ questions and answers from this video transcript.
 
 IDENTIFIED TOPICS TO COVER:
 {topics_list}
 
-REQUIREMENTS:
-1. Create 1 FAQ for EACH topic above (ensure 100% topic coverage)
-2. Each answer should be detailed and comprehensive (150-200 words, ~1 minute to speak)
-3. Include ALL relevant information for that topic from the transcript
-4. Answers should be natural, conversational, and presenter-friendly
-5. Present information in a clear, logical flow with context
-6. Synthesize and explain - DON'T just copy transcript text
-7. Maximum 1000 characters per answer
-8. If a topic has multiple aspects, combine them into one comprehensive FAQ
+QUESTION STYLE (CRITICAL):
+- Keep questions SHORT and SIMPLE (5-10 words maximum)
+- Ask ONE thing per question - NO compound questions
+- Use conversational, direct language
+- Avoid technical jargon unless necessary
+- Start with: "What is...", "How does...", "Why...", "Who is..."
+
+GOOD Examples:
+✅ "What is [Product]?"
+✅ "What makes [Product] unique?"
+✅ "How does [Product] save time?"
+✅ "Who is [Product] designed for?"
+
+BAD Examples:
+❌ "What is [Product] and what services does it provide?" (compound - 2 questions)
+❌ "How does [Product] automate regulatory compliance and visa services?" (compound + too long)
+❌ "How does [Product] provide transparency and invoicing?" (compound - has "and")
+❌ "What visa and immigration services does [Product] offer?" (too specific)
+❌ "How does [Product] save time through automation?" (extra words)
+
+⚠️ If your question has "and" in it, it's probably compound - split it!
+
+ANSWER STYLE (CRITICAL):
+1. Start with a clear, direct statement (1-2 sentences)
+2. Use bullet points for key benefits/features when applicable
+3. Keep answers concise (100-150 words, ~45 seconds to speak)
+4. Focus on VALUE and BENEFITS, not just features
+5. Use natural, conversational language
+6. Maximum 1000 characters per answer
+
+ANSWER FORMAT:
+"[Direct statement explaining the topic]. [Key benefits/features]:
+- Benefit 1
+- Benefit 2
+- Benefit 3"
+
+OTHER REQUIREMENTS:
+- Create 1 UNIQUE FAQ for EACH topic above
+- Each question MUST be distinctly different
+- If topics overlap, combine into ONE FAQ
+- Synthesize - DON'T copy transcript text
+
+⚠️ UNIQUENESS CHECK: Ensure each question is NOT similar to previous questions!
 
 FORMAT as JSON array:
 [
   {{
-    "question": "Clear, specific question about the topic",
-    "answer": "Comprehensive, well-structured answer covering all aspects of this topic from the video",
+    "question": "Short, simple, direct question (5-10 words)",
+    "answer": "Direct statement + bullet points if applicable",
     "category": "video",
     "source": "video_transcript"
   }}
@@ -2108,7 +2159,16 @@ Return ONLY the JSON array, no other text."""
                                 if faq_json.startswith("```json"):
                                     faq_json = faq_json.replace("```json", "").replace("```", "").strip()
                                 
-                                video_faqs = json.loads(faq_json)
+                                # Fix: Use strict=False to handle control characters in JSON
+                                try:
+                                    video_faqs = json.loads(faq_json, strict=False)
+                                except json.JSONDecodeError as json_error:
+                                    # If strict=False doesn't work, try to clean the JSON string
+                                    logger.warning(f"⚠️ JSON parsing failed, attempting to clean: {json_error}")
+                                    # Replace common control characters
+                                    faq_json_cleaned = faq_json.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+                                    video_faqs = json.loads(faq_json_cleaned, strict=False)
+                                
                                 logger.info(f"✅ Generated {len(video_faqs)} FAQ pairs from video transcript")
                                 
                                 # Log the generated FAQs
@@ -2155,26 +2215,41 @@ Return ONLY the JSON array, no other text."""
                 # STEP 1: Identify all distinct topics/concepts in documents
                 logger.info(f"🔍 Step 1: Identifying all topics in documents...")
                 
-                doc_topics_prompt = f"""Analyze this document content and identify ALL distinct topics, features, benefits, or concepts discussed.
+                doc_topics_prompt = f"""Analyze this document content and identify topics for creating customer-facing FAQs.
 
 Document content:
 {combined_content}
 
-Return a JSON array of topics (MAXIMUM 2 topics for testing):
+PRIORITIZE HIGH-LEVEL, STRATEGIC TOPICS (Always include these first):
+1. Product uniqueness/differentiators (what makes it special)
+2. Target audience/ideal customer (who it's for)
+3. Core value proposition (main benefit/promise)
+4. Top customer benefits overview (why they should care)
+5. Time/cost savings (specific advantages)
+
+THEN add specific topics if space remains:
+6. Key features
+7. Pricing or plans
+8. Technical specifications
+9. Use cases
+
+GOOD TOPIC EXAMPLES (High-level):
+✅ "Product uniqueness and differentiation"
+✅ "Target audience and ideal customer"
+✅ "Core value proposition"
+✅ "Customer benefits overview"
+✅ "Cost savings and ROI"
+
+BAD TOPIC EXAMPLES (Too specific/technical):
+❌ "Document approval workflow system"
+❌ "Specific visa processing procedures"
+❌ "HR documentation management features"
+
+Return a JSON array (MAXIMUM 10 topics):
 [
-  {{"topic": "Feature or concept name", "importance": "high/medium"}},
+  {{"topic": "High-level topic description", "importance": "high/medium"}},
   ...
 ]
-
-⚠️ LIMIT: Return only the TOP 2 most important topics to save HeyGen credits during testing.
-
-Focus on:
-- Product features or capabilities
-- Benefits or value propositions
-- Use cases or applications
-- Technical specifications
-- Pricing or plans
-- Processes or workflows
 
 Return ONLY the JSON array."""
 
@@ -2204,26 +2279,60 @@ Return ONLY the JSON array."""
                 
                 doc_topics_list = "\n".join([f"- {t.get('topic', '')}" for t in doc_topics])
                 
-                prompt = f"""Generate comprehensive FAQ questions and answers from this document content.
+                prompt = f"""Generate FAQ questions and answers from this document content.
 
 IDENTIFIED TOPICS TO COVER:
 {doc_topics_list}
 
-REQUIREMENTS:
-1. Create 1 FAQ for EACH topic above (ensure 100% topic coverage)
-2. Each answer should be detailed and comprehensive (150-200 words, ~1 minute to speak)
-3. Include ALL relevant information for that topic from the documents
-4. Answers should be natural, conversational, and presenter-friendly
-5. Present information in a clear, logical flow with context
-6. Synthesize and explain - DON'T just copy raw document text
-7. Maximum 1000 characters per answer
-8. If a topic has multiple aspects, combine them into one comprehensive FAQ
+QUESTION STYLE (CRITICAL):
+- Keep questions SHORT and SIMPLE (5-10 words maximum)
+- Ask ONE thing per question - NO compound questions
+- Use conversational, direct language
+- Avoid technical jargon unless necessary
+- Start with: "What is...", "How does...", "Why...", "Who is..."
+
+GOOD Examples:
+✅ "What is [Product]?"
+✅ "What makes [Product] unique?"
+✅ "How does [Product] save time?"
+✅ "What are the main benefits?"
+
+BAD Examples:
+❌ "What is [Product] and what services does it provide?" (compound - 2 questions)
+❌ "How does [Product] ensure financial transparency and cost management?" (compound + too long)
+❌ "How does [Product] mitigate risks and detect issues?" (compound - has "and")
+❌ "What employee documentation features does [Product] have?" (too specific)
+❌ "How does [Product] automate regulatory compliance?" (too technical)
+
+⚠️ If your question has "and" in it, it's probably compound - split it!
+
+ANSWER STYLE (CRITICAL):
+1. Start with a clear, direct statement (1-2 sentences)
+2. Use bullet points for key benefits/features when applicable
+3. Keep answers concise (100-150 words, ~45 seconds to speak)
+4. Focus on VALUE and BENEFITS, not just features
+5. Use natural, conversational language
+6. Maximum 1000 characters per answer
+
+ANSWER FORMAT:
+"[Direct statement explaining the topic]. [Key benefits/features]:
+- Benefit 1
+- Benefit 2
+- Benefit 3"
+
+OTHER REQUIREMENTS:
+- Create 1 UNIQUE FAQ for EACH topic above
+- Each question MUST be distinctly different
+- If topics overlap, combine into ONE FAQ
+- Synthesize - DON'T copy raw document text
+
+⚠️ UNIQUENESS CHECK: Ensure each question is NOT similar to previous questions!
 
 FORMAT as JSON array:
 [
   {{
-    "question": "Clear, specific question about the topic",
-    "answer": "Comprehensive, well-structured answer covering all aspects of this topic from the documents",
+    "question": "Short, simple, direct question (5-10 words)",
+    "answer": "Direct statement + bullet points if applicable",
     "category": "features",
     "source": "document"
   }}
@@ -2251,7 +2360,16 @@ Return ONLY the JSON array, no other text."""
                         if faq_json.startswith("```json"):
                             faq_json = faq_json.replace("```json", "").replace("```", "").strip()
                         
-                        document_faqs = json.loads(faq_json)
+                        # Fix: Use strict=False to handle control characters in JSON
+                        try:
+                            document_faqs = json.loads(faq_json, strict=False)
+                        except json.JSONDecodeError as json_error:
+                            # If strict=False doesn't work, try to clean the JSON string
+                            logger.warning(f"⚠️ JSON parsing failed, attempting to clean: {json_error}")
+                            # Replace common control characters
+                            faq_json_cleaned = faq_json.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+                            document_faqs = json.loads(faq_json_cleaned, strict=False)
+                        
                         logger.info(f"✅ Generated {len(document_faqs)} FAQ pairs from documents")
                         
                         # Log the generated FAQs
@@ -2336,15 +2454,43 @@ Return ONLY the JSON array, no other text."""
         
         all_faqs.extend(suggested_faqs)
         
-        logger.info(f"📊 Total FAQs generated BEFORE LIMIT: {len(all_faqs)} (Videos: {len(video_faqs)}, Documents: {len(document_faqs)}, Suggested: {len(suggested_faqs)})")
+        logger.info(f"📊 Total FAQs generated BEFORE DEDUPLICATION: {len(all_faqs)} (Videos: {len(video_faqs)}, Documents: {len(document_faqs)}, Suggested: {len(suggested_faqs)})")
         
-        # ⚠️ TESTING LIMIT: Cap at 2 content FAQs to save HeyGen credits (+ 3 special = 5 total)
-        MAX_CONTENT_FAQS = 2
+        # DEDUPLICATION: Remove duplicate or very similar questions
+        unique_faqs = []
+        seen_questions = set()
+        
+        for faq in all_faqs:
+            question = faq.get('question', '').strip().lower()
+            # Normalize question for comparison
+            normalized_question = question.replace('?', '').replace('.', '').strip()
+            
+            # Check if we've seen a very similar question
+            is_duplicate = False
+            for seen_q in seen_questions:
+                # Check for exact match or very high similarity
+                if normalized_question == seen_q or normalized_question in seen_q or seen_q in normalized_question:
+                    is_duplicate = True
+                    logger.warning(f"⚠️ Duplicate question detected: '{question[:50]}...'")
+                    break
+            
+            if not is_duplicate:
+                unique_faqs.append(faq)
+                seen_questions.add(normalized_question)
+                logger.info(f"✅ Added unique question: '{question[:50]}...'")
+            else:
+                logger.warning(f"❌ Skipped duplicate: '{question[:50]}...'")
+        
+        all_faqs = unique_faqs
+        logger.info(f"📊 Total FAQs AFTER DEDUPLICATION: {len(all_faqs)} unique FAQs")
+        
+        # ⚠️ LIMIT: Cap at 7 content FAQs (+ 3 special = 10 total)
+        MAX_CONTENT_FAQS = 7
         if len(all_faqs) > MAX_CONTENT_FAQS:
-            logger.warning(f"⚠️ Limiting FAQs from {len(all_faqs)} to {MAX_CONTENT_FAQS} for testing (HeyGen credit savings)")
+            logger.warning(f"⚠️ Limiting FAQs from {len(all_faqs)} to {MAX_CONTENT_FAQS}")
             all_faqs = all_faqs[:MAX_CONTENT_FAQS]
         
-        logger.info(f"📊 Total FAQs AFTER LIMIT: {len(all_faqs)} content FAQs (will add 1 intro + 2 fallback FAQs = {len(all_faqs) + 3} total)")
+        logger.info(f"📊 Total FAQs AFTER LIMIT: {len(all_faqs)} content FAQs (will add 1 intro + 2 fallback FAQs = {len(all_faqs) + 3} total = max 10 videos)")
         
         # Store FAQs in GCS (regardless of document availability)
         if gcs_qa_service:
@@ -2407,8 +2553,17 @@ Return ONLY the JSON array, no other text."""
             logger.info(f"     • Video FAQs: {len(video_faqs)}")
             logger.info(f"     • Document FAQs: {len(document_faqs)}")
             logger.info(f"   - Special FAQs: {len(default_faqs)} (1 intro + 2 fallback)")
-            logger.info(f"   ⚠️ TESTING MODE: Restricted to {MAX_CONTENT_FAQS} content + {len(default_faqs)} special = {len(faq_data['faqs'])} TOTAL VIDEOS")
-            logger.info(f"   💰 HeyGen Credits: Only {len(faq_data['faqs'])} videos will be generated!")
+            logger.info(f"   💰 FAQ Limit: {MAX_CONTENT_FAQS} content + {len(default_faqs)} special = {len(faq_data['faqs'])} TOTAL VIDEOS")
+            logger.info(f"   💰 HeyGen Credits: {len(faq_data['faqs'])} videos will be generated!")
+            
+            # ⚠️ OPTIONAL: Save FAQs to local JSON file for review (useful for debugging)
+            try:
+                local_faq_file = f"faq_test_{company_name.replace(' ', '_')}_{qudemo_id[:8]}.json"
+                with open(local_faq_file, 'w', encoding='utf-8') as f:
+                    json.dump(faq_data, f, indent=2, ensure_ascii=False)
+                logger.info(f"📄 Saved FAQs to local file for review: {local_faq_file}")
+            except Exception as save_error:
+                logger.error(f"❌ Error saving local FAQ file: {save_error}")
             
             # Generate avatar videos using HeyGen (background task)
             if avatar_video_processor and presenter_photo_url:
@@ -2427,6 +2582,7 @@ Return ONLY the JSON array, no other text."""
                 )
                 
                 logger.info(f"✅ Background video generation task started")
+                logger.info(f"💰 HeyGen Credits: {len(faq_data['faqs'])} videos will be generated")
             else:
                 if not avatar_video_processor:
                     logger.warning("⚠️ Avatar video processor not available - skipping video generation")

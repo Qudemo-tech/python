@@ -302,6 +302,22 @@ async def root():
         ]
     }
 
+@app.post("/")
+async def root_post():
+    """Handle POST requests to root - return helpful error"""
+    return {
+        "error": "Invalid endpoint",
+        "message": "POST requests are not supported at the root path",
+        "hint": "Use specific endpoints like /ask/{company_name}/{qudemo_id}",
+        "available_endpoints": {
+            "Q&A": "POST /ask/{company_name}/{qudemo_id}",
+            "Video Processing": "POST /process-video",
+            "Document Processing": "POST /process-document",
+            "Health Check": "GET /health",
+            "Status": "GET /status"
+        }
+    }
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""

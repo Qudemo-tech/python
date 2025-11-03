@@ -2018,13 +2018,13 @@ async def generate_faq_for_avatar_videos(company_name: str, qudemo_id: str):
 Video transcript:
 {transcript_text}
 
-Return a JSON array of topics (MAXIMUM 3 topics for testing):
+Return a JSON array of topics (MAXIMUM 2 topics for testing):
 [
   {{"topic": "Feature name or concept", "importance": "high/medium"}},
   ...
 ]
 
-⚠️ LIMIT: Return only the TOP 3 most important topics to save HeyGen credits during testing.
+⚠️ LIMIT: Return only the TOP 2 most important topics to save HeyGen credits during testing.
 
 Focus on:
 - Main features or tools introduced
@@ -2160,13 +2160,13 @@ Return ONLY the JSON array, no other text."""
 Document content:
 {combined_content}
 
-Return a JSON array of topics (MAXIMUM 3 topics for testing):
+Return a JSON array of topics (MAXIMUM 2 topics for testing):
 [
   {{"topic": "Feature or concept name", "importance": "high/medium"}},
   ...
 ]
 
-⚠️ LIMIT: Return only the TOP 3 most important topics to save HeyGen credits during testing.
+⚠️ LIMIT: Return only the TOP 2 most important topics to save HeyGen credits during testing.
 
 Focus on:
 - Product features or capabilities
@@ -2338,8 +2338,8 @@ Return ONLY the JSON array, no other text."""
         
         logger.info(f"📊 Total FAQs generated BEFORE LIMIT: {len(all_faqs)} (Videos: {len(video_faqs)}, Documents: {len(document_faqs)}, Suggested: {len(suggested_faqs)})")
         
-        # ⚠️ TESTING LIMIT: Cap at 3 content FAQs to save HeyGen credits (+ 2 fallback = 5 total)
-        MAX_CONTENT_FAQS = 3
+        # ⚠️ TESTING LIMIT: Cap at 2 content FAQs to save HeyGen credits (+ 3 special = 5 total)
+        MAX_CONTENT_FAQS = 2
         if len(all_faqs) > MAX_CONTENT_FAQS:
             logger.warning(f"⚠️ Limiting FAQs from {len(all_faqs)} to {MAX_CONTENT_FAQS} for testing (HeyGen credit savings)")
             all_faqs = all_faqs[:MAX_CONTENT_FAQS]
@@ -2407,7 +2407,8 @@ Return ONLY the JSON array, no other text."""
             logger.info(f"     • Video FAQs: {len(video_faqs)}")
             logger.info(f"     • Document FAQs: {len(document_faqs)}")
             logger.info(f"   - Special FAQs: {len(default_faqs)} (1 intro + 2 fallback)")
-            logger.info(f"   ⚠️ TESTING MODE: Limited to {MAX_CONTENT_FAQS} content + {len(default_faqs)} special = {len(faq_data['faqs'])} total videos")
+            logger.info(f"   ⚠️ TESTING MODE: Restricted to {MAX_CONTENT_FAQS} content + {len(default_faqs)} special = {len(faq_data['faqs'])} TOTAL VIDEOS")
+            logger.info(f"   💰 HeyGen Credits: Only {len(faq_data['faqs'])} videos will be generated!")
             
             # Generate avatar videos using HeyGen (background task)
             if avatar_video_processor and presenter_photo_url:
@@ -2676,6 +2677,60 @@ async def make_bucket_public(company_name: str):
         
     except Exception as e:
         logger.error(f"❌ Error making bucket public: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@app.post("/make-avatar-videos-public/{company_name}/{qudemo_id}")
+async def make_avatar_videos_public(company_name: str, qudemo_id: str):
+    """Make all avatar videos for a QuDemo publicly accessible (fix for existing videos)"""
+    try:
+        logger.info(f"🌍 Making avatar videos public for {company_name}/{qudemo_id}")
+        
+        gcs_service = GoogleCloudStorageService()
+        bucket = gcs_service._get_company_bucket(company_name)
+        
+        # List all avatar videos for this QuDemo
+        video_prefix = f"{company_name}/{qudemo_id}/avatar_videos/"
+        blobs = list(bucket.list_blobs(prefix=video_prefix))
+        
+        if not blobs:
+            logger.warning(f"⚠️ No avatar videos found at {video_prefix}")
+            return {
+                "success": False,
+                "message": "No avatar videos found",
+                "count": 0
+            }
+        
+        logger.info(f"📹 Found {len(blobs)} avatar videos to make public")
+        
+        # Make each video public
+        success_count = 0
+        errors = []
+        
+        for blob in blobs:
+            try:
+                blob.make_public()
+                logger.info(f"✅ Made public: {blob.name}")
+                success_count += 1
+            except Exception as e:
+                error_msg = f"Failed to make {blob.name} public: {str(e)}"
+                logger.error(f"❌ {error_msg}")
+                errors.append(error_msg)
+        
+        logger.info(f"✅ Successfully made {success_count}/{len(blobs)} videos public")
+        
+        return {
+            "success": True,
+            "message": f"Made {success_count}/{len(blobs)} videos public",
+            "total_videos": len(blobs),
+            "success_count": success_count,
+            "errors": errors if errors else None
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error making avatar videos public: {e}")
         return {
             "success": False,
             "error": str(e)

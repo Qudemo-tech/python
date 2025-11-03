@@ -177,10 +177,17 @@ class AvatarVideoProcessor:
             video_path = f"{company_name}/{qudemo_id}/avatar_videos/{faq_id}.mp4"
             blob = bucket.blob(video_path)
             
-            # Upload video (bucket is already publicly readable)
+            # Upload video to GCS
             blob.upload_from_string(video_data, content_type='video/mp4')
             
-            # Get public URL (accessible because bucket has public IAM policy)
+            # Make the video publicly accessible
+            try:
+                blob.make_public()
+                logger.info(f"✅ Video made public: {video_path}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not make video public (might already be public via bucket policy): {e}")
+            
+            # Get public URL
             gcs_video_url = f"https://storage.googleapis.com/{bucket.name}/{video_path}"
             
             logger.info(f"✅ Video uploaded to GCS: {gcs_video_url}")

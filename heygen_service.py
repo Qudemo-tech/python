@@ -26,8 +26,8 @@ class HeyGenService:
         self.generate_url = "https://api.heygen.com/v2/video/av4/generate"
         self.status_url = "https://api.heygen.com/v1/video_status.get"
         
-        # Default voice ID (you can make this configurable)
-        self.default_voice_id = "466986b2ee27456bbf9757b7ed72c177"
+        # Default voice ID - Custom voice for all avatar videos
+        self.default_voice_id = "01d674cfd32b4728a3fddd21b7e7d543"
         
         logger.info("✅ HeyGen Service initialized")
     

@@ -14,7 +14,7 @@ from openai import OpenAI
 import requests
 
 # FastAPI imports
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
@@ -58,11 +58,12 @@ website_scraper = None
 heygen_service = None
 avatar_video_processor = None
 openai_client = None
+supabase = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for FastAPI"""
-    global loom_processor_gcs, gcs_qa_service, simple_transcriber, document_processor, company_bucket_service, website_scraper, heygen_service, avatar_video_processor, openai_client
+    global loom_processor_gcs, gcs_qa_service, simple_transcriber, document_processor, company_bucket_service, website_scraper, heygen_service, avatar_video_processor, openai_client, supabase
     
     try:
         logger.info("🚀 Starting Enhanced QuDemo Python Backend (GCS-based)...")
@@ -207,6 +208,21 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"❌ OpenAI Client initialization error: {e}")
             openai_client = None
+        
+        # Initialize Supabase Client
+        try:
+            from supabase import create_client
+            supabase_url = os.getenv('SUPABASE_URL')
+            supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+            if supabase_url and supabase_key:
+                supabase = create_client(supabase_url, supabase_key)
+                logger.info("✅ Supabase Client initialized")
+            else:
+                logger.warning("⚠️ Supabase credentials not found - database features will be limited")
+                supabase = None
+        except Exception as e:
+            logger.error(f"❌ Supabase Client initialization error: {e}")
+            supabase = None
         
         # Initialize GCS-based Loom Video Processor (NEW - Replaces Pinecone-based processor)
         try:
@@ -2903,6 +2919,237 @@ async def make_avatar_videos_public(company_name: str, qudemo_id: str):
         
     except Exception as e:
         logger.error(f"❌ Error making avatar videos public: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+# ============================================
+# FAQ MANAGEMENT ENDPOINTS
+# ============================================
+
+@app.get("/faqs/{company_name}/{qudemo_id}")
+async def get_faqs(company_name: str, qudemo_id: str):
+    """Get all FAQs for a QuDemo (for FAQ editor)"""
+    try:
+        logger.info(f"📋 Fetching FAQs for {company_name}/{qudemo_id}")
+        
+        if not gcs_qa_service:
+            return {"success": False, "error": "GCS QA service not available"}
+        
+        # Get FAQs from GCS
+        faqs_data = gcs_qa_service.get_faqs(company_name, qudemo_id)
+        
+        if not faqs_data:
+            return {
+                "success": False,
+                "message": "No FAQs found",
+                "faqs": []
+            }
+        
+        # Extract the faqs array
+        faqs = faqs_data.get('faqs', [])
+        
+        if not faqs:
+            return {
+                "success": False,
+                "message": "No FAQs found",
+                "faqs": []
+            }
+        
+        # Get avatar video URLs from database
+        for faq in faqs:
+            faq_id = faq.get('id')
+            if faq_id:
+                try:
+                    # Query avatar_videos table
+                    response = supabase.table('avatar_videos').select('video_url, status').eq('qudemo_id', qudemo_id).eq('faq_id', faq_id).execute()
+                    if response.data and len(response.data) > 0:
+                        faq['video_url'] = response.data[0].get('video_url')
+                        faq['video_status'] = response.data[0].get('status')
+                except Exception as e:
+                    logger.error(f"❌ Error fetching video for {faq_id}: {e}")
+                    faq['video_url'] = None
+                    faq['video_status'] = None
+        
+        return {
+            "success": True,
+            "faqs": faqs,
+            "count": len(faqs)
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error fetching FAQs: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@app.patch("/faqs/{company_name}/{qudemo_id}/{faq_id}/question")
+async def update_faq_question(company_name: str, qudemo_id: str, faq_id: str, request: Request):
+    """Update FAQ question only (no video regeneration)"""
+    try:
+        body = await request.json()
+        new_question = body.get('question', '').strip()
+        
+        if not new_question:
+            return {"success": False, "error": "Question cannot be empty"}
+        
+        logger.info(f"✏️ Updating question for FAQ {faq_id}: {new_question}")
+        
+        # Get current FAQs from GCS
+        if not gcs_qa_service:
+            return {"success": False, "error": "GCS QA service not available"}
+        
+        faqs_data = gcs_qa_service.get_faqs(company_name, qudemo_id)
+        
+        if not faqs_data:
+            return {"success": False, "error": "FAQs not found"}
+        
+        faqs = faqs_data.get('faqs', [])
+        
+        # Update the question
+        updated = False
+        for faq in faqs:
+            if faq.get('id') == faq_id:
+                faq['question'] = new_question
+                updated = True
+                break
+        
+        if not updated:
+            return {"success": False, "error": f"FAQ {faq_id} not found"}
+        
+        # Save back to GCS
+        gcs_service = GoogleCloudStorageService()
+        bucket = gcs_service._get_company_bucket(company_name)
+        blob = bucket.blob(f"{company_name}/{qudemo_id}/faqs.json")
+        
+        faq_data = {
+            "version": "1.0",
+            "qudemo_id": qudemo_id,
+            "company_name": company_name,
+            "updated_at": datetime.now().isoformat(),
+            "faqs": faqs
+        }
+        
+        blob.upload_from_string(json.dumps(faq_data, indent=2), content_type='application/json')
+        
+        logger.info(f"✅ Updated question for FAQ {faq_id}")
+        
+        return {
+            "success": True,
+            "message": "Question updated successfully"
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error updating FAQ question: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@app.patch("/faqs/{company_name}/{qudemo_id}/{faq_id}/answer")
+async def update_faq_answer(company_name: str, qudemo_id: str, faq_id: str, request: Request):
+    """Update FAQ answer and regenerate AI video"""
+    try:
+        body = await request.json()
+        new_answer = body.get('answer', '').strip()
+        
+        if not new_answer:
+            return {"success": False, "error": "Answer cannot be empty"}
+        
+        if len(new_answer) > 1000:
+            return {"success": False, "error": "Answer too long (max 1000 characters)"}
+        
+        logger.info(f"✏️ Updating answer for FAQ {faq_id}: {new_answer[:100]}...")
+        
+        # Get current FAQs from GCS
+        if not gcs_qa_service:
+            return {"success": False, "error": "GCS QA service not available"}
+        
+        faqs_data = gcs_qa_service.get_faqs(company_name, qudemo_id)
+        
+        if not faqs_data:
+            return {"success": False, "error": "FAQs not found"}
+        
+        faqs = faqs_data.get('faqs', [])
+        
+        # Update the answer
+        updated_faq = None
+        for faq in faqs:
+            if faq.get('id') == faq_id:
+                faq['answer'] = new_answer
+                updated_faq = faq
+                break
+        
+        if not updated_faq:
+            return {"success": False, "error": f"FAQ {faq_id} not found"}
+        
+        # Save back to GCS
+        gcs_service = GoogleCloudStorageService()
+        bucket = gcs_service._get_company_bucket(company_name)
+        blob = bucket.blob(f"{company_name}/{qudemo_id}/faqs.json")
+        
+        faq_data = {
+            "version": "1.0",
+            "qudemo_id": qudemo_id,
+            "company_name": company_name,
+            "updated_at": datetime.now().isoformat(),
+            "faqs": faqs
+        }
+        
+        blob.upload_from_string(json.dumps(faq_data, indent=2), content_type='application/json')
+        
+        logger.info(f"✅ Updated answer for FAQ {faq_id}")
+        
+        # Get presenter photo URL from database
+        try:
+            response = supabase.table('qudemos_new').select('presenter_photo_url, presenter_name').eq('id', qudemo_id).execute()
+            if response.data and len(response.data) > 0:
+                presenter_photo_url = response.data[0].get('presenter_photo_url')
+                presenter_name = response.data[0].get('presenter_name', 'Presenter')
+            else:
+                logger.warning(f"⚠️ No presenter photo found for QuDemo {qudemo_id}")
+                return {
+                    "success": True,
+                    "message": "Answer updated, but no presenter photo found for video generation",
+                    "video_regenerated": False
+                }
+        except Exception as e:
+            logger.error(f"❌ Error fetching presenter photo: {e}")
+            return {
+                "success": True,
+                "message": "Answer updated, but error fetching presenter photo",
+                "video_regenerated": False
+            }
+        
+        # Regenerate video in background
+        if avatar_video_processor and presenter_photo_url:
+            logger.info(f"🎬 Starting video regeneration for FAQ {faq_id}")
+            
+            asyncio.create_task(
+                avatar_video_processor.process_single_faq_video_update(
+                    company_name=company_name,
+                    qudemo_id=qudemo_id,
+                    presenter_photo_url=presenter_photo_url,
+                    faq=updated_faq
+                )
+            )
+            
+            return {
+                "success": True,
+                "message": "Answer updated and video regeneration started",
+                "video_regenerated": True
+            }
+        else:
+            return {
+                "success": True,
+                "message": "Answer updated, but video processor not available",
+                "video_regenerated": False
+            }
+        
+    except Exception as e:
+        logger.error(f"❌ Error updating FAQ answer: {e}")
         return {
             "success": False,
             "error": str(e)

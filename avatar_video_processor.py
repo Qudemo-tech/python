@@ -240,4 +240,89 @@ class AvatarVideoProcessor:
                 "faq_id": faq_id,
                 "error": str(e)
             }
+    
+    async def process_single_faq_video_update(self, company_name: str, qudemo_id: str,
+                                              presenter_photo_url: str, faq: Dict) -> Dict[str, Any]:
+        """
+        Regenerate a single FAQ video (for editing)
+        
+        Args:
+            company_name: Company name
+            qudemo_id: QuDemo ID
+            presenter_photo_url: GCS URL of presenter photo
+            faq: FAQ dictionary with id, question, answer
+            
+        Returns:
+            dict: Processing result
+        """
+        try:
+            faq_id = faq.get('id')
+            logger.info(f"🔄 Regenerating video for FAQ {faq_id}")
+            logger.info(f"📍 QuDemo: {company_name}/{qudemo_id}")
+            
+            # Step 1: Upload presenter photo to HeyGen (or reuse existing image_key if available)
+            logger.info(f"📤 Uploading presenter photo to HeyGen...")
+            logger.info(f"📷 GCS URL: {presenter_photo_url}")
+            
+            image_key = self.heygen.upload_presenter_photo(presenter_photo_url)
+            
+            if not image_key:
+                logger.error(f"❌ Failed to upload presenter photo for {faq_id}")
+                return {"success": False, "faq_id": faq_id, "error": "Failed to upload presenter photo"}
+            
+            logger.info(f"✅ Presenter photo uploaded, image_key: {image_key}")
+            
+            # Wait a bit for HeyGen to process the image
+            logger.info(f"⏳ Waiting 15 seconds for HeyGen to process the image...")
+            await asyncio.sleep(15)
+            
+            # Step 2: Generate the video
+            logger.info(f"🎬 Generating new video for FAQ {faq_id}")
+            
+            # Process the single FAQ video
+            result = await self.process_single_faq_video(
+                company_name=company_name,
+                qudemo_id=qudemo_id,
+                image_key=image_key,
+                faq=faq
+            )
+            
+            if result.get('success'):
+                logger.info(f"✅ Successfully regenerated video for FAQ {faq_id}")
+                
+                # Update the existing avatar_videos record (don't insert new)
+                if self.supabase:
+                    try:
+                        update_data = {
+                            'answer': faq.get('answer'),
+                            'video_url': result.get('video_url'),
+                            'heygen_video_id': result.get('heygen_video_id'),
+                            'status': 'completed',
+                            'updated_at': datetime.now().isoformat()
+                        }
+                        
+                        response = self.supabase.table('avatar_videos')\
+                            .update(update_data)\
+                            .eq('qudemo_id', qudemo_id)\
+                            .eq('faq_id', faq_id)\
+                            .execute()
+                        
+                        logger.info(f"✅ Updated avatar_videos record for {faq_id}")
+                    except Exception as db_error:
+                        logger.error(f"❌ Error updating database for {faq_id}: {db_error}")
+                
+                return {"success": True, "faq_id": faq_id, "video_url": result.get('video_url')}
+            else:
+                logger.error(f"❌ Failed to regenerate video for {faq_id}")
+                return {"success": False, "faq_id": faq_id, "error": result.get('error')}
+            
+        except Exception as e:
+            logger.error(f"❌ Error regenerating video for {faq_id}: {e}")
+            import traceback
+            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+            return {
+                "success": False,
+                "faq_id": faq_id,
+                "error": str(e)
+            }
 

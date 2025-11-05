@@ -363,13 +363,24 @@ async def health_check():
 
 @app.get("/heygen-voices")
 async def get_heygen_voices():
-    """Get available HeyGen voices for avatar video generation"""
+    """
+    Get available HeyGen voices for avatar video generation
+    
+    NOTE: Voice IDs should be replaced with actual HeyGen voice IDs from your HeyGen account.
+    To get real HeyGen voice IDs:
+    1. Go to HeyGen Studio > Voice Library
+    2. Select a voice and inspect the API call to get the voice_id
+    3. Replace the IDs below with actual HeyGen voice IDs
+    
+    Currently using placeholder IDs for preview purposes.
+    """
     try:
         voices = [
+            # Custom Voice (Default - Recommended)
             {
                 "id": "01d674cfd32b4728a3fddd21b7e7d543",
-                "name": "Professional Voice (Default)",
-                "description": "Our custom trained voice - warm and professional (Used for your AI videos)",
+                "name": "Custom Professional (Recommended)",
+                "description": "Our custom trained voice - warm, professional, and engaging",
                 "language": "English (US)",
                 "gender": "Male",
                 "sample_text": "Hello! Welcome to our platform. I'm here to answer your questions and help you succeed.",
@@ -378,10 +389,12 @@ async def get_heygen_voices():
                 "is_default": True,
                 "is_custom": True
             },
+            
+            # Female Voices
             {
                 "id": "1bd001e7e50f421d891986aad5158bc8",
-                "name": "Clear Female Voice",
-                "description": "Clear and professional female voice",
+                "name": "Sara - Professional Female",
+                "description": "Clear, professional female voice ideal for business presentations",
                 "language": "English (US)",
                 "gender": "Female",
                 "sample_text": "Hello! I can help you understand our product better and guide you through the features.",
@@ -391,26 +404,88 @@ async def get_heygen_voices():
                 "is_custom": False
             },
             {
-                "id": "2d5b0e6cf36f4355b6f8c3c0f6c5e935",
-                "name": "Energetic Female Voice",
-                "description": "Upbeat and engaging female voice",
+                "id": "af94e4b95b6d41e79a6b543fc7b16501",
+                "name": "Emma - Friendly Female",
+                "description": "Warm and approachable female voice perfect for customer engagement",
                 "language": "English (US)",
                 "gender": "Female",
                 "sample_text": "Welcome! I'm excited to show you what we can do and help you get started!",
-                "rate": 1.1,
-                "pitch": 1.3,
+                "rate": 1.0,
+                "pitch": 1.15,
                 "is_default": False,
                 "is_custom": False
             },
             {
-                "id": "3f6c8d9e2a1b4d5c8e9f0a1b2c3d4e5f",
-                "name": "Deep Male Voice",
-                "description": "Authoritative deep male voice",
+                "id": "c1d9d7e9f8a74c8e9e1b2f3c4d5e6f7a",
+                "name": "Lisa - Energetic Female",
+                "description": "Upbeat and dynamic female voice for engaging content",
+                "language": "English (US)",
+                "gender": "Female",
+                "sample_text": "Hi there! Let's dive into this exciting opportunity together!",
+                "rate": 1.05,
+                "pitch": 1.25,
+                "is_default": False,
+                "is_custom": False
+            },
+            {
+                "id": "d4e8f3c2b1a94d5e6f7a8b9c0d1e2f3a",
+                "name": "Rachel - Corporate Female",
+                "description": "Sophisticated and authoritative female voice for executive content",
+                "language": "English (US)",
+                "gender": "Female",
+                "sample_text": "Good afternoon. Let me present our strategic solution and key benefits.",
+                "rate": 0.95,
+                "pitch": 1.1,
+                "is_default": False,
+                "is_custom": False
+            },
+            
+            # Male Voices
+            {
+                "id": "2d5b0e6cf36f4355b6f8c3c0f6c5e935",
+                "name": "Mike - Friendly Male",
+                "description": "Conversational and personable male voice",
+                "language": "English (US)",
+                "gender": "Male",
+                "sample_text": "Hi there! Let me walk you through this and show you how everything works.",
+                "rate": 1.0,
+                "pitch": 0.95,
+                "is_default": False,
+                "is_custom": False
+            },
+            {
+                "id": "b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8",
+                "name": "David - Corporate Male",
+                "description": "Professional and authoritative male voice for business content",
                 "language": "English (US)",
                 "gender": "Male",
                 "sample_text": "Good day. Let me explain our solution and demonstrate its key capabilities.",
                 "rate": 0.9,
-                "pitch": 0.7,
+                "pitch": 0.85,
+                "is_default": False,
+                "is_custom": False
+            },
+            {
+                "id": "e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+                "name": "James - Deep Male",
+                "description": "Rich, deep male voice with commanding presence",
+                "language": "English (US)",
+                "gender": "Male",
+                "sample_text": "Welcome. Allow me to guide you through our comprehensive platform.",
+                "rate": 0.85,
+                "pitch": 0.75,
+                "is_default": False,
+                "is_custom": False
+            },
+            {
+                "id": "f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2",
+                "name": "Ryan - Energetic Male",
+                "description": "Upbeat and enthusiastic male voice",
+                "language": "English (US)",
+                "gender": "Male",
+                "sample_text": "Hey! I'm really excited to show you all the amazing features we have!",
+                "rate": 1.05,
+                "pitch": 1.0,
                 "is_default": False,
                 "is_custom": False
             }

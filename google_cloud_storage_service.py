@@ -226,8 +226,9 @@ class GoogleCloudStorageService:
             # Get company-specific bucket
             bucket = self._get_company_bucket(company_name)
             
-            # Create file path: company_name/qudemo_id/faqs.json
-            file_path = f"{company_name}/{qudemo_id}/faqs.json"
+            # Create file path: company_name/qudemo_id/faqs_{company_name}.json
+            faq_filename = f"faqs_{company_name.replace(' ', '_')}.json"
+            file_path = f"{company_name}/{qudemo_id}/{faq_filename}"
             blob = bucket.blob(file_path)
             
             if not blob.exists():

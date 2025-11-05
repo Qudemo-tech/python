@@ -82,7 +82,8 @@ class GCSQAService:
             bucket = self.gcs_service.client.bucket(bucket_name)
             
             # Get FAQs file
-            blob = bucket.blob(f"{company_name}/{qudemo_id}/faqs.json")
+            faq_filename = f"faqs_{company_name.replace(' ', '_')}.json"
+            blob = bucket.blob(f"{company_name}/{qudemo_id}/{faq_filename}")
             
             if not blob.exists():
                 logger.warning(f"⚠️ No FAQs found for {company_name}/{qudemo_id}")
@@ -110,7 +111,8 @@ class GCSQAService:
             
             # Try to fetch FAQs
             try:
-                blob = bucket.blob(f"{company_name}/{qudemo_id}/faqs.json")
+                faq_filename = f"faqs_{company_name.replace(' ', '_')}.json"
+                blob = bucket.blob(f"{company_name}/{qudemo_id}/{faq_filename}")
                 if not blob.exists():
                     logger.info(f"ℹ️ No FAQs file found - no avatar videos available")
                     return None

@@ -1718,123 +1718,6 @@ async def manually_generate_faqs(company_name: str, qudemo_id: str):
         logger.error(f"❌ Error manually generating FAQs: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/test-zapier-webhook/{company_name}/{qudemo_id}")
-async def test_zapier_webhook(company_name: str, qudemo_id: str):
-    """Test endpoint to manually trigger Zapier webhook with FAQs for avatar video generation"""
-    try:
-        logger.info(f"🧪 Testing Zapier webhook for: {company_name}/{qudemo_id}")
-        
-        # Get Zapier webhook URL from environment
-        zapier_webhook_url = os.getenv('ZAPIER_HEYGEN_WEBHOOK_URL')
-        if not zapier_webhook_url:
-            return {
-                "success": False,
-                "error": "ZAPIER_HEYGEN_WEBHOOK_URL not configured in .env file",
-                "message": "Please add your Zapier webhook URL to backend/pythonn/.env"
-            }
-        
-        logger.info(f"✅ Zapier webhook URL found: {zapier_webhook_url[:50]}...")
-        
-        # Get presenter photo URL from Supabase
-        presenter_photo_url = None
-        try:
-            from supabase import create_client
-            supabase_url = os.getenv('SUPABASE_URL')
-            supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
-            
-            if supabase_url and supabase_key:
-                supabase = create_client(supabase_url, supabase_key)
-                response = supabase.table('qudemos_new').select('presenter_photo_url').eq('id', qudemo_id).single().execute()
-                presenter_photo_url = response.data.get('presenter_photo_url') if response.data else None
-                logger.info(f"📸 Presenter photo URL: {presenter_photo_url}")
-        except Exception as e:
-            logger.warning(f"⚠️ Could not fetch presenter photo: {e}")
-        
-        # Fetch FAQs from GCS
-        try:
-            faqs_data = gcs_qa_service.gcs_service.get_faqs(company_name, qudemo_id)
-            
-            if not faqs_data:
-                return {
-                    "success": False,
-                    "error": "No FAQs found for this QuDemo",
-                    "message": f"FAQs not generated yet for {company_name}/{qudemo_id}. Create a QuDemo with documents to generate FAQs."
-                }
-            
-            logger.info(f"📋 Found {len(faqs_data)} FAQs to send to Zapier")
-            
-        except Exception as e:
-            logger.error(f"❌ Error fetching FAQs: {e}")
-            return {
-                "success": False,
-                "error": f"Failed to fetch FAQs: {str(e)}"
-            }
-        
-        # Send each FAQ to Zapier webhook
-        results = []
-        import requests
-        
-        for faq in faqs_data:
-            faq_data = {
-                "qudemoId": qudemo_id,
-                "companyName": company_name,
-                "faqId": faq.get('id', 'unknown'),
-                "question": faq.get('question', ''),
-                "answer": faq.get('answer', ''),
-                "presenterPhotoUrl": presenter_photo_url or "",
-                "source": faq.get('source', 'unknown')
-            }
-            
-            logger.info(f"📤 Sending FAQ to Zapier: {faq.get('id', 'unknown')}")
-            
-            try:
-                response = requests.post(
-                    zapier_webhook_url,
-                    json=faq_data,
-                    timeout=10
-                )
-                
-                if response.status_code in [200, 201]:
-                    logger.info(f"✅ FAQ sent successfully: {faq.get('id')}")
-                    results.append({
-                        "faq_id": faq.get('id'),
-                        "status": "success",
-                        "status_code": response.status_code
-                    })
-                else:
-                    logger.warning(f"⚠️ Zapier returned status {response.status_code} for FAQ {faq.get('id')}")
-                    results.append({
-                        "faq_id": faq.get('id'),
-                        "status": "warning",
-                        "status_code": response.status_code,
-                        "response": response.text[:200]
-                    })
-                    
-            except Exception as e:
-                logger.error(f"❌ Error sending FAQ to Zapier: {e}")
-                results.append({
-                    "faq_id": faq.get('id'),
-                    "status": "error",
-                    "error": str(e)
-                })
-        
-        success_count = len([r for r in results if r['status'] == 'success'])
-        
-        return {
-            "success": True,
-            "message": f"Sent {success_count}/{len(faqs_data)} FAQs to Zapier webhook",
-            "webhook_url": zapier_webhook_url[:50] + "...",
-            "qudemo_id": qudemo_id,
-            "company_name": company_name,
-            "presenter_photo_url": presenter_photo_url,
-            "total_faqs": len(faqs_data),
-            "results": results
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error testing Zapier webhook: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.delete("/cleanup-qudemo/{company_name}/{qudemo_id}")
 async def cleanup_qudemo_data(company_name: str, qudemo_id: str):
     """Clean up all GCS data for a specific QuDemo (replaces Pinecone cleanup)"""
@@ -2040,49 +1923,23 @@ async def generate_faq_for_avatar_videos(company_name: str, qudemo_id: str):
                         transcript_text = ""
                     
                     if transcript_text:
-                        transcript_text = transcript_text[:15000]  # Limit to 15k chars
+                        transcript_text = transcript_text[:10000]  # Limit to 10k chars to avoid token limits
                         
                         logger.info(f"🎥 Video transcript length: {len(transcript_text)} characters")
                         
                         # STEP 1: Identify all distinct topics/concepts (for comprehensive coverage)
                         logger.info(f"🔍 Step 1: Identifying all topics in video...")
                         
-                        topics_prompt = f"""Analyze this video transcript and identify topics for creating customer-facing FAQs.
+                        topics_prompt = f"""Identify high-level topics from this transcript for customer FAQs.
+
+Prioritize: Product uniqueness, target audience, value proposition, benefits, time/cost savings.
+Then: Key features, pricing, technical specs.
+Max 10 topics.
 
 Video transcript:
 {transcript_text}
 
-PRIORITIZE HIGH-LEVEL, STRATEGIC TOPICS (Always include these first):
-1. Product uniqueness/differentiators (what makes it special)
-2. Target audience/ideal customer (who it's for)
-3. Core value proposition (main benefit/promise)
-4. Top customer benefits overview (why they should care)
-5. Time/cost savings (specific advantages)
-
-THEN add specific topics if space remains:
-6. Key features
-7. Implementation details
-8. Technical specifications
-
-GOOD TOPIC EXAMPLES (High-level):
-✅ "Product uniqueness and differentiation"
-✅ "Target audience and ideal use cases"
-✅ "Core value proposition"
-✅ "Customer benefits overview"
-✅ "Time savings and efficiency gains"
-
-BAD TOPIC EXAMPLES (Too specific/technical):
-❌ "Visa application processing workflow"
-❌ "Employee documentation management system"
-❌ "Regulatory compliance automation details"
-
-Return a JSON array (MAXIMUM 10 topics):
-[
-  {{"topic": "High-level topic description", "importance": "high/medium"}},
-  ...
-]
-
-Return ONLY the JSON array."""
+Return JSON: [{{"topic": "description", "importance": "high/medium"}}]"""
 
                         try:
                             topics_response = openai_client.chat.completions.create(
@@ -2110,69 +1967,19 @@ Return ONLY the JSON array."""
                         
                         topics_list = "\n".join([f"- {t.get('topic', '')}" for t in topics])
                         
-                        prompt = f"""Generate FAQ questions and answers from this video transcript.
-
-IDENTIFIED TOPICS TO COVER:
+                        prompt = f"""Generate FAQs from this transcript covering these topics:
 {topics_list}
 
-QUESTION STYLE (CRITICAL):
-- Keep questions SHORT and SIMPLE (5-10 words maximum)
-- Ask ONE thing per question - NO compound questions
-- Use conversational, direct language
-- Avoid technical jargon unless necessary
-- Start with: "What is...", "How does...", "Why...", "Who is..."
+Questions: Short (5-10 words), simple, no compound questions. Start with "What is/How does/Why/Who".
+Answers: Clear, concise (100-150 words max 1000 chars), focus on benefits. Use bullet points for key features.
 
-GOOD Examples:
-✅ "What is [Product]?"
-✅ "What makes [Product] unique?"
-✅ "How does [Product] save time?"
-✅ "Who is [Product] designed for?"
-
-BAD Examples:
-❌ "What is [Product] and what services does it provide?" (compound - 2 questions)
-❌ "How does [Product] automate regulatory compliance and visa services?" (compound + too long)
-❌ "How does [Product] provide transparency and invoicing?" (compound - has "and")
-❌ "What visa and immigration services does [Product] offer?" (too specific)
-❌ "How does [Product] save time through automation?" (extra words)
-
-⚠️ If your question has "and" in it, it's probably compound - split it!
-
-ANSWER STYLE (CRITICAL):
-1. Start with a clear, direct statement (1-2 sentences)
-2. Use bullet points for key benefits/features when applicable
-3. Keep answers concise (100-150 words, ~45 seconds to speak)
-4. Focus on VALUE and BENEFITS, not just features
-5. Use natural, conversational language
-6. Maximum 1000 characters per answer
-
-ANSWER FORMAT:
-"[Direct statement explaining the topic]. [Key benefits/features]:
-- Benefit 1
-- Benefit 2
-- Benefit 3"
-
-OTHER REQUIREMENTS:
-- Create 1 UNIQUE FAQ for EACH topic above
-- Each question MUST be distinctly different
-- If topics overlap, combine into ONE FAQ
-- Synthesize - DON'T copy transcript text
-
-⚠️ UNIQUENESS CHECK: Ensure each question is NOT similar to previous questions!
-
-FORMAT as JSON array:
-[
-  {{
-    "question": "Short, simple, direct question (5-10 words)",
-    "answer": "Direct statement + bullet points if applicable",
-    "category": "video",
-    "source": "video_transcript"
-  }}
-]
+Create 1 unique FAQ per topic. Synthesize, don't copy transcript.
 
 Video transcript:
 {transcript_text}
 
-Return ONLY the JSON array, no other text."""
+Return JSON only:
+[{{"question": "...", "answer": "...", "category": "video", "source": "video_transcript"}}]"""
 
                         try:
                             if not openai_client:
@@ -2183,7 +1990,7 @@ Return ONLY the JSON array, no other text."""
                                     model="gpt-4",
                                     messages=[{"role": "user", "content": prompt}],
                                     temperature=0.7,
-                                    max_tokens=4000
+                                    max_tokens=2500
                                 )
                                 
                                 faq_json = response.choices[0].message.content.strip()
@@ -2240,50 +2047,23 @@ Return ONLY the JSON array, no other text."""
             if all_documents:
                 # Combine all document content
                 combined_content = "\n\n".join([doc.get('content', '') for doc in all_documents])
-                combined_content = combined_content[:15000]  # Limit to 15k chars for GPT-4
+                combined_content = combined_content[:10000]  # Limit to 10k chars to avoid token limits
                 
                 logger.info(f"📄 Combined document content length: {len(combined_content)} characters")
                 
                 # STEP 1: Identify all distinct topics/concepts in documents
                 logger.info(f"🔍 Step 1: Identifying all topics in documents...")
                 
-                doc_topics_prompt = f"""Analyze this document content and identify topics for creating customer-facing FAQs.
+                doc_topics_prompt = f"""Identify high-level topics from this document for customer FAQs.
+
+Prioritize: Product uniqueness, target audience, value proposition, benefits, time/cost savings.
+Then: Key features, pricing, use cases.
+Max 10 topics.
 
 Document content:
 {combined_content}
 
-PRIORITIZE HIGH-LEVEL, STRATEGIC TOPICS (Always include these first):
-1. Product uniqueness/differentiators (what makes it special)
-2. Target audience/ideal customer (who it's for)
-3. Core value proposition (main benefit/promise)
-4. Top customer benefits overview (why they should care)
-5. Time/cost savings (specific advantages)
-
-THEN add specific topics if space remains:
-6. Key features
-7. Pricing or plans
-8. Technical specifications
-9. Use cases
-
-GOOD TOPIC EXAMPLES (High-level):
-✅ "Product uniqueness and differentiation"
-✅ "Target audience and ideal customer"
-✅ "Core value proposition"
-✅ "Customer benefits overview"
-✅ "Cost savings and ROI"
-
-BAD TOPIC EXAMPLES (Too specific/technical):
-❌ "Document approval workflow system"
-❌ "Specific visa processing procedures"
-❌ "HR documentation management features"
-
-Return a JSON array (MAXIMUM 10 topics):
-[
-  {{"topic": "High-level topic description", "importance": "high/medium"}},
-  ...
-]
-
-Return ONLY the JSON array."""
+Return JSON: [{{"topic": "description", "importance": "high/medium"}}]"""
 
                 try:
                     doc_topics_response = openai_client.chat.completions.create(
@@ -2311,69 +2091,19 @@ Return ONLY the JSON array."""
                 
                 doc_topics_list = "\n".join([f"- {t.get('topic', '')}" for t in doc_topics])
                 
-                prompt = f"""Generate FAQ questions and answers from this document content.
-
-IDENTIFIED TOPICS TO COVER:
+                prompt = f"""Generate FAQs from this document covering these topics:
 {doc_topics_list}
 
-QUESTION STYLE (CRITICAL):
-- Keep questions SHORT and SIMPLE (5-10 words maximum)
-- Ask ONE thing per question - NO compound questions
-- Use conversational, direct language
-- Avoid technical jargon unless necessary
-- Start with: "What is...", "How does...", "Why...", "Who is..."
+Questions: Short (5-10 words), simple, no compound questions. Start with "What is/How does/Why/Who".
+Answers: Clear, concise (100-150 words max 1000 chars), focus on benefits. Use bullet points for key features.
 
-GOOD Examples:
-✅ "What is [Product]?"
-✅ "What makes [Product] unique?"
-✅ "How does [Product] save time?"
-✅ "What are the main benefits?"
-
-BAD Examples:
-❌ "What is [Product] and what services does it provide?" (compound - 2 questions)
-❌ "How does [Product] ensure financial transparency and cost management?" (compound + too long)
-❌ "How does [Product] mitigate risks and detect issues?" (compound - has "and")
-❌ "What employee documentation features does [Product] have?" (too specific)
-❌ "How does [Product] automate regulatory compliance?" (too technical)
-
-⚠️ If your question has "and" in it, it's probably compound - split it!
-
-ANSWER STYLE (CRITICAL):
-1. Start with a clear, direct statement (1-2 sentences)
-2. Use bullet points for key benefits/features when applicable
-3. Keep answers concise (100-150 words, ~45 seconds to speak)
-4. Focus on VALUE and BENEFITS, not just features
-5. Use natural, conversational language
-6. Maximum 1000 characters per answer
-
-ANSWER FORMAT:
-"[Direct statement explaining the topic]. [Key benefits/features]:
-- Benefit 1
-- Benefit 2
-- Benefit 3"
-
-OTHER REQUIREMENTS:
-- Create 1 UNIQUE FAQ for EACH topic above
-- Each question MUST be distinctly different
-- If topics overlap, combine into ONE FAQ
-- Synthesize - DON'T copy raw document text
-
-⚠️ UNIQUENESS CHECK: Ensure each question is NOT similar to previous questions!
-
-FORMAT as JSON array:
-[
-  {{
-    "question": "Short, simple, direct question (5-10 words)",
-    "answer": "Direct statement + bullet points if applicable",
-    "category": "features",
-    "source": "document"
-  }}
-]
+Create 1 unique FAQ per topic. Synthesize, don't copy document text.
 
 Document content:
 {combined_content}
 
-Return ONLY the JSON array, no other text."""
+Return JSON only:
+[{{"question": "...", "answer": "...", "category": "features", "source": "document"}}]"""
 
                 try:
                     if not openai_client:
@@ -2384,7 +2114,7 @@ Return ONLY the JSON array, no other text."""
                             model="gpt-4",
                             messages=[{"role": "user", "content": prompt}],
                             temperature=0.7,
-                            max_tokens=4000
+                            max_tokens=2500
                         )
                         
                         faq_json = response.choices[0].message.content.strip()
@@ -2578,7 +2308,8 @@ Return ONLY the JSON array, no other text."""
             }
             
             # Store in GCS
-            blob = bucket.blob(f"{company_name}/{qudemo_id}/faqs.json")
+            faq_filename = f"faqs_{company_name.replace(' ', '_')}.json"
+            blob = bucket.blob(f"{company_name}/{qudemo_id}/{faq_filename}")
             blob.upload_from_string(json.dumps(faq_data, indent=2), content_type='application/json')
             logger.info(f"✅ Stored {len(faq_data['faqs'])} FAQs in GCS: {blob.name}")
             logger.info(f"   - Content FAQs (after limit): {len(all_faqs)}")
@@ -2628,58 +2359,6 @@ Return ONLY the JSON array, no other text."""
         import traceback
         logger.error(f"❌ Full traceback: {traceback.format_exc()}")
         return None
-
-async def trigger_zapier_heygen(
-    company_name: str,
-    qudemo_id: str,
-    presenter_photo_url: str,
-    presenter_name: str,
-    faqs: List[Dict]
-):
-    """Trigger Zapier webhook to generate HeyGen avatar videos"""
-    try:
-        zapier_webhook_url = os.getenv('ZAPIER_HEYGEN_WEBHOOK_URL')
-        
-        if not zapier_webhook_url:
-            logger.warning("⚠️ ZAPIER_HEYGEN_WEBHOOK_URL not set - skipping Zapier trigger")
-            logger.info("ℹ️ FAQs have been generated and stored in GCS")
-            logger.info("ℹ️ Set ZAPIER_HEYGEN_WEBHOOK_URL environment variable to enable automatic avatar video generation")
-            return
-        
-        logger.info(f"🔗 Triggering Zapier webhook for HeyGen avatar video generation...")
-        logger.info(f"📊 Triggering for {len(faqs)} FAQs")
-        
-        # Prepare webhook payload
-        node_api_url = os.getenv('NODE_API_BASE_URL', 'http://localhost:5000')
-        callback_url = f"{node_api_url}/api/qudemos/heygen-callback"
-        
-        payload = {
-            "company_name": company_name,
-            "qudemo_id": qudemo_id,
-            "presenter_photo_url": presenter_photo_url,
-            "presenter_name": presenter_name,
-            "callback_url": callback_url,
-            "total_faqs": len(faqs),
-            "faqs": faqs
-        }
-        
-        # Send webhook
-        response = requests.post(
-            zapier_webhook_url,
-            json=payload,
-            timeout=30
-        )
-        
-        if response.ok:
-            logger.info(f"✅ Zapier webhook triggered successfully")
-            logger.info(f"📹 HeyGen will generate {len(faqs)} avatar videos")
-            logger.info(f"⏱️ Estimated time: {len(faqs) * 5} minutes")
-        else:
-            logger.error(f"❌ Zapier webhook failed: {response.status_code} - {response.text}")
-            
-    except Exception as e:
-        logger.error(f"❌ Error triggering Zapier webhook: {e}")
-        logger.info("ℹ️ FAQs are still available in GCS even though Zapier trigger failed")
 
 def _generate_processing_status_message(successful_content: Dict, processing_errors: List[Dict], total_chunks: int) -> str:
     """Generate user-friendly processing status message"""
@@ -3022,7 +2701,8 @@ async def update_faq_question(company_name: str, qudemo_id: str, faq_id: str, re
         # Save back to GCS
         gcs_service = GoogleCloudStorageService()
         bucket = gcs_service._get_company_bucket(company_name)
-        blob = bucket.blob(f"{company_name}/{qudemo_id}/faqs.json")
+        faq_filename = f"faqs_{company_name.replace(' ', '_')}.json"
+        blob = bucket.blob(f"{company_name}/{qudemo_id}/{faq_filename}")
         
         faq_data = {
             "version": "1.0",
@@ -3088,7 +2768,8 @@ async def update_faq_answer(company_name: str, qudemo_id: str, faq_id: str, requ
         # Save back to GCS
         gcs_service = GoogleCloudStorageService()
         bucket = gcs_service._get_company_bucket(company_name)
-        blob = bucket.blob(f"{company_name}/{qudemo_id}/faqs.json")
+        faq_filename = f"faqs_{company_name.replace(' ', '_')}.json"
+        blob = bucket.blob(f"{company_name}/{qudemo_id}/{faq_filename}")
         
         faq_data = {
             "version": "1.0",

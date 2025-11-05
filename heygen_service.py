@@ -159,12 +159,15 @@ class HeyGenService:
             if len(script) > len(truncated_script):
                 logger.info(f"✂️ Truncated script from {len(script)} to {len(truncated_script)} characters")
             
+            # Determine which voice to use
+            selected_voice_id = voice_id or self.default_voice_id
             logger.info(f"🎬 Generating video: {video_title}")
+            logger.info(f"🎤 Using voice ID: {selected_voice_id} {'(provided)' if voice_id else '(default fallback)'}")
             
             payload = {
                 "video_orientation": "portrait",
                 "script": truncated_script,
-                "voice_id": voice_id or self.default_voice_id,
+                "voice_id": selected_voice_id,
                 "image_key": image_key,  # HeyGen requires image_key field
                 "video_title": video_title
             }

@@ -29,7 +29,8 @@ class AvatarVideoProcessor:
         logger.info("✅ Avatar Video Processor initialized")
     
     async def process_faq_videos(self, company_name: str, qudemo_id: str, 
-                                presenter_photo_url: str, faqs: List[Dict]) -> Dict[str, Any]:
+                                presenter_photo_url: str, faqs: List[Dict], 
+                                voice_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Process all FAQ videos concurrently
         
@@ -38,6 +39,7 @@ class AvatarVideoProcessor:
             qudemo_id: QuDemo ID
             presenter_photo_url: GCS URL of presenter photo
             faqs: List of FAQ dictionaries with id, question, answer
+            voice_id: Optional HeyGen voice ID (uses default if not provided)
             
         Returns:
             dict: Processing summary with success/failure counts
@@ -61,6 +63,7 @@ class AvatarVideoProcessor:
                 }
             
             logger.info(f"✅ Presenter photo uploaded, image_key: {image_key}")
+            logger.info(f"🎤 Voice ID for videos: {voice_id if voice_id else 'Default (will use HeyGen service default)'}")
             
             # Wait for HeyGen to process the uploaded image
             logger.info(f"⏳ Waiting 15 seconds for HeyGen to process the image...")
@@ -75,7 +78,8 @@ class AvatarVideoProcessor:
                     company_name=company_name,
                     qudemo_id=qudemo_id,
                     image_key=image_key,
-                    faq=faq
+                    faq=faq,
+                    voice_id=voice_id
                 )
                 tasks.append(task)
             
@@ -118,7 +122,8 @@ class AvatarVideoProcessor:
             }
     
     async def process_single_faq_video(self, company_name: str, qudemo_id: str, 
-                                      image_key: str, faq: Dict) -> Dict[str, Any]:
+                                      image_key: str, faq: Dict, 
+                                      voice_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Process a single FAQ video
         
@@ -127,6 +132,7 @@ class AvatarVideoProcessor:
             qudemo_id: QuDemo ID
             image_key: HeyGen image_key (with /original suffix removed)
             faq: FAQ dictionary with id, question, answer
+            voice_id: Optional HeyGen voice ID (uses default if not provided)
             
         Returns:
             dict: Result with success status and video info
@@ -143,7 +149,8 @@ class AvatarVideoProcessor:
             video_id = self.heygen.generate_video(
                 image_key=image_key,
                 script=answer,  # HeyGen service will truncate to 1000 chars
-                video_title=video_title
+                video_title=video_title,
+                voice_id=voice_id  # Pass voice_id to HeyGen
             )
             
             if not video_id:
@@ -279,12 +286,23 @@ class AvatarVideoProcessor:
             # Step 2: Generate the video
             logger.info(f"🎬 Generating new video for FAQ {faq_id}")
             
+            # Get voice_id from qudemo (if available)
+            voice_id_to_use = None
+            try:
+                qudemo_data = self.supabase.table('qudemos_new').select('voice_id').eq('id', qudemo_id).execute()
+                if qudemo_data.data and len(qudemo_data.data) > 0:
+                    voice_id_to_use = qudemo_data.data[0].get('voice_id')
+                    logger.info(f"🎤 Using voice ID from qudemo: {voice_id_to_use}")
+            except Exception as voice_error:
+                logger.warning(f"⚠️ Could not fetch voice_id, using default: {voice_error}")
+            
             # Process the single FAQ video
             result = await self.process_single_faq_video(
                 company_name=company_name,
                 qudemo_id=qudemo_id,
                 image_key=image_key,
-                faq=faq
+                faq=faq,
+                voice_id=voice_id_to_use
             )
             
             if result.get('success'):

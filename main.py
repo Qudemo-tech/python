@@ -361,6 +361,74 @@ async def health_check():
             "timestamp": datetime.now().isoformat()
         }
 
+@app.get("/heygen-voices")
+async def get_heygen_voices():
+    """Get available HeyGen voices for avatar video generation"""
+    try:
+        voices = [
+            {
+                "id": "01d674cfd32b4728a3fddd21b7e7d543",
+                "name": "Professional Voice (Default)",
+                "description": "Our custom trained voice - warm and professional (Used for your AI videos)",
+                "language": "English (US)",
+                "gender": "Male",
+                "sample_text": "Hello! Welcome to our platform. I'm here to answer your questions and help you succeed.",
+                "rate": 0.95,
+                "pitch": 0.9,
+                "is_default": True,
+                "is_custom": True
+            },
+            {
+                "id": "1bd001e7e50f421d891986aad5158bc8",
+                "name": "Clear Female Voice",
+                "description": "Clear and professional female voice",
+                "language": "English (US)",
+                "gender": "Female",
+                "sample_text": "Hello! I can help you understand our product better and guide you through the features.",
+                "rate": 1.0,
+                "pitch": 1.2,
+                "is_default": False,
+                "is_custom": False
+            },
+            {
+                "id": "2d5b0e6cf36f4355b6f8c3c0f6c5e935",
+                "name": "Energetic Female Voice",
+                "description": "Upbeat and engaging female voice",
+                "language": "English (US)",
+                "gender": "Female",
+                "sample_text": "Welcome! I'm excited to show you what we can do and help you get started!",
+                "rate": 1.1,
+                "pitch": 1.3,
+                "is_default": False,
+                "is_custom": False
+            },
+            {
+                "id": "3f6c8d9e2a1b4d5c8e9f0a1b2c3d4e5f",
+                "name": "Deep Male Voice",
+                "description": "Authoritative deep male voice",
+                "language": "English (US)",
+                "gender": "Male",
+                "sample_text": "Good day. Let me explain our solution and demonstrate its key capabilities.",
+                "rate": 0.9,
+                "pitch": 0.7,
+                "is_default": False,
+                "is_custom": False
+            }
+        ]
+        
+        return {
+            "success": True,
+            "voices": voices,
+            "count": len(voices)
+        }
+    except Exception as e:
+        logger.error(f"❌ Error fetching HeyGen voices: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "voices": []
+        }
+
 @app.get("/memory-status")
 async def memory_status():
     """Memory status endpoint for health checks"""
@@ -553,6 +621,93 @@ async def generate_suggested_questions(company_name: str, qudemo_id: str):
     except Exception as e:
         logger.error(f"❌ Error generating suggested questions: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/suggested-questions/{company_name}/{qudemo_id}")
+async def delete_suggested_question(company_name: str, qudemo_id: str, request: Request):
+    """Delete a suggested question by question text"""
+    try:
+        body = await request.json()
+        question_text = body.get('question', '').strip()
+        
+        if not question_text:
+            return {"success": False, "error": "Question text is required"}
+        
+        logger.info(f"🗑️ Deleting suggested question: '{question_text}' from {company_name}/{qudemo_id}")
+        
+        # Get current FAQs from GCS
+        if not gcs_qa_service:
+            return {"success": False, "error": "GCS QA service not available"}
+        
+        faqs_data = gcs_qa_service.get_faqs(company_name, qudemo_id)
+        
+        if not faqs_data:
+            return {"success": False, "error": "FAQs not found"}
+        
+        faqs = faqs_data.get('faqs', [])
+        
+        # Find and remove the FAQ with matching question
+        faq_found = False
+        updated_faqs = []
+        deleted_faq = None
+        
+        for faq in faqs:
+            if faq.get('question', '').strip() == question_text:
+                faq_found = True
+                deleted_faq = faq
+                logger.info(f"📝 Found FAQ to delete: {faq.get('id')} - {faq.get('question')}")
+            else:
+                updated_faqs.append(faq)
+        
+        if not faq_found:
+            return {"success": False, "error": f"Question not found: '{question_text}'"}
+        
+        # Save updated FAQs back to GCS
+        gcs_service = GoogleCloudStorageService()
+        bucket = gcs_service._get_company_bucket(company_name)
+        faq_filename = f"faqs_{company_name.replace(' ', '_')}.json"
+        blob = bucket.blob(f"{company_name}/{qudemo_id}/{faq_filename}")
+        
+        faq_data = {
+            "version": "1.0",
+            "qudemo_id": qudemo_id,
+            "company_name": company_name,
+            "updated_at": datetime.now().isoformat(),
+            "faqs": updated_faqs
+        }
+        
+        blob.upload_from_string(json.dumps(faq_data, indent=2), content_type='application/json')
+        
+        logger.info(f"✅ Deleted suggested question. Remaining FAQs: {len(updated_faqs)}")
+        
+        # Try to delete associated avatar video from database
+        video_deleted = False
+        if deleted_faq:
+            try:
+                faq_id = deleted_faq.get('id')
+                delete_response = supabase.table('avatar_videos').delete().eq('qudemo_id', qudemo_id).eq('faq_id', faq_id).execute()
+                
+                if delete_response.data:
+                    video_deleted = True
+                    logger.info(f"✅ Deleted avatar video from database for FAQ {faq_id}")
+                    
+            except Exception as video_error:
+                logger.warning(f"⚠️ Error deleting avatar video: {video_error}")
+        
+        return {
+            "success": True,
+            "message": "Suggested question deleted successfully",
+            "deleted_question": question_text,
+            "deleted_faq_id": deleted_faq.get('id') if deleted_faq else None,
+            "remaining_questions": len([f for f in updated_faqs if not f.get('is_fallback') and not f.get('is_intro')]),
+            "video_deleted": video_deleted
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error deleting suggested question: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 @app.get("/suggested-questions/{company_name}/{qudemo_id}")
 async def get_suggested_questions(company_name: str, qudemo_id: str):
@@ -2246,13 +2401,13 @@ Return JSON only:
         all_faqs = unique_faqs
         logger.info(f"📊 Total FAQs AFTER DEDUPLICATION: {len(all_faqs)} unique FAQs")
         
-        # ⚠️ LIMIT: Cap at 7 content FAQs (+ 3 special = 10 total)
-        MAX_CONTENT_FAQS = 7
+        # ⚠️ LIMIT: Cap at 2 content FAQs (+ 3 special = 5 total) - TEMPORARY FOR TESTING
+        MAX_CONTENT_FAQS = 2  # Reduced from 7 to 2 for testing (saves HeyGen credits)
         if len(all_faqs) > MAX_CONTENT_FAQS:
             logger.warning(f"⚠️ Limiting FAQs from {len(all_faqs)} to {MAX_CONTENT_FAQS}")
             all_faqs = all_faqs[:MAX_CONTENT_FAQS]
         
-        logger.info(f"📊 Total FAQs AFTER LIMIT: {len(all_faqs)} content FAQs (will add 1 intro + 2 fallback FAQs = {len(all_faqs) + 3} total = max 10 videos)")
+        logger.info(f"📊 Total FAQs AFTER LIMIT: {len(all_faqs)} content FAQs (will add 1 intro + 2 fallback FAQs = {len(all_faqs) + 3} total = max 5 videos) [TESTING MODE]")
         
         # Store FAQs in GCS (regardless of document availability)
         if gcs_qa_service:
@@ -2334,13 +2489,24 @@ Return JSON only:
                 logger.info(f"⏱️ Estimated time: 3-5 minutes per video ({len(faq_data['faqs'])} videos total)")
                 logger.info(f"🔄 Videos will be generated in the background")
                 
+                # Get voice_id from qudemo (if available)
+                voice_id_to_use = None
+                try:
+                    qudemo_voice = supabase.table('qudemos_new').select('voice_id').eq('id', qudemo_id).execute()
+                    if qudemo_voice.data and len(qudemo_voice.data) > 0:
+                        voice_id_to_use = qudemo_voice.data[0].get('voice_id')
+                        logger.info(f"🎤 Using voice ID from qudemo: {voice_id_to_use}")
+                except Exception as voice_error:
+                    logger.warning(f"⚠️ Could not fetch voice_id, using default: {voice_error}")
+                
                 # Run video generation in background (don't block the response)
                 asyncio.create_task(
                     avatar_video_processor.process_faq_videos(
                         company_name=company_name,
                         qudemo_id=qudemo_id,
                         presenter_photo_url=presenter_photo_url,
-                        faqs=faq_data["faqs"]
+                        faqs=faq_data["faqs"],
+                        voice_id=voice_id_to_use
                     )
                 )
                 
@@ -2756,10 +2922,15 @@ async def update_faq_answer(company_name: str, qudemo_id: str, faq_id: str, requ
         
         # Update the answer
         updated_faq = None
+        old_answer = None
         for faq in faqs:
             if faq.get('id') == faq_id:
+                old_answer = faq.get('answer', '')
                 faq['answer'] = new_answer
                 updated_faq = faq
+                logger.info(f"📝 FAQ {faq_id} answer updated:")
+                logger.info(f"   Old: {old_answer[:100]}...")
+                logger.info(f"   New: {new_answer[:100]}...")
                 break
         
         if not updated_faq:
@@ -2781,7 +2952,8 @@ async def update_faq_answer(company_name: str, qudemo_id: str, faq_id: str, requ
         
         blob.upload_from_string(json.dumps(faq_data, indent=2), content_type='application/json')
         
-        logger.info(f"✅ Updated answer for FAQ {faq_id}")
+        logger.info(f"✅ Updated answer for FAQ {faq_id} in GCS: {company_name}/{qudemo_id}/{faq_filename}")
+        logger.info(f"📄 FAQ JSON saved with {len(faqs)} FAQs")
         
         # Get presenter photo URL from database
         try:
@@ -2831,6 +3003,91 @@ async def update_faq_answer(company_name: str, qudemo_id: str, faq_id: str, requ
         
     except Exception as e:
         logger.error(f"❌ Error updating FAQ answer: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@app.delete("/faqs/{company_name}/{qudemo_id}/{faq_id}")
+async def delete_faq(company_name: str, qudemo_id: str, faq_id: str):
+    """Delete a specific FAQ and optionally its associated avatar video"""
+    try:
+        logger.info(f"🗑️ Deleting FAQ {faq_id} from {company_name}/{qudemo_id}")
+        
+        # Get current FAQs from GCS
+        if not gcs_qa_service:
+            return {"success": False, "error": "GCS QA service not available"}
+        
+        faqs_data = gcs_qa_service.get_faqs(company_name, qudemo_id)
+        
+        if not faqs_data:
+            return {"success": False, "error": "FAQs not found"}
+        
+        faqs = faqs_data.get('faqs', [])
+        
+        # Find and remove the FAQ
+        faq_found = False
+        updated_faqs = []
+        deleted_faq = None
+        
+        for faq in faqs:
+            if faq.get('id') == faq_id:
+                faq_found = True
+                deleted_faq = faq
+                logger.info(f"📝 Found FAQ to delete: {faq.get('question', 'Unknown')}")
+            else:
+                updated_faqs.append(faq)
+        
+        if not faq_found:
+            return {"success": False, "error": f"FAQ {faq_id} not found"}
+        
+        # Save updated FAQs back to GCS
+        gcs_service = GoogleCloudStorageService()
+        bucket = gcs_service._get_company_bucket(company_name)
+        faq_filename = f"faqs_{company_name.replace(' ', '_')}.json"
+        blob = bucket.blob(f"{company_name}/{qudemo_id}/{faq_filename}")
+        
+        faq_data = {
+            "version": "1.0",
+            "qudemo_id": qudemo_id,
+            "company_name": company_name,
+            "updated_at": datetime.now().isoformat(),
+            "faqs": updated_faqs
+        }
+        
+        blob.upload_from_string(json.dumps(faq_data, indent=2), content_type='application/json')
+        
+        logger.info(f"✅ Deleted FAQ {faq_id} from GCS. Remaining FAQs: {len(updated_faqs)}")
+        
+        # Try to delete associated avatar video from database
+        video_deleted = False
+        try:
+            # Delete from avatar_videos table
+            delete_response = supabase.table('avatar_videos').delete().eq('qudemo_id', qudemo_id).eq('faq_id', faq_id).execute()
+            
+            if delete_response.data:
+                video_deleted = True
+                logger.info(f"✅ Deleted avatar video from database for FAQ {faq_id}")
+            else:
+                logger.info(f"ℹ️ No avatar video found in database for FAQ {faq_id}")
+                
+        except Exception as video_error:
+            logger.warning(f"⚠️ Error deleting avatar video: {video_error}")
+        
+        return {
+            "success": True,
+            "message": f"FAQ deleted successfully",
+            "deleted_faq": {
+                "id": faq_id,
+                "question": deleted_faq.get('question', ''),
+                "answer": deleted_faq.get('answer', '')[:100] + "..." if len(deleted_faq.get('answer', '')) > 100 else deleted_faq.get('answer', '')
+            },
+            "remaining_faqs": len(updated_faqs),
+            "video_deleted": video_deleted
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error deleting FAQ: {e}")
         return {
             "success": False,
             "error": str(e)

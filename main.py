@@ -2476,13 +2476,13 @@ Return JSON only:
         all_faqs = unique_faqs
         logger.info(f"📊 Total FAQs AFTER DEDUPLICATION: {len(all_faqs)} unique FAQs")
         
-        # ⚠️ LIMIT: Cap at 2 content FAQs (+ 3 special = 5 total) - TEMPORARY FOR TESTING
-        MAX_CONTENT_FAQS = 2  # Reduced from 7 to 2 for testing (saves HeyGen credits)
+        # ⚠️ LIMIT: Cap at 7 content FAQs (+ 3 special = 10 total)
+        MAX_CONTENT_FAQS = 7  # 7 regular content FAQs
         if len(all_faqs) > MAX_CONTENT_FAQS:
             logger.warning(f"⚠️ Limiting FAQs from {len(all_faqs)} to {MAX_CONTENT_FAQS}")
             all_faqs = all_faqs[:MAX_CONTENT_FAQS]
         
-        logger.info(f"📊 Total FAQs AFTER LIMIT: {len(all_faqs)} content FAQs (will add 1 intro + 2 fallback FAQs = {len(all_faqs) + 3} total = max 5 videos) [TESTING MODE]")
+        logger.info(f"📊 Total FAQs AFTER LIMIT: {len(all_faqs)} content FAQs (will add 1 intro + 2 fallback FAQs = {len(all_faqs) + 3} total = max 10 videos)")
         
         # Store FAQs in GCS (regardless of document availability)
         if gcs_qa_service:
@@ -2546,7 +2546,7 @@ Return JSON only:
             logger.info(f"     • Video FAQs: {len(video_faqs)}")
             logger.info(f"     • Document FAQs: {len(document_faqs)}")
             logger.info(f"   - Special FAQs: {len(default_faqs)} (1 intro + 2 fallback)")
-            logger.info(f"   💰 FAQ Limit: {MAX_CONTENT_FAQS} content + {len(default_faqs)} special = {len(faq_data['faqs'])} TOTAL VIDEOS")
+            logger.info(f"   💰 FAQ Limit: {MAX_CONTENT_FAQS} content + {len(default_faqs)} special = {len(faq_data['faqs'])} TOTAL VIDEOS (max 10)")
             logger.info(f"   💰 HeyGen Credits: {len(faq_data['faqs'])} videos will be generated!")
             
             # ⚠️ OPTIONAL: Save FAQs to local JSON file for review (useful for debugging)

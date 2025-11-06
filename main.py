@@ -365,131 +365,72 @@ async def health_check():
 async def get_heygen_voices():
     """
     Get available HeyGen voices for avatar video generation
-    
-    NOTE: Voice IDs should be replaced with actual HeyGen voice IDs from your HeyGen account.
-    To get real HeyGen voice IDs:
-    1. Go to HeyGen Studio > Voice Library
-    2. Select a voice and inspect the API call to get the voice_id
-    3. Replace the IDs below with actual HeyGen voice IDs
-    
-    Currently using placeholder IDs for preview purposes.
+    Fetches voices dynamically from HeyGen API
     """
     try:
-        voices = [
-            # Custom Voice (Default - Recommended)
-            {
-                "id": "01d674cfd32b4728a3fddd21b7e7d543",
-                "name": "Custom Professional (Recommended)",
-                "description": "Our custom trained voice - warm, professional, and engaging",
-                "language": "English (US)",
-                "gender": "Male",
-                "sample_text": "Hello! Welcome to our platform. I'm here to answer your questions and help you succeed.",
-                "rate": 0.95,
-                "pitch": 0.9,
-                "is_default": True,
-                "is_custom": True
-            },
+        # Fetch voices from HeyGen API
+        heygen_voices = heygen_service.get_available_voices()
+        
+        if heygen_voices is None:
+            # Fallback to custom voice if API fails
+            logger.warning("⚠️ Failed to fetch voices from HeyGen API, using fallback")
+            voices = [
+                {
+                    "id": "01d674cfd32b4728a3fddd21b7e7d543",
+                    "name": "Custom Professional Voice",
+                    "description": "Your custom trained HeyGen voice - warm, professional, and engaging",
+                    "language": "English (US)",
+                    "gender": "Male",
+                    "sample_text": "Hello! Welcome to our platform. I'm here to answer your questions and help you succeed.",
+                    "rate": 0.95,
+                    "pitch": 0.9,
+                    "is_default": True,
+                    "is_custom": True
+                }
+            ]
+        else:
+            # Process HeyGen API response
+            voices = []
+            custom_voice_id = "01d674cfd32b4728a3fddd21b7e7d543"
             
-            # Female Voices
-            {
-                "id": "1bd001e7e50f421d891986aad5158bc8",
-                "name": "Sara - Professional Female",
-                "description": "Clear, professional female voice ideal for business presentations",
-                "language": "English (US)",
-                "gender": "Female",
-                "sample_text": "Hello! I can help you understand our product better and guide you through the features.",
-                "rate": 1.0,
-                "pitch": 1.2,
-                "is_default": False,
-                "is_custom": False
-            },
-            {
-                "id": "af94e4b95b6d41e79a6b543fc7b16501",
-                "name": "Emma - Friendly Female",
-                "description": "Warm and approachable female voice perfect for customer engagement",
-                "language": "English (US)",
-                "gender": "Female",
-                "sample_text": "Welcome! I'm excited to show you what we can do and help you get started!",
-                "rate": 1.0,
-                "pitch": 1.15,
-                "is_default": False,
-                "is_custom": False
-            },
-            {
-                "id": "c1d9d7e9f8a74c8e9e1b2f3c4d5e6f7a",
-                "name": "Lisa - Energetic Female",
-                "description": "Upbeat and dynamic female voice for engaging content",
-                "language": "English (US)",
-                "gender": "Female",
-                "sample_text": "Hi there! Let's dive into this exciting opportunity together!",
-                "rate": 1.05,
-                "pitch": 1.25,
-                "is_default": False,
-                "is_custom": False
-            },
-            {
-                "id": "d4e8f3c2b1a94d5e6f7a8b9c0d1e2f3a",
-                "name": "Rachel - Corporate Female",
-                "description": "Sophisticated and authoritative female voice for executive content",
-                "language": "English (US)",
-                "gender": "Female",
-                "sample_text": "Good afternoon. Let me present our strategic solution and key benefits.",
-                "rate": 0.95,
-                "pitch": 1.1,
-                "is_default": False,
-                "is_custom": False
-            },
+            for voice in heygen_voices:
+                voice_id = voice.get('voice_id') or voice.get('id')
+                is_custom = voice_id == custom_voice_id
+                
+                # Get voice attributes
+                voice_name = voice.get('display_name') or voice.get('name', 'Unknown Voice')
+                voice_gender = voice.get('gender', 'Unknown')
+                voice_language = voice.get('language', 'English')
+                voice_description = voice.get('description', '')
+                
+                # Generate description if empty
+                if not voice_description or voice_description.strip() == '':
+                    if is_custom:
+                        voice_description = "Your custom trained HeyGen voice - warm, professional, and engaging"
+                    else:
+                        # Generate description based on gender and style
+                        gender_desc = "female" if voice_gender == "Female" else "male"
+                        voice_description = f"Professional {gender_desc} voice perfect for AI avatar videos"
+                
+                # Format voice data for frontend
+                formatted_voice = {
+                    "id": voice_id,
+                    "name": voice_name,
+                    "description": voice_description,
+                    "language": voice_language,
+                    "gender": voice_gender,
+                    "sample_text": voice.get('preview_text') or voice.get('sample_text') or f"Hello! I'm {voice_name}. Welcome to our platform, I'm here to help answer your questions.",
+                    "rate": 1.0,
+                    "pitch": 1.0,
+                    "is_default": is_custom,  # Custom voice is default
+                    "is_custom": is_custom
+                }
+                voices.append(formatted_voice)
             
-            # Male Voices
-            {
-                "id": "2d5b0e6cf36f4355b6f8c3c0f6c5e935",
-                "name": "Mike - Friendly Male",
-                "description": "Conversational and personable male voice",
-                "language": "English (US)",
-                "gender": "Male",
-                "sample_text": "Hi there! Let me walk you through this and show you how everything works.",
-                "rate": 1.0,
-                "pitch": 0.95,
-                "is_default": False,
-                "is_custom": False
-            },
-            {
-                "id": "b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8",
-                "name": "David - Corporate Male",
-                "description": "Professional and authoritative male voice for business content",
-                "language": "English (US)",
-                "gender": "Male",
-                "sample_text": "Good day. Let me explain our solution and demonstrate its key capabilities.",
-                "rate": 0.9,
-                "pitch": 0.85,
-                "is_default": False,
-                "is_custom": False
-            },
-            {
-                "id": "e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
-                "name": "James - Deep Male",
-                "description": "Rich, deep male voice with commanding presence",
-                "language": "English (US)",
-                "gender": "Male",
-                "sample_text": "Welcome. Allow me to guide you through our comprehensive platform.",
-                "rate": 0.85,
-                "pitch": 0.75,
-                "is_default": False,
-                "is_custom": False
-            },
-            {
-                "id": "f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2",
-                "name": "Ryan - Energetic Male",
-                "description": "Upbeat and enthusiastic male voice",
-                "language": "English (US)",
-                "gender": "Male",
-                "sample_text": "Hey! I'm really excited to show you all the amazing features we have!",
-                "rate": 1.05,
-                "pitch": 1.0,
-                "is_default": False,
-                "is_custom": False
-            }
-        ]
+            # Sort voices to put custom voice first
+            voices.sort(key=lambda v: (not v['is_custom'], v['name']))
+            
+            logger.info(f"✅ Successfully formatted {len(voices)} voices for frontend")
         
         return {
             "success": True,
@@ -502,6 +443,63 @@ async def get_heygen_voices():
             "success": False,
             "error": str(e),
             "voices": []
+        }
+
+@app.get("/faqs/{company_name}/{qudemo_id}")
+async def get_all_faqs(company_name: str, qudemo_id: str):
+    """
+    Get all FAQs with video URLs for proactive caching
+    Returns FAQ data with version for cache invalidation
+    """
+    try:
+        logger.info(f"📋 Fetching all FAQs for {company_name}/{qudemo_id}")
+        
+        # Initialize GCS service
+        gcs_service = GoogleCloudStorageService()
+        
+        # Load FAQs from GCS
+        bucket_name = f"qudemo-{company_name.lower().replace(' ', '-')}"
+        bucket = gcs_service.client.bucket(bucket_name)
+        
+        faq_filename = f"faqs_{company_name.replace(' ', '_')}.json"
+        blob = bucket.blob(f"{company_name}/{qudemo_id}/{faq_filename}")
+        
+        if not blob.exists():
+            logger.error(f"❌ FAQ file not found")
+            return {
+                "success": False,
+                "error": "FAQ file not found",
+                "faqs": []
+            }
+        
+        # Get file metadata for versioning
+        blob.reload()
+        updated_at = blob.updated.isoformat() if blob.updated else None
+        
+        # Load FAQ content
+        faqs_content = blob.download_as_text()
+        faqs_data = json.loads(faqs_content)
+        faqs = faqs_data.get('faqs', [])
+        
+        logger.info(f"✅ Loaded {len(faqs)} FAQs")
+        
+        # Return FAQs with version for cache invalidation
+        return {
+            "success": True,
+            "faqs": faqs,
+            "count": len(faqs),
+            "version": updated_at,  # Frontend uses this to check if cache is valid
+            "updated_at": updated_at,
+            "company_name": company_name,
+            "qudemo_id": qudemo_id
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error fetching FAQs: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "faqs": []
         }
 
 @app.get("/memory-status")
@@ -544,15 +542,20 @@ async def memory_status():
 
 @app.post("/ask/{company_name}/{qudemo_id}")
 async def ask_question(company_name: str, qudemo_id: str, request: QuestionRequest):
-    """Ask a question and get context-aware answer using GCS Q&A service (primary) with fallbacks"""
+    """
+    NEW SIMPLIFIED Q&A ARCHITECTURE
+    
+    Ask a question and get answer from pre-generated FAQs (MUCH FASTER!)
+    - No source searching every time
+    - Just semantic matching to pre-generated FAQs
+    - Instant video retrieval (URL already in FAQ file)
+    """
     try:
-        # Try GCS Q&A service first (primary for Google Cloud Storage)
-        # Always try to use GCS service directly
-        logger.info(f"❓ Processing question for {company_name} qudemo {qudemo_id} using GCS Q&A (forced)")
+        logger.info(f"❓ Processing question for {company_name} qudemo {qudemo_id} using NEW SIMPLIFIED Q&A")
         
-        # Create GCS service instance directly
+        # Use NEW simplified Q&A service
         gcs_service = GCSQAService()
-        answer_result = await gcs_service.ask_question(
+        answer_result = await gcs_service.ask_question_simplified(
             question=request.question,
             company_name=company_name,
             qudemo_id=qudemo_id

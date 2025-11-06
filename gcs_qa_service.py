@@ -289,6 +289,221 @@ RULES:
             logger.error(f"❌ Error checking for avatar video: {e}")
             return None
     
+    async def ask_question_simplified(self, question: str, company_name: str, qudemo_id: str) -> Dict[str, Any]:
+        """
+        NEW SIMPLIFIED Q&A ARCHITECTURE
+        
+        Instead of searching through all sources every time, we:
+        1. Load pre-generated FAQs (already have questions, answers, and video URLs)
+        2. Use semantic matching to find the best FAQ
+        3. Return the pre-generated answer + video instantly
+        
+        This is MUCH faster and simpler than the old approach!
+        """
+        try:
+            logger.info(f"🚀 NEW SIMPLIFIED Q&A - Question: {question[:50]}...")
+            logger.info(f"🏢 Company: {company_name}, QuDemo: {qudemo_id}")
+            
+            # STEP 1: Load pre-generated FAQs from GCS (everything is already there!)
+            logger.info(f"📂 Loading pre-generated FAQs from GCS...")
+            
+            bucket_name = f"qudemo-{company_name.lower().replace(' ', '-')}"
+            bucket = self.gcs_service.client.bucket(bucket_name)
+            
+            faq_filename = f"faqs_{company_name.replace(' ', '_')}.json"
+            blob = bucket.blob(f"{company_name}/{qudemo_id}/{faq_filename}")
+            
+            if not blob.exists():
+                logger.error(f"❌ FAQ file not found - QuDemo may not be processed yet")
+                return {
+                    'success': False,
+                    'error': 'FAQ file not found',
+                    'answer': 'This QuDemo is still being processed. Please try again in a few minutes.'
+                }
+            
+            faqs_content = blob.download_as_text()
+            faqs_data = json.loads(faqs_content)
+            faqs = faqs_data.get('faqs', [])
+            
+            logger.info(f"✅ Loaded {len(faqs)} pre-generated FAQs")
+            
+            # STEP 2: Semantic matching using OpenAI
+            logger.info(f"🤖 Using AI to find best matching FAQ...")
+            
+            best_match = None
+            best_score = 0.0
+            
+            # Priority 1: Check for exact match on special keywords
+            special_keywords = {
+                "NO_ANSWER_FOUND": ["NO_ANSWER_FOUND"],
+                "SALES_INQUIRY": ["sales", "pricing", "buy", "purchase", "contact", "meeting", "demo", "talk to"],
+                "INTRO_VIDEO": ["INTRO_VIDEO"]
+            }
+            
+            question_lower = question.lower()
+            
+            # Check if this is a sales-related query
+            for keyword_list in special_keywords["SALES_INQUIRY"]:
+                if keyword_list in question_lower:
+                    for faq in faqs:
+                        if faq.get('question') == "SALES_INQUIRY":
+                            best_match = faq
+                            best_score = 1.0
+                            logger.info(f"🎯 Matched to SALES_INQUIRY fallback")
+                            break
+                    if best_match:
+                        break
+            
+            # Priority 2: Exact question match (for suggested questions)
+            if not best_match:
+                for faq in faqs:
+                    if question.strip().lower() == faq.get('question', '').strip().lower():
+                        best_match = faq
+                        best_score = 1.0
+                        logger.info(f"🎯 EXACT match found: {faq.get('question')}")
+                        break
+            
+            # Priority 3: Semantic matching using GPT-4o-mini (fast and cheap)
+            if not best_match:
+                try:
+                    from openai import OpenAI
+                    openai_api_key = os.getenv('OPENAI_API_KEY')
+                    
+                    if openai_api_key:
+                        openai_client = OpenAI(api_key=openai_api_key)
+                        
+                        # Build FAQ list for LLM (exclude fallback FAQs from matching)
+                        matchable_faqs = [faq for faq in faqs if not faq.get('is_fallback') and not faq.get('is_intro')]
+                        
+                        if matchable_faqs:
+                            faq_list = []
+                            for i, faq in enumerate(matchable_faqs):
+                                faq_list.append(f"{i+1}. {faq.get('question', '')}")
+                            
+                            faq_text = "\n".join(faq_list)
+                            
+                            prompt = f"""Match this user question to the most relevant FAQ.
+
+USER QUESTION: "{question}"
+
+AVAILABLE FAQs:
+{faq_text}
+
+Return JSON:
+{{
+  "match_found": true/false,
+  "faq_number": <1-{len(matchable_faqs)} or null>,
+  "confidence": <0-100>,
+  "reasoning": "brief explanation"
+}}
+
+RULES:
+- Use semantic similarity, not just exact words
+- If confidence < 70%, set match_found to false
+- Consider the user's intent"""
+
+                            response = openai_client.chat.completions.create(
+                                model="gpt-4o-mini",
+                                messages=[
+                                    {"role": "system", "content": "You are an expert at semantic question matching. Always respond with valid JSON."},
+                                    {"role": "user", "content": prompt}
+                                ],
+                                temperature=0.1,
+                                max_tokens=200
+                            )
+                            
+                            result_text = response.choices[0].message.content.strip()
+                            logger.info(f"🤖 AI matching result: {result_text}")
+                            
+                            # Parse JSON
+                            json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', result_text, re.DOTALL)
+                            if json_match:
+                                result_text = json_match.group(1)
+                            
+                            result = json.loads(result_text)
+                            
+                            if result.get('match_found') and result.get('faq_number'):
+                                faq_idx = result['faq_number'] - 1
+                                if 0 <= faq_idx < len(matchable_faqs):
+                                    best_match = matchable_faqs[faq_idx]
+                                    best_score = result.get('confidence', 70) / 100.0
+                                    logger.info(f"✅ AI found match: FAQ #{result['faq_number']} with {result['confidence']}% confidence")
+                                    logger.info(f"💡 Reasoning: {result.get('reasoning', 'N/A')}")
+                        
+                except Exception as ai_error:
+                    logger.error(f"⚠️ AI matching failed: {ai_error}")
+            
+            # STEP 3: Return the result
+            if best_match and best_score >= 0.70:
+                # Found a good match!
+                logger.info(f"✅ Matched FAQ: {best_match.get('id')} ({best_score*100:.0f}% confidence)")
+                
+                video_url = best_match.get('video_url')
+                has_video = bool(video_url and best_match.get('video_status') == 'completed')
+                
+                if not has_video:
+                    logger.warning(f"⚠️ FAQ {best_match.get('id')} doesn't have video yet")
+                
+                return {
+                    'success': True,
+                    'answer': best_match.get('answer', ''),
+                    'has_avatar_video': has_video,
+                    'avatar_video_url': video_url if has_video else None,
+                    'faq_id': best_match.get('id'),
+                    'faq_question': best_match.get('question'),
+                    'match_confidence': best_score,
+                    'formatted_timestamp': 'AI Avatar' if has_video else '',
+                    'sources': [{
+                        'type': 'faq',
+                        'faq_id': best_match.get('id'),
+                        'confidence': best_score
+                    }],
+                    'answer_source': 'pre_generated_faq'
+                }
+            else:
+                # No good match - return NO_ANSWER_FOUND fallback
+                logger.info(f"⚠️ No good FAQ match found (best: {best_score*100:.0f}%) - using fallback")
+                
+                fallback_faq = None
+                for faq in faqs:
+                    if faq.get('question') == 'NO_ANSWER_FOUND' or faq.get('id') == 'faq_fallback_no_answer':
+                        fallback_faq = faq
+                        break
+                
+                if fallback_faq:
+                    video_url = fallback_faq.get('video_url')
+                    has_video = bool(video_url)
+                    
+                    return {
+                        'success': True,
+                        'answer': fallback_faq.get('answer', "I apologize, but I don't have specific information about that."),
+                        'has_avatar_video': has_video,
+                        'avatar_video_url': video_url if has_video else None,
+                        'faq_id': fallback_faq.get('id', 'faq_fallback_no_answer'),
+                        'formatted_timestamp': 'AI Avatar' if has_video else '',
+                        'sources': [],
+                        'answer_source': 'fallback_no_answer'
+                    }
+                else:
+                    # No fallback found - return generic message
+                    return {
+                        'success': False,
+                        'answer': "I apologize, but I don't have specific information about that in our knowledge base.",
+                        'has_avatar_video': False,
+                        'sources': [],
+                        'answer_source': 'none'
+                    }
+                    
+        except Exception as e:
+            logger.error(f"❌ Simplified Q&A failed: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+            return {
+                'success': False,
+                'error': str(e),
+                'answer': 'Sorry, I encountered an error while processing your question.'
+            }
+    
     async def ask_question(self, question: str, company_name: str, qudemo_id: str) -> Dict[str, Any]:
         """
         Answer a question using transcript data from Google Cloud Storage

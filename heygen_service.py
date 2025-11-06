@@ -25,6 +25,7 @@ class HeyGenService:
         self.upload_url = "https://upload.heygen.com/v1/asset"
         self.generate_url = "https://api.heygen.com/v2/video/av4/generate"
         self.status_url = "https://api.heygen.com/v1/video_status.get"
+        self.voices_url = "https://api.heygen.com/v2/voices"
         
         # Default voice ID - Custom voice for all avatar videos
         self.default_voice_id = "01d674cfd32b4728a3fddd21b7e7d543"
@@ -98,6 +99,41 @@ class HeyGenService:
                 
         except Exception as e:
             logger.error(f"❌ Error uploading photo to HeyGen: {e}")
+            return None
+    
+    def get_available_voices(self) -> Optional[List[Dict[str, Any]]]:
+        """
+        Fetch available voices from HeyGen API
+        
+        Returns:
+            List of voice dictionaries with id, name, language, gender, etc.
+            Returns None if API call fails
+        """
+        try:
+            if not self.api_key:
+                logger.error("❌ HeyGen API key not configured")
+                return None
+            
+            logger.info("🎤 Fetching available voices from HeyGen API...")
+            
+            headers = {
+                "X-Api-Key": self.api_key,
+                "Content-Type": "application/json"
+            }
+            
+            response = requests.get(self.voices_url, headers=headers, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                voices = data.get('data', {}).get('voices', [])
+                logger.info(f"✅ Successfully fetched {len(voices)} voices from HeyGen")
+                return voices
+            else:
+                logger.error(f"❌ HeyGen voices API error: {response.status_code} - {response.text}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Error fetching voices from HeyGen: {e}")
             return None
     
     def truncate_script(self, text: str, max_length: int = 1000) -> str:

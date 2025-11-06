@@ -229,6 +229,15 @@ class AvatarVideoProcessor:
                     logger.error(f"❌ Failed to store in database: {db_error}")
                     # Don't fail the whole process if DB update fails
             
+            # Step 6: Update FAQ file with video URL for instant retrieval
+            logger.info(f"📝 Updating FAQ file with video URL for {faq_id}...")
+            try:
+                self._update_faq_with_video_url(company_name, qudemo_id, faq_id, gcs_video_url)
+                logger.info(f"✅ FAQ file updated with video URL")
+            except Exception as update_error:
+                logger.error(f"⚠️ Failed to update FAQ file: {update_error}")
+                # Don't fail the whole process if FAQ update fails
+            
             logger.info(f"🎉 Successfully processed video for {faq_id}")
             
             return {
@@ -247,6 +256,54 @@ class AvatarVideoProcessor:
                 "faq_id": faq_id,
                 "error": str(e)
             }
+    
+    def _update_faq_with_video_url(self, company_name: str, qudemo_id: str, faq_id: str, video_url: str):
+        """
+        Update FAQ file in GCS to include video URL for instant retrieval
+        This enables the new simplified Q&A architecture
+        """
+        try:
+            import json
+            
+            # Get company bucket
+            bucket = self.gcs._get_company_bucket(company_name)
+            
+            # Load existing FAQ file
+            faq_filename = f"faqs_{company_name.replace(' ', '_')}.json"
+            blob = bucket.blob(f"{company_name}/{qudemo_id}/{faq_filename}")
+            
+            if not blob.exists():
+                logger.warning(f"⚠️ FAQ file not found: {faq_filename}")
+                return
+            
+            # Download and parse
+            faqs_content = blob.download_as_text()
+            faqs_data = json.loads(faqs_content)
+            
+            # Find and update the FAQ
+            updated = False
+            for faq in faqs_data.get('faqs', []):
+                if faq.get('id') == faq_id:
+                    faq['video_url'] = video_url
+                    faq['video_status'] = 'completed'
+                    updated = True
+                    logger.info(f"✅ Updated FAQ {faq_id} with video URL")
+                    break
+            
+            if not updated:
+                logger.warning(f"⚠️ FAQ {faq_id} not found in FAQ file")
+                return
+            
+            # Save back to GCS
+            blob.upload_from_string(
+                json.dumps(faqs_data, indent=2),
+                content_type='application/json'
+            )
+            logger.info(f"✅ FAQ file saved to GCS")
+            
+        except Exception as e:
+            logger.error(f"❌ Error updating FAQ file: {e}")
+            raise
     
     async def process_single_faq_video_update(self, company_name: str, qudemo_id: str,
                                               presenter_photo_url: str, faq: Dict) -> Dict[str, Any]:

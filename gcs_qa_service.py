@@ -1582,6 +1582,11 @@ Questions:"""
             logger.info(f"📄 Combined content preview: {combined_content[:200]}...")
             formatted_answer = self._format_document_answer_with_llm(combined_content, question)
             
+            # If LLM determined content is not relevant, return None
+            if formatted_answer is None:
+                logger.info(f"ℹ️ Document content not relevant to question")
+                return None
+            
             return {
                 'answer': formatted_answer,
                 'confidence': 0.8,  # High confidence for document answers
@@ -1768,7 +1773,24 @@ Questions:"""
             # Use the SAME high-quality prompt as video answers for consistency
             prompt = f"""You are an expert at analyzing document content to answer questions. Your task is to find the most relevant information in the document and provide a HIGH-QUALITY, INTELLIGENT answer.
 
-CRITICAL: Your answer must be EXACTLY 4-5 sentences to provide comprehensive information. Think like ChatGPT - intelligent, insightful, and detailed.
+⚠️ CRITICAL RELEVANCE CHECK:
+- FIRST, check if the document content actually contains information relevant to the question
+- If the question asks about something NOT covered in the document content, respond EXACTLY with: "NO_RELEVANT_INFORMATION"
+- ONLY answer questions that can be answered using the provided document content
+- DO NOT use your general knowledge or external information
+- DO NOT make up or infer information that isn't explicitly in the document
+
+IF RELEVANT, YOUR ANSWER MUST:
+- Be EXACTLY 4-5 sentences to provide comprehensive information
+- ONLY use information from the provided document content
+- Be intelligent and insightful based on the document
+- Show deep understanding of the concepts IN THE DOCUMENT
+- Use professional, business-ready language
+- Provide clear comparisons and contrasts FROM THE DOCUMENT
+- Be immediately valuable and actionable
+- Demonstrate consciousness and completeness
+- Focus on the core essence and business value
+- Interpret and analyze the content, don't just quote it
 
 MANDATORY REQUIREMENTS:
 - NEVER include raw document quotes or excerpts
@@ -1776,17 +1798,6 @@ MANDATORY REQUIREMENTS:
 - ALWAYS provide processed, intelligent analysis
 - ALWAYS use professional, business-ready language
 - ALWAYS focus on the core essence and business value
-
-YOUR ANSWER MUST:
-- Be EXACTLY 4-5 sentences to provide comprehensive information
-- Be intelligent and insightful (like ChatGPT)
-- Show deep understanding of the concepts
-- Use professional, business-ready language
-- Provide clear comparisons and contrasts
-- Be immediately valuable and actionable
-- Demonstrate consciousness and completeness
-- Focus on the core essence and business value
-- Interpret and analyze the content, don't just quote it
 
 Question: {question}
 
@@ -1807,6 +1818,11 @@ Answer:"""
             )
             
             answer = response.choices[0].message.content.strip()
+            
+            # Check if the LLM determined the content is not relevant
+            if "NO_RELEVANT_INFORMATION" in answer:
+                logger.info(f"ℹ️ LLM determined document content is not relevant to the question")
+                return None
             
             # Ensure answer is 4-5 sentences for comprehensive information
             sentences = answer.split('. ')
@@ -1861,6 +1877,11 @@ Answer:"""
                 best_result.get('content', ''),
                 question
             )
+            
+            # If LLM determined content is not relevant, return None
+            if answer is None:
+                logger.info(f"ℹ️ Website content not relevant to question")
+                return None
             
             return {
                 'answer': answer,
@@ -1927,14 +1948,23 @@ Answer:"""
                     return '\n'.join(steps)
             
             # Fallback to LLM if direct extraction doesn't work
-            prompt = f"""Extract and present the information from the website content below. Preserve ALL specific details, numbers, percentages, categories, and exact requirements. Do not generalize or summarize away specific information.
+            prompt = f"""Extract and present the information from the website content below. 
+
+⚠️ CRITICAL RELEVANCE CHECK:
+- FIRST, check if the website content actually contains information relevant to the question
+- If the question asks about something NOT covered in the website content, respond EXACTLY with: "NO_RELEVANT_INFORMATION"
+- ONLY answer questions that can be answered using the provided website content
+- DO NOT use your general knowledge or external information
+- DO NOT make up or infer information that isn't explicitly in the website content
+
+IF RELEVANT, preserve ALL specific details, numbers, percentages, categories, and exact requirements. Do not generalize or summarize away specific information.
 
 Question: {question}
 
 Website Content:
 {content[:4000]}
 
-Extract the specific information while preserving all details:"""
+Extract the specific information while preserving all details (or return "NO_RELEVANT_INFORMATION" if not relevant):"""
             
             logger.info(f"🌐 Sending to LLM: {len(content)} characters, truncated to 4000")
             logger.info(f"🌐 Question: {question}")
@@ -1950,6 +1980,11 @@ Extract the specific information while preserving all details:"""
             )
             
             answer = response.choices[0].message.content.strip()
+            
+            # Check if the LLM determined the content is not relevant
+            if "NO_RELEVANT_INFORMATION" in answer:
+                logger.info(f"ℹ️ LLM determined website content is not relevant to the question")
+                return None
             
             # Ensure answer is comprehensive but not too long
             sentences = answer.split('. ')

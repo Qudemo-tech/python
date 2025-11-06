@@ -141,7 +141,26 @@ class DirectTranscriptQA:
             # Create the prompt for multi-video support
             prompt = f"""You are an expert at analyzing video transcripts to answer questions. Your task is to find the most relevant information in the transcript and provide a HIGH-QUALITY, INTELLIGENT answer.
 
-CRITICAL: Your answer must be EXACTLY 4-5 sentences to provide comprehensive information. Each sentence should be detailed and informative.
+⚠️ CRITICAL RELEVANCE CHECK:
+- FIRST, check if the video transcript actually contains information relevant to the question
+- If the question asks about something NOT covered in the video transcript, return "not found" for all fields
+- ONLY answer questions that can be answered using the provided video transcript
+- DO NOT use your general knowledge or external information
+- DO NOT make up or infer information that isn't explicitly in the transcript
+- If no relevant information exists in the transcript, return "not found" for all fields
+
+IF RELEVANT, YOUR ANSWER MUST:
+- Be EXACTLY 4-5 sentences to provide comprehensive information - Each sentence should be detailed and informative
+- ONLY use information from the provided video transcript
+- Be intelligent and insightful based on the transcript
+- Show deep understanding of the concepts IN THE TRANSCRIPT
+- Use professional, business-ready language
+- Provide clear comparisons and contrasts FROM THE TRANSCRIPT
+- Be immediately valuable and actionable
+- Demonstrate consciousness and completeness
+- Focus on the core essence and business value
+- Interpret and analyze the content, don't just quote it
+- Provide processed insights, not raw transcript text
 
 MANDATORY REQUIREMENTS:
 - NEVER include raw transcript quotes like "Hey there" or "Great question"
@@ -149,18 +168,6 @@ MANDATORY REQUIREMENTS:
 - ALWAYS provide processed, intelligent analysis
 - ALWAYS use professional, business-ready language
 - ALWAYS focus on the core essence and business value
-
-YOUR ANSWER MUST:
-- Be EXACTLY 4-5 sentences to provide comprehensive information - Each sentence should be detailed and informative
-- Be intelligent and insightful (like ChatGPT)
-- Show deep understanding of the concepts
-- Use professional, business-ready language
-- Provide clear comparisons and contrasts
-- Be immediately valuable and actionable
-- Demonstrate consciousness and completeness
-- Focus on the core essence and business value
-- Interpret and analyze the content, don't just quote it
-- Provide processed insights, not raw transcript text
 
 Return ONLY valid JSON in the format:
 {{

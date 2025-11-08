@@ -292,9 +292,25 @@ app.add_middleware(
 class QuestionRequest(BaseModel):
     question: str
 
+class VisitorInteractionRequest(BaseModel):
+    qudemo_id: str
+    session_id: str
+    visitor_name: Optional[str] = None
+    visitor_email: Optional[str] = None
+    visitor_company: Optional[str] = None
+    question: str
+    answer: str
+    faq_id: Optional[str] = None
+    source: Optional[str] = None
+    time_spent: Optional[int] = 0
+
 class QuDemoContentRequest(BaseModel):
     video_urls: Optional[List[str]] = []
     website_urls: Optional[List[str]] = []
+    collect_user_info: Optional[bool] = False
+    collect_name: Optional[bool] = False
+    collect_email: Optional[bool] = False
+    collect_company: Optional[bool] = False
 
 class UrlRequest(BaseModel):
     url: str
@@ -389,9 +405,13 @@ async def get_heygen_voices():
                 }
             ]
         else:
-            # Process HeyGen API response
+            # Process HeyGen API response and create diverse voice set
             voices = []
             custom_voice_id = "01d674cfd32b4728a3fddd21b7e7d543"
+            
+            # Categorize voices by gender for diverse selection
+            male_voices = []
+            female_voices = []
             
             for voice in heygen_voices:
                 voice_id = voice.get('voice_id') or voice.get('id')
@@ -412,25 +432,65 @@ async def get_heygen_voices():
                         gender_desc = "female" if voice_gender == "Female" else "male"
                         voice_description = f"Professional {gender_desc} voice perfect for AI avatar videos"
                 
-                # Format voice data for frontend
-                formatted_voice = {
+                voice_data = {
                     "id": voice_id,
                     "name": voice_name,
                     "description": voice_description,
                     "language": voice_language,
                     "gender": voice_gender,
                     "sample_text": voice.get('preview_text') or voice.get('sample_text') or f"Hello! I'm {voice_name}. Welcome to our platform, I'm here to help answer your questions.",
-                    "rate": 1.0,
-                    "pitch": 1.0,
-                    "is_default": is_custom,  # Custom voice is default
+                    "is_default": is_custom,
                     "is_custom": is_custom
                 }
-                voices.append(formatted_voice)
+                
+                if is_custom:
+                    voices.append(voice_data)
+                elif voice_gender == "Male":
+                    male_voices.append(voice_data)
+                elif voice_gender == "Female":
+                    female_voices.append(voice_data)
+            
+            # Select diverse voices: Custom + 5 male + 5 female = 11 total
+            # This ensures each preview sounds distinct in browser TTS
+            # Limiting count ensures creators can distinguish between voice options
+            selected_male = male_voices[:5] if len(male_voices) >= 5 else male_voices
+            selected_female = female_voices[:5] if len(female_voices) >= 5 else female_voices
+            
+            # Assign distinct preview characteristics to each voice
+            voice_styles = [
+                {"rate": 0.85, "pitch": 0.8, "browser_voice_hint": "deep"},      # Deep male
+                {"rate": 1.0, "pitch": 1.0, "browser_voice_hint": "normal"},     # Normal male
+                {"rate": 1.1, "pitch": 1.1, "browser_voice_hint": "bright"},     # Bright male
+                {"rate": 0.9, "pitch": 0.95, "browser_voice_hint": "warm"},      # Warm male
+                {"rate": 1.05, "pitch": 1.05, "browser_voice_hint": "energetic"} # Energetic male
+            ]
+            
+            # Apply styles to male voices
+            for idx, voice in enumerate(selected_male):
+                style = voice_styles[idx % len(voice_styles)]
+                voice["rate"] = style["rate"]
+                voice["pitch"] = style["pitch"]
+                voice["browser_voice_hint"] = style["browser_voice_hint"]
+                voices.append(voice)
+            
+            # Apply styles to female voices
+            for idx, voice in enumerate(selected_female):
+                style = voice_styles[idx % len(voice_styles)]
+                voice["rate"] = style["rate"]
+                voice["pitch"] = style["pitch"]
+                voice["browser_voice_hint"] = style["browser_voice_hint"]
+                voices.append(voice)
+            
+            # Set default rate/pitch for custom voice
+            if voices and voices[0].get("is_custom"):
+                voices[0]["rate"] = 0.95
+                voices[0]["pitch"] = 0.9
+                voices[0]["browser_voice_hint"] = "professional"
             
             # Sort voices to put custom voice first
-            voices.sort(key=lambda v: (not v['is_custom'], v['name']))
+            voices.sort(key=lambda v: (not v.get('is_custom', False), v['name']))
             
-            logger.info(f"✅ Successfully formatted {len(voices)} voices for frontend")
+            logger.info(f"✅ Successfully formatted {len(voices)} diverse voices for frontend")
         
         return {
             "success": True,
@@ -481,7 +541,24 @@ async def get_all_faqs(company_name: str, qudemo_id: str):
         faqs_data = json.loads(faqs_content)
         faqs = faqs_data.get('faqs', [])
         
-        logger.info(f"✅ Loaded {len(faqs)} FAQs")
+        logger.info(f"✅ Loaded {len(faqs)} FAQs from GCS")
+        
+        # Get avatar video URLs from Supabase database (fallback if not in FAQ file)
+        for faq in faqs:
+            faq_id = faq.get('id')
+            # Only query database if video_url not already in FAQ
+            if faq_id and not faq.get('video_url'):
+                try:
+                    # Query avatar_videos table
+                    response = supabase.table('avatar_videos').select('video_url, status').eq('qudemo_id', qudemo_id).eq('faq_id', faq_id).execute()
+                    if response.data and len(response.data) > 0:
+                        faq['video_url'] = response.data[0].get('video_url')
+                        faq['video_status'] = response.data[0].get('status')
+                        logger.info(f"✅ Added video URL for {faq_id} from database")
+                except Exception as e:
+                    logger.error(f"❌ Error fetching video for {faq_id}: {e}")
+                    faq['video_url'] = None
+                    faq['video_status'] = None
         
         # Return FAQs with version for cache invalidation
         return {
@@ -667,7 +744,62 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/visitor-interaction")
+async def store_visitor_interaction(request: VisitorInteractionRequest):
+    """
+    Store visitor interaction data (name, email, company, question, answer)
+    This endpoint is called from the widget when a user provides information
+    """
+    try:
+        logger.info(f"💾 Storing visitor interaction for session {request.session_id}")
+        
+        # Use Supabase to store the interaction
+        import os
+        from supabase import create_client
+        
+        supabase_url = os.getenv('SUPABASE_URL')
+        supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+        
+        if not supabase_url or not supabase_key:
+            logger.error("❌ Supabase credentials not configured")
+            raise HTTPException(status_code=500, detail="Database not configured")
+        
+        supabase = create_client(supabase_url, supabase_key)
+        
+        # Prepare interaction data
+        interaction_data = {
+            "qudemo_id": request.qudemo_id,
+            "session_id": request.session_id,
+            "visitor_name": request.visitor_name,
+            "visitor_email": request.visitor_email,
+            "visitor_company": request.visitor_company,
+            "question": request.question,
+            "answer": request.answer,
+            "faq_id": request.faq_id,
+            "source": request.source or "widget",
 
+            "time_spent": request.time_spent or 0,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat()
+        }
+        
+        # Insert into visitor_interactions table
+        result = supabase.table("visitor_interactions").insert(interaction_data).execute()
+        
+        if result.data:
+            logger.info(f"✅ Visitor interaction stored successfully: {result.data[0].get('id')}")
+            return {
+                "success": True,
+                "message": "Interaction stored successfully",
+                "interaction_id": result.data[0].get('id')
+            }
+        else:
+            logger.error(f"❌ Failed to store visitor interaction")
+            raise HTTPException(status_code=500, detail="Failed to store interaction")
+            
+    except Exception as e:
+        logger.error(f"❌ Error storing visitor interaction: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/generate-suggested-questions/{company_name}/{qudemo_id}")
@@ -776,7 +908,7 @@ async def delete_suggested_question(company_name: str, qudemo_id: str, request: 
             "message": "Suggested question deleted successfully",
             "deleted_question": question_text,
             "deleted_faq_id": deleted_faq.get('id') if deleted_faq else None,
-            "remaining_questions": len([f for f in updated_faqs if not f.get('is_fallback') and not f.get('is_intro')]),
+            "remaining_questions": len([f for f in updated_faqs if not f.get('is_fallback') and not f.get('is_intro') and not f.get('is_user_collection')]),
             "video_deleted": video_deleted
         }
         
@@ -801,13 +933,14 @@ async def get_suggested_questions(company_name: str, qudemo_id: str):
             faqs_data = gcs_qa_service.get_faqs(company_name, qudemo_id)
             
             if faqs_data and 'faqs' in faqs_data:
-                # Extract questions from FAQs, excluding fallback FAQs
+                # Extract questions from FAQs, excluding fallback, intro, and user collection FAQs
                 faq_questions = [
                     faq['question'] 
                     for faq in faqs_data['faqs'] 
                     if not faq.get('is_fallback', False) 
                     and not faq.get('is_intro', False)
-                    and faq.get('question') not in ['NO_ANSWER_FOUND', 'SALES_INQUIRY', 'INTRO_VIDEO']
+                    and not faq.get('is_user_collection', False)
+                    and faq.get('question') not in ['NO_ANSWER_FOUND', 'SALES_INQUIRY', 'INTRO_VIDEO', 'NAME_REQUEST', 'EMAIL_REQUEST', 'COMPANY_REQUEST', 'COLLECTION_COMPLETE']
                 ]
                 
                 if faq_questions:
@@ -2099,13 +2232,24 @@ async def generate_faq_for_avatar_videos(company_name: str, qudemo_id: str):
                 return
             
             supabase = create_client(supabase_url, supabase_key)
-            response = supabase.table('qudemos_new').select('presenter_photo_url, presenter_name').eq('id', qudemo_id).single().execute()
+            response = supabase.table('qudemos_new').select('presenter_photo_url, presenter_name, collect_user_info, collect_name, collect_email, collect_company').eq('id', qudemo_id).single().execute()
+            
+            # Initialize collection settings
+            collect_user_info = False
+            collect_name = False
+            collect_email = False
+            collect_company = False
             
             if response.data:
                 presenter_photo_url = response.data.get('presenter_photo_url')
                 presenter_name = response.data.get('presenter_name') or 'Presenter'
+                collect_user_info = response.data.get('collect_user_info', False)
+                collect_name = response.data.get('collect_name', False)
+                collect_email = response.data.get('collect_email', False)
+                collect_company = response.data.get('collect_company', False)
                 logger.info(f"📸 Presenter photo: {presenter_photo_url}")
                 logger.info(f"👤 Presenter name: {presenter_name}")
+                logger.info(f"👤 User collection enabled: {collect_user_info}")
             
             if not presenter_photo_url:
                 logger.info(f"ℹ️ No presenter photo found - skipping FAQ generation")
@@ -2479,13 +2623,13 @@ Return JSON only:
         all_faqs = unique_faqs
         logger.info(f"📊 Total FAQs AFTER DEDUPLICATION: {len(all_faqs)} unique FAQs")
         
-        # ⚠️ LIMIT: Cap at 7 content FAQs (+ 3 special = 10 total)
-        MAX_CONTENT_FAQS = 7  # 7 regular content FAQs
+        # ⚠️ LIMIT: Cap at 2 content FAQs for TESTING (+ 3 special + 4 collection = 9 total)
+        MAX_CONTENT_FAQS = 2  # 2 regular content FAQs (FOR TESTING)
         if len(all_faqs) > MAX_CONTENT_FAQS:
             logger.warning(f"⚠️ Limiting FAQs from {len(all_faqs)} to {MAX_CONTENT_FAQS}")
             all_faqs = all_faqs[:MAX_CONTENT_FAQS]
         
-        logger.info(f"📊 Total FAQs AFTER LIMIT: {len(all_faqs)} content FAQs (will add 1 intro + 2 fallback FAQs = {len(all_faqs) + 3} total = max 10 videos)")
+        logger.info(f"📊 Total FAQs AFTER LIMIT: {len(all_faqs)} content FAQs (will add 1 intro + 2 fallback FAQs = {len(all_faqs) + 3} total, plus collection videos if enabled)")
         
         # Store FAQs in GCS (regardless of document availability)
         if gcs_qa_service:
@@ -2520,6 +2664,56 @@ Return JSON only:
                 }
             ]
             
+            # Add user data collection videos if enabled
+            if collect_user_info:
+                logger.info(f"👤 Adding user data collection videos...")
+                
+                if collect_name:
+                    default_faqs.append({
+                        "id": "faq_user_name_request",
+                        "question": "NAME_REQUEST",
+                        "answer": "Hey! Before we continue, can I know your name?",
+                        "category": "user_collection",
+                        "estimated_duration": 5.0,
+                        "is_user_collection": True,
+                        "collection_field": "name"
+                    })
+                
+                if collect_email:
+                    default_faqs.append({
+                        "id": "faq_user_email_request",
+                        "question": "EMAIL_REQUEST",
+                        "answer": "Thanks! Can I have your email to stay in touch or share updates about the product?",
+                        "category": "user_collection",
+                        "estimated_duration": 8.0,
+                        "is_user_collection": True,
+                        "collection_field": "email"
+                    })
+                
+                if collect_company:
+                    default_faqs.append({
+                        "id": "faq_user_company_request",
+                        "question": "COMPANY_REQUEST",
+                        "answer": "Appreciate it! Which company are you with?",
+                        "category": "user_collection",
+                        "estimated_duration": 5.0,
+                        "is_user_collection": True,
+                        "collection_field": "company"
+                    })
+                
+                # Always add the collection complete video if any field is enabled
+                default_faqs.append({
+                    "id": "faq_user_collection_complete",
+                    "question": "COLLECTION_COMPLETE",
+                    "answer": "Thanks a lot! Now that I know a bit about you, what would you like to know about the product?",
+                    "category": "user_collection",
+                    "estimated_duration": 7.0,
+                    "is_user_collection": True,
+                    "collection_field": "complete"
+                })
+                
+                logger.info(f"✅ Added {len([f for f in default_faqs if f.get('is_user_collection')])} user collection videos")
+            
             faq_data = {
                 "version": "1.0",
                 "qudemo_id": qudemo_id,
@@ -2548,9 +2742,9 @@ Return JSON only:
             logger.info(f"   - Content FAQs (after limit): {len(all_faqs)}")
             logger.info(f"     • Video FAQs: {len(video_faqs)}")
             logger.info(f"     • Document FAQs: {len(document_faqs)}")
-            logger.info(f"   - Special FAQs: {len(default_faqs)} (1 intro + 2 fallback)")
-            logger.info(f"   💰 FAQ Limit: {MAX_CONTENT_FAQS} content + {len(default_faqs)} special = {len(faq_data['faqs'])} TOTAL VIDEOS (max 10)")
-            logger.info(f"   💰 HeyGen Credits: {len(faq_data['faqs'])} videos will be generated!")
+            logger.info(f"   - Special FAQs: {len(default_faqs)} (1 intro + 2 fallback + collection videos)")
+            logger.info(f"   💰 FAQ Limit: {MAX_CONTENT_FAQS} content + {len(default_faqs)} special = {len(faq_data['faqs'])} TOTAL VIDEOS (TESTING MODE)")
+            logger.info(f"   💰 HeyGen Credits: {len(faq_data['faqs'])} videos will be generated (TESTING: only 2 content FAQs)!")
             
             # ⚠️ OPTIONAL: Save FAQs to local JSON file for review (useful for debugging)
             try:
@@ -2851,62 +3045,7 @@ async def make_avatar_videos_public(company_name: str, qudemo_id: str):
 # FAQ MANAGEMENT ENDPOINTS
 # ============================================
 
-@app.get("/faqs/{company_name}/{qudemo_id}")
-async def get_faqs(company_name: str, qudemo_id: str):
-    """Get all FAQs for a QuDemo (for FAQ editor)"""
-    try:
-        logger.info(f"📋 Fetching FAQs for {company_name}/{qudemo_id}")
-        
-        if not gcs_qa_service:
-            return {"success": False, "error": "GCS QA service not available"}
-        
-        # Get FAQs from GCS
-        faqs_data = gcs_qa_service.get_faqs(company_name, qudemo_id)
-        
-        if not faqs_data:
-            return {
-                "success": False,
-                "message": "No FAQs found",
-                "faqs": []
-            }
-        
-        # Extract the faqs array
-        faqs = faqs_data.get('faqs', [])
-        
-        if not faqs:
-            return {
-                "success": False,
-                "message": "No FAQs found",
-                "faqs": []
-            }
-        
-        # Get avatar video URLs from database
-        for faq in faqs:
-            faq_id = faq.get('id')
-            if faq_id:
-                try:
-                    # Query avatar_videos table
-                    response = supabase.table('avatar_videos').select('video_url, status').eq('qudemo_id', qudemo_id).eq('faq_id', faq_id).execute()
-                    if response.data and len(response.data) > 0:
-                        faq['video_url'] = response.data[0].get('video_url')
-                        faq['video_status'] = response.data[0].get('status')
-                except Exception as e:
-                    logger.error(f"❌ Error fetching video for {faq_id}: {e}")
-                    faq['video_url'] = None
-                    faq['video_status'] = None
-        
-        return {
-            "success": True,
-            "faqs": faqs,
-            "count": len(faqs)
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error fetching FAQs: {e}")
-        return {
-            "success": False,
-            "error": str(e)
-        }
+# Duplicate endpoint removed - merged with the one above at line 507
 
 @app.patch("/faqs/{company_name}/{qudemo_id}/{faq_id}/question")
 async def update_faq_question(company_name: str, qudemo_id: str, faq_id: str, request: Request):

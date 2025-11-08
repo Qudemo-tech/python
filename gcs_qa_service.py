@@ -327,6 +327,32 @@ RULES:
             
             logger.info(f"✅ Loaded {len(faqs)} pre-generated FAQs")
             
+            # FALLBACK: Get missing video URLs from Supabase (if GCS file is incomplete)
+            try:
+                from supabase import create_client
+                supabase_url = os.getenv('SUPABASE_URL')
+                supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+                
+                if supabase_url and supabase_key:
+                    supabase = create_client(supabase_url, supabase_key)
+                    
+                    for faq in faqs:
+                        faq_id = faq.get('id')
+                        # Only query database if video_url not already in FAQ
+                        if faq_id and not faq.get('video_url'):
+                            try:
+                                response = supabase.table('avatar_videos').select('video_url, status').eq('qudemo_id', qudemo_id).eq('faq_id', faq_id).execute()
+                                if response.data and len(response.data) > 0:
+                                    faq['video_url'] = response.data[0].get('video_url')
+                                    faq['video_status'] = response.data[0].get('status')
+                                    logger.info(f"✅ Added video URL for {faq_id} from Supabase fallback")
+                            except Exception as db_error:
+                                logger.error(f"❌ Error fetching video for {faq_id}: {db_error}")
+                else:
+                    logger.warning("⚠️ Supabase credentials not available for video URL fallback")
+            except Exception as fallback_error:
+                logger.error(f"⚠️ Supabase fallback failed: {fallback_error}")
+            
             # STEP 2: Semantic matching using OpenAI
             logger.info(f"🤖 Using AI to find best matching FAQ...")
             
@@ -372,8 +398,8 @@ RULES:
                     if openai_api_key:
                         openai_client = OpenAI(api_key=openai_api_key)
                         
-                        # Build FAQ list for LLM (exclude fallback FAQs from matching)
-                        matchable_faqs = [faq for faq in faqs if not faq.get('is_fallback') and not faq.get('is_intro')]
+                        # Build FAQ list for LLM (exclude fallback, intro, and user collection FAQs from matching)
+                        matchable_faqs = [faq for faq in faqs if not faq.get('is_fallback') and not faq.get('is_intro') and not faq.get('is_user_collection')]
                         
                         if matchable_faqs:
                             faq_list = []

@@ -2623,13 +2623,13 @@ Return JSON only:
         all_faqs = unique_faqs
         logger.info(f"📊 Total FAQs AFTER DEDUPLICATION: {len(all_faqs)} unique FAQs")
         
-        # ⚠️ LIMIT: Cap at 2 content FAQs for TESTING (+ 3 special + 4 collection = 9 total)
-        MAX_CONTENT_FAQS = 2  # 2 regular content FAQs (FOR TESTING)
+        # ⚠️ LIMIT: Cap at 1 content FAQ for TESTING (+ 1 intro + 2 fallback + 4 collection = 8 total)
+        MAX_CONTENT_FAQS = 1  # 1 regular content FAQ (FOR TESTING)
         if len(all_faqs) > MAX_CONTENT_FAQS:
             logger.warning(f"⚠️ Limiting FAQs from {len(all_faqs)} to {MAX_CONTENT_FAQS}")
             all_faqs = all_faqs[:MAX_CONTENT_FAQS]
         
-        logger.info(f"📊 Total FAQs AFTER LIMIT: {len(all_faqs)} content FAQs (will add 1 intro + 2 fallback FAQs = {len(all_faqs) + 3} total, plus collection videos if enabled)")
+        logger.info(f"📊 Total FAQs AFTER LIMIT: {len(all_faqs)} content FAQ (will add 1 intro + 2 fallback FAQs = {len(all_faqs) + 3} total, plus collection videos if enabled)")
         
         # Store FAQs in GCS (regardless of document availability)
         if gcs_qa_service:
@@ -2744,16 +2744,7 @@ Return JSON only:
             logger.info(f"     • Document FAQs: {len(document_faqs)}")
             logger.info(f"   - Special FAQs: {len(default_faqs)} (1 intro + 2 fallback + collection videos)")
             logger.info(f"   💰 FAQ Limit: {MAX_CONTENT_FAQS} content + {len(default_faqs)} special = {len(faq_data['faqs'])} TOTAL VIDEOS (TESTING MODE)")
-            logger.info(f"   💰 HeyGen Credits: {len(faq_data['faqs'])} videos will be generated (TESTING: only 2 content FAQs)!")
-            
-            # ⚠️ OPTIONAL: Save FAQs to local JSON file for review (useful for debugging)
-            try:
-                local_faq_file = f"faq_test_{company_name.replace(' ', '_')}_{qudemo_id[:8]}.json"
-                with open(local_faq_file, 'w', encoding='utf-8') as f:
-                    json.dump(faq_data, f, indent=2, ensure_ascii=False)
-                logger.info(f"📄 Saved FAQs to local file for review: {local_faq_file}")
-            except Exception as save_error:
-                logger.error(f"❌ Error saving local FAQ file: {save_error}")
+            logger.info(f"   💰 HeyGen Credits: {len(faq_data['faqs'])} videos will be generated (TESTING: only 1 content FAQ)!")
             
             # Generate avatar videos using HeyGen (background task)
             if avatar_video_processor and presenter_photo_url:

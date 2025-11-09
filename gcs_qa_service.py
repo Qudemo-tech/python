@@ -89,6 +89,9 @@ class GCSQAService:
                 logger.warning(f"⚠️ No FAQs found for {company_name}/{qudemo_id}")
                 return None
             
+            # Force reload blob metadata to bypass cache
+            blob.reload()
+            
             # Download and parse FAQs
             content = blob.download_as_text()
             faqs_data = json.loads(content)
@@ -320,6 +323,9 @@ RULES:
                     'error': 'FAQ file not found',
                     'answer': 'This QuDemo is still being processed. Please try again in a few minutes.'
                 }
+            
+            # Force reload blob metadata to bypass cache
+            blob.reload()
             
             faqs_content = blob.download_as_text()
             faqs_data = json.loads(faqs_content)

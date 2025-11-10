@@ -654,6 +654,13 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
             answer_text = answer_text.replace("Chatwot", "Chatwoot")
             answer_text = answer_text.replace("chatwot", "Chatwoot")
             
+            # Get avatar video URL if available, otherwise use regular video URL
+            avatar_video_url = answer_result.get('avatar_video_url', '')
+            regular_video_url = answer_result.get('video_url', '') if gcs_qa_service else (answer_result.get('sources', [{}])[0].get('video_url', '') if answer_result.get('sources') else '')
+            
+            # Use avatar video URL as primary video_url if available
+            final_video_url = avatar_video_url if avatar_video_url else regular_video_url
+            
             return {
                 'success': True,
                 'answer': answer_text,
@@ -666,14 +673,14 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
                 'estimated_time': answer_result.get('estimated_time', '2-3 minutes'),
                 'start': answer_result.get('timestamp', 0) if gcs_qa_service else (answer_result.get('timestamp', {}).get('start_time', 0) if answer_result.get('timestamp') else (answer_result.get('sources', [{}])[0].get('start_timestamp', 0) if answer_result.get('sources') else 0)),
                 'end': answer_result.get('end', 0) if gcs_qa_service else (answer_result.get('timestamp', {}).get('end_time', 0) if answer_result.get('timestamp') else (answer_result.get('sources', [{}])[0].get('end_timestamp', 0) if answer_result.get('sources') else 0)),
-                'video_url': answer_result.get('video_url', '') if gcs_qa_service else (answer_result.get('sources', [{}])[0].get('video_url', '') if answer_result.get('sources') else ''),
+                'video_url': final_video_url,  # Use avatar video URL if available
                 'video_title': answer_result.get('video_title', '') if gcs_qa_service else (answer_result.get('sources', [{}])[0].get('video_title', '') if answer_result.get('sources') else ''),
                 'timestamp': answer_result.get('timestamp', 0) if gcs_qa_service else (answer_result.get('timestamp', {}).get('start_time', 0) if answer_result.get('timestamp') else (answer_result.get('sources', [{}])[0].get('start_timestamp', 0) if answer_result.get('sources') else 0)),
                 'formatted_timestamp': answer_result.get('formatted_timestamp', '') if gcs_qa_service else (answer_result.get('timestamp', {}).get('formatted_start', '') if answer_result.get('timestamp') else ''),
                 'answer_source': 'gcs_transcript_search',
                 # Avatar video fields for AI-generated video answers
                 'has_avatar_video': answer_result.get('has_avatar_video', False),
-                'avatar_video_url': answer_result.get('avatar_video_url', ''),
+                'avatar_video_url': avatar_video_url,
                 'faq_id': answer_result.get('faq_id', '')
             }
         else:
@@ -1356,6 +1363,15 @@ async def upload_presenter_photo(
             
             public_url = blob.public_url
             logger.info(f"✅ Presenter photo uploaded successfully: {public_url}")
+            
+            # Trigger FAQ generation for avatar videos now that photo is available
+            try:
+                logger.info(f"🎬 Triggering FAQ generation after presenter photo upload...")
+                await generate_faq_for_avatar_videos(companyName, qudemoId)
+                logger.info(f"✅ FAQ generation completed after photo upload")
+            except Exception as faq_error:
+                logger.error(f"❌ Error generating FAQs after photo upload: {faq_error}")
+                # Don't fail the upload, just log the error
             
             return {
                 "success": True,
@@ -2468,13 +2484,22 @@ Return JSON: [{{"topic": "description", "importance": "high/medium"}}]"""
                 
                 doc_topics_list = "\n".join([f"- {t.get('topic', '')}" for t in doc_topics])
                 
-                prompt = f"""Generate FAQs from this document covering these topics:
+                prompt = f"""Extract or generate FAQs from this document.
+
+IMPORTANT: Check if the document already has questions and answers in a numbered format (1., 2., 3., etc.). 
+
+IF THE DOCUMENT HAS NUMBERED Q&A:
+- Extract them directly with their original questions and answers
+- Preserve the exact wording of questions and answers
+- Keep the same structure and formatting
+- Do NOT synthesize or rewrite them
+
+IF THE DOCUMENT DOES NOT HAVE NUMBERED Q&A:
+- Generate FAQs covering these topics:
 {doc_topics_list}
-
-Questions: Short (5-10 words), simple, no compound questions. Start with "What is/How does/Why/Who".
-Answers: Clear, concise (100-150 words max 1000 chars), focus on benefits. Use bullet points for key features.
-
-Create 1 unique FAQ per topic. Synthesize, don't copy document text.
+- Questions: Short (5-10 words), simple, no compound questions. Start with "What is/How does/Why/Who"
+- Answers: Clear, concise (100-150 words max 1000 chars), focus on benefits. Use bullet points for key features
+- Create 1 unique FAQ per topic. Synthesize from document content
 
 Document content:
 {combined_content}
@@ -2623,13 +2648,13 @@ Return JSON only:
         all_faqs = unique_faqs
         logger.info(f"📊 Total FAQs AFTER DEDUPLICATION: {len(all_faqs)} unique FAQs")
         
-        # ⚠️ LIMIT: Cap at 1 content FAQ for TESTING (+ 1 intro + 2 fallback + 4 collection = 8 total)
-        MAX_CONTENT_FAQS = 1  # 1 regular content FAQ (FOR TESTING)
+        # ⚠️ LIMIT: Cap at 13 content FAQs (+ 4 system = 17 total videos)
+        MAX_CONTENT_FAQS = 13  # 13 content FAQs + 4 system FAQs = 17 total videos
         if len(all_faqs) > MAX_CONTENT_FAQS:
             logger.warning(f"⚠️ Limiting FAQs from {len(all_faqs)} to {MAX_CONTENT_FAQS}")
             all_faqs = all_faqs[:MAX_CONTENT_FAQS]
         
-        logger.info(f"📊 Total FAQs AFTER LIMIT: {len(all_faqs)} content FAQ (will add 1 intro + 2 fallback FAQs = {len(all_faqs) + 3} total, plus collection videos if enabled)")
+        logger.info(f"📊 Total FAQs AFTER LIMIT: {len(all_faqs)} content FAQs (will add 4 system FAQs = {len(all_faqs) + 4} total, plus collection videos if enabled)")
         
         # Store FAQs in GCS (regardless of document availability)
         if gcs_qa_service:
@@ -2742,9 +2767,9 @@ Return JSON only:
             logger.info(f"   - Content FAQs (after limit): {len(all_faqs)}")
             logger.info(f"     • Video FAQs: {len(video_faqs)}")
             logger.info(f"     • Document FAQs: {len(document_faqs)}")
-            logger.info(f"   - Special FAQs: {len(default_faqs)} (1 intro + 2 fallback + collection videos)")
-            logger.info(f"   💰 FAQ Limit: {MAX_CONTENT_FAQS} content + {len(default_faqs)} special = {len(faq_data['faqs'])} TOTAL VIDEOS (TESTING MODE)")
-            logger.info(f"   💰 HeyGen Credits: {len(faq_data['faqs'])} videos will be generated (TESTING: only 1 content FAQ)!")
+            logger.info(f"   - Special FAQs: {len(default_faqs)} (system videos: intro + fallback + collection)")
+            logger.info(f"   💰 FAQ Limit: {MAX_CONTENT_FAQS} content + {len(default_faqs)} system = {len(faq_data['faqs'])} TOTAL VIDEOS")
+            logger.info(f"   💰 HeyGen Credits: {len(faq_data['faqs'])} videos will be generated!")
             
             # Generate avatar videos using HeyGen (background task)
             if avatar_video_processor and presenter_photo_url:

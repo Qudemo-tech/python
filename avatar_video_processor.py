@@ -48,6 +48,19 @@ class AvatarVideoProcessor:
             logger.info(f"🎬 Starting avatar video generation for {len(faqs)} FAQs")
             logger.info(f"📍 QuDemo: {company_name}/{qudemo_id}")
             
+            # Update QuDemo status to 'processing' before starting
+            if self.supabase:
+                try:
+                    self.supabase.table('qudemos_new').update({
+                        'avatar_generation_status': 'processing',
+                        'avatar_videos_total': len(faqs),
+                        'avatar_videos_completed': 0,
+                        'avatar_generation_started_at': datetime.utcnow().isoformat()
+                    }).eq('id', qudemo_id).execute()
+                    logger.info(f"✅ Updated QuDemo status to 'processing' with {len(faqs)} total videos")
+                except Exception as e:
+                    logger.error(f"❌ Failed to update QuDemo status: {e}")
+            
             # Step 1: Upload presenter photo to HeyGen
             logger.info(f"📤 Step 1: Uploading presenter photo to HeyGen...")
             logger.info(f"📷 GCS URL: {presenter_photo_url}")
@@ -55,6 +68,16 @@ class AvatarVideoProcessor:
             
             if not image_key:
                 logger.error("❌ Failed to upload presenter photo - aborting video generation")
+                
+                # Update status to failed
+                if self.supabase:
+                    try:
+                        self.supabase.table('qudemos_new').update({
+                            'avatar_generation_status': 'failed'
+                        }).eq('id', qudemo_id).execute()
+                    except Exception as e:
+                        logger.error(f"❌ Failed to update QuDemo status to failed: {e}")
+                
                 return {
                     "success": False,
                     "error": "Failed to upload presenter photo to HeyGen",
@@ -69,8 +92,36 @@ class AvatarVideoProcessor:
             logger.info(f"⏳ Waiting 15 seconds for HeyGen to process the image...")
             await asyncio.sleep(15)
             
-            # Step 2: Generate videos concurrently
-            logger.info(f"🎥 Step 2: Generating {len(faqs)} videos concurrently...")
+            # Step 2: Create placeholder records in avatar_videos table for progress tracking
+            logger.info(f"📝 Step 2: Creating placeholder records for progress tracking...")
+            if self.supabase:
+                try:
+                    for faq in faqs:
+                        faq_id = faq.get('id', 'unknown')
+                        question = faq.get('question', '')
+                        answer = faq.get('answer', '')
+                        
+                        # Check if record already exists
+                        existing = self.supabase.table('avatar_videos').select('id').eq('qudemo_id', qudemo_id).eq('faq_id', faq_id).execute()
+                        
+                        if not existing.data or len(existing.data) == 0:
+                            # Create placeholder record with 'processing' status
+                            self.supabase.table('avatar_videos').insert({
+                                "qudemo_id": qudemo_id,
+                                "faq_id": faq_id,
+                                "question": question,
+                                "answer": answer,
+                                "status": "processing",
+                                "created_at": datetime.utcnow().isoformat()
+                            }).execute()
+                            logger.info(f"✅ Created placeholder record for {faq_id}")
+                        else:
+                            logger.info(f"ℹ️ Record already exists for {faq_id}, skipping")
+                except Exception as e:
+                    logger.error(f"❌ Failed to create placeholder records: {e}")
+            
+            # Step 3: Generate videos concurrently
+            logger.info(f"🎥 Step 3: Generating {len(faqs)} videos concurrently...")
             
             tasks = []
             for faq in faqs:
@@ -92,13 +143,35 @@ class AvatarVideoProcessor:
             
             logger.info(f"✅ Video generation complete: {success_count} succeeded, {failed_count} failed")
             
-            # Step 3: Update QuDemo has_avatar_videos flag if any videos succeeded
-            if success_count > 0 and self.supabase:
+            # Step 4: Update QuDemo status based on results
+            if self.supabase:
                 try:
-                    self.supabase.table('qudemos_new').update({
-                        'has_avatar_videos': True
-                    }).eq('id', qudemo_id).execute()
-                    logger.info(f"✅ Updated QuDemo {qudemo_id} with has_avatar_videos=true")
+                    if success_count == 0:
+                        # All videos failed
+                        self.supabase.table('qudemos_new').update({
+                            'avatar_generation_status': 'failed',
+                            'avatar_videos_completed': 0
+                        }).eq('id', qudemo_id).execute()
+                        logger.info(f"❌ All videos failed for QuDemo {qudemo_id}")
+                    elif success_count == len(faqs):
+                        # All videos succeeded
+                        self.supabase.table('qudemos_new').update({
+                            'avatar_generation_status': 'completed',
+                            'has_avatar_videos': True,
+                            'avatar_videos_completed': success_count,
+                            'avatar_videos_total': len(faqs),
+                            'avatar_generation_completed_at': datetime.utcnow().isoformat()
+                        }).eq('id', qudemo_id).execute()
+                        logger.info(f"✅ All videos completed for QuDemo {qudemo_id}")
+                    else:
+                        # Some videos succeeded, some failed
+                        self.supabase.table('qudemos_new').update({
+                            'avatar_generation_status': 'completed',  # Mark as completed even with some failures
+                            'has_avatar_videos': True,
+                            'avatar_videos_completed': success_count,
+                            'avatar_videos_total': len(faqs)
+                        }).eq('id', qudemo_id).execute()
+                        logger.info(f"⚠️ Partial completion: {success_count}/{len(faqs)} videos for QuDemo {qudemo_id}")
                 except Exception as e:
                     logger.error(f"❌ Failed to update QuDemo flag: {e}")
             
@@ -114,6 +187,16 @@ class AvatarVideoProcessor:
             logger.error(f"❌ Error in avatar video processing: {e}")
             import traceback
             logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+            
+            # Update status to failed on exception
+            if self.supabase:
+                try:
+                    self.supabase.table('qudemos_new').update({
+                        'avatar_generation_status': 'failed'
+                    }).eq('id', qudemo_id).execute()
+                except Exception as update_error:
+                    logger.error(f"❌ Failed to update QuDemo status to failed: {update_error}")
+            
             return {
                 "success": False,
                 "error": str(e),
@@ -199,38 +282,50 @@ class AvatarVideoProcessor:
             
             logger.info(f"✅ Video uploaded to GCS: {gcs_video_url}")
             
-            # Step 5: Store in database (avatar_videos table)
+            # Step 5: Update database record to completed status
             if self.supabase:
                 try:
                     video_record = {
-                        "qudemo_id": qudemo_id,
-                        "faq_id": faq_id,
-                        "question": question,
-                        "answer": answer,
                         "video_url": gcs_video_url,
                         "heygen_video_id": video_id,
                         "status": "completed",
-                        "created_at": datetime.utcnow().isoformat()
+                        "updated_at": datetime.utcnow().isoformat()
                     }
                     
-                    # Check if record exists
-                    existing = self.supabase.table('avatar_videos').select('id').eq('qudemo_id', qudemo_id).eq('faq_id', faq_id).execute()
+                    # Update existing record (should always exist from Step 2)
+                    result = self.supabase.table('avatar_videos').update(video_record).eq('qudemo_id', qudemo_id).eq('faq_id', faq_id).execute()
                     
-                    if existing.data and len(existing.data) > 0:
-                        # Update existing
-                        self.supabase.table('avatar_videos').update(video_record).eq('id', existing.data[0]['id']).execute()
-                        logger.info(f"✅ Updated avatar_videos record for {faq_id}")
+                    if result.data and len(result.data) > 0:
+                        logger.info(f"✅ Updated avatar_videos record for {faq_id} to completed")
+                        
+                        # Update QuDemo progress count
+                        completed_count = self.supabase.table('avatar_videos').select('id').eq('qudemo_id', qudemo_id).eq('status', 'completed').execute()
+                        if completed_count.data:
+                            self.supabase.table('qudemos_new').update({
+                                'avatar_videos_completed': len(completed_count.data)
+                            }).eq('id', qudemo_id).execute()
+                            logger.info(f"📊 Progress: {len(completed_count.data)} videos completed")
                     else:
-                        # Insert new
-                        self.supabase.table('avatar_videos').insert(video_record).execute()
+                        # Fallback: insert if update failed (record might not exist)
+                        logger.warning(f"⚠️ Record not found for {faq_id}, inserting new record")
+                        self.supabase.table('avatar_videos').insert({
+                            "qudemo_id": qudemo_id,
+                            "faq_id": faq_id,
+                            "question": question,
+                            "answer": answer,
+                            "video_url": gcs_video_url,
+                            "heygen_video_id": video_id,
+                            "status": "completed",
+                            "created_at": datetime.utcnow().isoformat()
+                        }).execute()
                         logger.info(f"✅ Inserted avatar_videos record for {faq_id}")
                         
                 except Exception as db_error:
-                    logger.error(f"❌ Failed to store in database: {db_error}")
+                    logger.error(f"❌ Failed to update database: {db_error}")
                     # Don't fail the whole process if DB update fails
             
             # Step 6: Update FAQ file with video URL for instant retrieval
-            logger.info(f"📝 Updating FAQ file with video URL for {faq_id}...")
+            logger.info(f"📝 Step 6: Updating FAQ file with video URL for {faq_id}...")
             try:
                 self._update_faq_with_video_url(company_name, qudemo_id, faq_id, gcs_video_url)
                 logger.info(f"✅ FAQ file updated with video URL")

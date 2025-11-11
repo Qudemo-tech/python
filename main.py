@@ -630,7 +630,57 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
     try:
         logger.info(f"❓ Processing question for {company_name} qudemo {qudemo_id} using NEW SIMPLIFIED Q&A")
         
-        # Use NEW simplified Q&A service
+        # SPECIAL HANDLING: Map system question identifiers to FAQ IDs
+        system_question_map = {
+            "INTRO_VIDEO": "faq_intro",
+            "NO_ANSWER_FOUND": "faq_fallback",
+            "SALES_INQUIRY": "faq_sales",
+            "NAME_REQUEST": "faq_user_name_request",
+            "EMAIL_REQUEST": "faq_user_email_request",
+            "COMPANY_REQUEST": "faq_user_company_request",
+            "COLLECTION_COMPLETE": "faq_user_collection_complete"
+        }
+        
+        # Check if this is a system question identifier
+        if request.question.upper().strip() in system_question_map:
+            faq_id = system_question_map[request.question.upper().strip()]
+            logger.info(f"🔧 System question detected: {request.question} -> {faq_id}")
+            
+            # Fetch directly from avatar_videos table
+            try:
+                video_response = supabase.table('avatar_videos').select('*').eq('qudemo_id', qudemo_id).eq('faq_id', faq_id).execute()
+                
+                if video_response.data and len(video_response.data) > 0:
+                    video_data = video_response.data[0]
+                    logger.info(f"✅ Found system FAQ: {faq_id}")
+                    
+                    return {
+                        'success': True,
+                        'answer': video_data.get('answer_text', video_data.get('answer', '')),
+                        'sources': [],
+                        'total_sources': 0,
+                        'search_score': 1.0,
+                        'confidence_score': 1.0,
+                        'content_types_found': [],
+                        'difficulty_level': 'beginner',
+                        'estimated_time': '1 minute',
+                        'start': 0,
+                        'end': 0,
+                        'video_url': video_data.get('video_url', ''),
+                        'video_title': '',
+                        'timestamp': 0,
+                        'formatted_timestamp': '',
+                        'answer_source': 'system_faq',
+                        'has_avatar_video': video_data.get('status') == 'completed' and video_data.get('video_url'),
+                        'avatar_video_url': video_data.get('video_url', ''),
+                        'faq_id': faq_id
+                    }
+                else:
+                    logger.warning(f"⚠️ System FAQ not found in database: {faq_id}")
+            except Exception as e:
+                logger.error(f"❌ Error fetching system FAQ: {e}")
+        
+        # Use NEW simplified Q&A service for regular questions
         gcs_service = GCSQAService()
         answer_result = await gcs_service.ask_question_simplified(
             question=request.question,
@@ -940,14 +990,29 @@ async def get_suggested_questions(company_name: str, qudemo_id: str):
             faqs_data = gcs_qa_service.get_faqs(company_name, qudemo_id)
             
             if faqs_data and 'faqs' in faqs_data:
-                # Extract questions from FAQs, excluding fallback, intro, and user collection FAQs
+                # System FAQ IDs to exclude from suggested questions
+                system_faq_ids = [
+                    'faq_intro', 'faq_fallback', 'faq_sales', 'faq_no_answer',
+                    'faq_user_name_request', 'faq_user_email_request', 
+                    'faq_user_company_request', 'faq_user_collection_complete'
+                ]
+                
+                # System question identifiers to exclude
+                system_questions = [
+                    'NO_ANSWER_FOUND', 'SALES_INQUIRY', 'INTRO_VIDEO', 
+                    'NAME_REQUEST', 'EMAIL_REQUEST', 'COMPANY_REQUEST', 'COLLECTION_COMPLETE',
+                    'INTRO', 'FALLBACK', 'SALES', 'NO_ANSWER'  # Also check shorter versions
+                ]
+                
+                # Extract questions from FAQs, excluding system and user collection FAQs
                 faq_questions = [
                     faq['question'] 
                     for faq in faqs_data['faqs'] 
                     if not faq.get('is_fallback', False) 
                     and not faq.get('is_intro', False)
                     and not faq.get('is_user_collection', False)
-                    and faq.get('question') not in ['NO_ANSWER_FOUND', 'SALES_INQUIRY', 'INTRO_VIDEO', 'NAME_REQUEST', 'EMAIL_REQUEST', 'COMPANY_REQUEST', 'COLLECTION_COMPLETE']
+                    and faq.get('id', '') not in system_faq_ids  # Filter by FAQ ID
+                    and faq.get('question', '').upper().strip() not in system_questions  # Filter by question text
                 ]
                 
                 if faq_questions:
@@ -1597,35 +1662,27 @@ Return JSON only:
         system_faqs = [
             {
                 "id": "faq_intro",
-                "question": "What is this about?",
+                "question": "INTRO_VIDEO",
                 "answer": f"Welcome! I'm {presenter_name}, here to guide you through this interactive demo. I'll be answering your questions and showing you everything you need to know. Feel free to ask me anything about our product, features, or how we can help solve your challenges. Let's get started!",
                 "category": "intro",
                 "is_system": True,
                 "is_intro": True
             },
             {
-                "id": "faq_fallback",
-                "question": "Fallback Response",
+                "id": "faq_fallback_no_answer",
+                "question": "NO_ANSWER_FOUND",
                 "answer": "I apologize, but I don't have specific information about that in our knowledge base. However, I'd be happy to connect you with our team who can help answer your questions in detail. Please use the 'Book a Meeting' option to schedule a call with our experts.",
                 "category": "fallback",
                 "is_system": True,
                 "is_fallback": True
             },
             {
-                "id": "faq_sales",
-                "question": "Talk to Sales",
+                "id": "faq_fallback_sales",
+                "question": "SALES_INQUIRY",
                 "answer": "I'd be delighted to connect you with our sales team! They're experts at understanding your specific needs and can provide personalized guidance. Please click on the 'Book a Meeting' button to schedule a convenient time to chat with one of our team members. We look forward to speaking with you!",
                 "category": "fallback",
                 "is_system": True,
                 "is_sales": True
-            },
-            {
-                "id": "faq_no_answer",
-                "question": "No Answer Found",
-                "answer": "I couldn't find a relevant answer to your question. You can ask me about our product, features, pricing, or any other aspect of our solution. Or feel free to book a meeting to speak with our team directly!",
-                "category": "fallback",
-                "is_system": True,
-                "is_no_answer": True
             }
         ]
         
@@ -1634,7 +1691,7 @@ Return JSON only:
             if collect_name:
                 system_faqs.append({
                     "id": "faq_user_name_request",
-                    "question": "Request Name",
+                    "question": "NAME_REQUEST",
                     "answer": "Hey! Before we continue, can I know your name?",
                     "category": "user_collection",
                     "is_system": True,
@@ -1645,7 +1702,7 @@ Return JSON only:
             if collect_email:
                 system_faqs.append({
                     "id": "faq_user_email_request",
-                    "question": "Request Email",
+                    "question": "EMAIL_REQUEST",
                     "answer": "Thanks! Can I have your email to stay in touch or share updates about the product?",
                     "category": "user_collection",
                     "is_system": True,
@@ -1656,7 +1713,7 @@ Return JSON only:
             if collect_company:
                 system_faqs.append({
                     "id": "faq_user_company_request",
-                    "question": "Request Company",
+                    "question": "COMPANY_REQUEST",
                     "answer": "Appreciate it! Which company are you with?",
                     "category": "user_collection",
                     "is_system": True,
@@ -1666,7 +1723,7 @@ Return JSON only:
             
             system_faqs.append({
                 "id": "faq_user_collection_complete",
-                "question": "Collection Complete",
+                "question": "COLLECTION_COMPLETE",
                 "answer": "Thanks a lot! Now that I know a bit about you, what would you like to know about the product?",
                 "category": "user_collection",
                 "is_system": True,

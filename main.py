@@ -1386,6 +1386,479 @@ async def upload_presenter_photo(
         logger.error(f"❌ Error uploading presenter photo: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/generate-faqs-preview")
+async def generate_faqs_preview(company_name: str, qudemo_id: str):
+    """
+    Step 1: Generate FAQs from documents WITHOUT triggering HeyGen video generation.
+    Returns FAQs for preview and editing.
+    """
+    try:
+        logger.info(f"📋 Generating FAQ preview for {company_name}/{qudemo_id}")
+        
+        # Get qudemo data from Supabase
+        qudemo_data = supabase.table('qudemos_new').select('*').eq('id', qudemo_id).execute()
+        if not qudemo_data.data or len(qudemo_data.data) == 0:
+            raise HTTPException(status_code=404, detail="QuDemo not found")
+        
+        qudemo = qudemo_data.data[0]
+        collect_user_info = qudemo.get('collect_user_info', False)
+        collect_name = qudemo.get('collect_name', False)
+        collect_email = qudemo.get('collect_email', False)
+        collect_company = qudemo.get('collect_company', False)
+        presenter_name = qudemo.get('presenter_name', 'AI Assistant')
+        
+        # Generate FAQs from all sources (video transcripts + documents)
+        all_faqs = []
+        video_faqs = []
+        document_faqs = []
+        
+        # 1. Generate FAQs from VIDEO TRANSCRIPTS
+        logger.info(f"🎥 Generating FAQs from video transcripts...")
+        if gcs_qa_service:
+            try:
+                # Get video transcript from GCS
+                bucket_name = f"qudemo-video-transcripts"
+                bucket = gcs_qa_service.gcs_service.client.bucket(bucket_name)
+                transcript_path = f"{company_name.replace(' ', '_')}/{qudemo_id}/transcript.json"
+                
+                transcript_blob = bucket.blob(transcript_path)
+                if transcript_blob.exists():
+                    transcript_data = json.loads(transcript_blob.download_as_text())
+                    chunks = transcript_data.get('chunks', [])
+                    segments = transcript_data.get('segments', [])
+                    
+                    transcript_text = ""
+                    if chunks:
+                        transcript_text = "\n\n".join([
+                            f"[{chunk.get('start_time', '')}-{chunk.get('end_time', '')}] {chunk.get('text', '')}"
+                            for chunk in chunks
+                        ])
+                    elif segments:
+                        transcript_text = "\n\n".join([
+                            f"[{seg.get('formatted_start', '')}-{seg.get('formatted_end', '')}] {seg.get('text', '')}"
+                            for seg in segments
+                        ])
+                    
+                    if transcript_text:
+                        transcript_text = transcript_text[:10000]
+                        
+                        # Identify topics
+                        topics_prompt = f"""Identify high-level topics from this transcript for customer FAQs.
+Prioritize: Product uniqueness, target audience, value proposition, benefits, time/cost savings.
+Then: Key features, pricing, technical specs.
+Max 10 topics.
+
+Video transcript:
+{transcript_text}
+
+Return JSON: [{{"topic": "description", "importance": "high/medium"}}]"""
+
+                        topics_response = openai_client.chat.completions.create(
+                            model="gpt-4o-mini",
+                            messages=[{"role": "user", "content": topics_prompt}],
+                            temperature=0.3,
+                            max_tokens=500
+                        )
+                        
+                        topics_json = topics_response.choices[0].message.content.strip()
+                        if topics_json.startswith("```json"):
+                            topics_json = topics_json.replace("```json", "").replace("```", "").strip()
+                        
+                        topics = json.loads(topics_json)
+                        topics_list = "\n".join([f"- {t.get('topic', '')}" for t in topics])
+                        
+                        # Generate FAQs
+                        faq_prompt = f"""Generate FAQs covering these topics:
+{topics_list}
+
+Video transcript:
+{transcript_text}
+
+Questions: Short (5-10 words), simple, no compound questions. Start with "What is/How does/Why/Who"
+Answers: Clear, concise (100-150 words max 1000 chars), focus on benefits. Use bullet points for key features.
+Create 1 unique FAQ per topic. Synthesize from transcript.
+
+Return JSON only:
+[{{"question": "...", "answer": "...", "category": "features", "source": "video"}}]"""
+
+                        response = openai_client.chat.completions.create(
+                            model="gpt-4",
+                            messages=[{"role": "user", "content": faq_prompt}],
+                            temperature=0.7,
+                            max_tokens=2500
+                        )
+                        
+                        faq_json = response.choices[0].message.content.strip()
+                        if faq_json.startswith("```json"):
+                            faq_json = faq_json.replace("```json", "").replace("```", "").strip()
+                        
+                        video_faqs = json.loads(faq_json, strict=False)
+                        logger.info(f"✅ Generated {len(video_faqs)} FAQs from video")
+                        
+            except Exception as e:
+                logger.error(f"❌ Error processing video transcript: {e}")
+        
+        all_faqs.extend(video_faqs)
+        
+        # 2. Generate FAQs from DOCUMENTS
+        logger.info(f"📄 Generating FAQs from documents...")
+        if document_processor:
+            all_documents = document_processor.search_document_content(
+                company_name=company_name,
+                qudemo_id=qudemo_id,
+                query=""
+            )
+            
+            if all_documents:
+                combined_content = "\n\n".join([doc.get('content', '') for doc in all_documents])
+                combined_content = combined_content[:10000]
+                
+                # Identify topics
+                doc_topics_prompt = f"""Identify high-level topics from this document for customer FAQs.
+Prioritize: Product uniqueness, target audience, value proposition, benefits, time/cost savings.
+Then: Key features, pricing, use cases.
+Max 10 topics.
+
+Document content:
+{combined_content}
+
+Return JSON: [{{"topic": "description", "importance": "high/medium"}}]"""
+
+                doc_topics_response = openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": doc_topics_prompt}],
+                    temperature=0.3,
+                    max_tokens=500
+                )
+                
+                doc_topics_json = doc_topics_response.choices[0].message.content.strip()
+                if doc_topics_json.startswith("```json"):
+                    doc_topics_json = doc_topics_json.replace("```json", "").replace("```", "").strip()
+                
+                doc_topics = json.loads(doc_topics_json)
+                doc_topics_list = "\n".join([f"- {t.get('topic', '')}" for t in doc_topics])
+                
+                # Generate FAQs
+                prompt = f"""Extract or generate FAQs from this document.
+
+IMPORTANT: Check if the document already has questions and answers in a numbered format (1., 2., 3., etc.). 
+
+IF THE DOCUMENT HAS NUMBERED Q&A:
+- Extract them directly with their original questions and answers
+- Preserve the exact wording of questions and answers
+- Keep the same structure and formatting
+- Do NOT synthesize or rewrite them
+
+IF THE DOCUMENT DOES NOT HAVE NUMBERED Q&A:
+- Generate FAQs covering these topics:
+{doc_topics_list}
+- Questions: Short (5-10 words), simple, no compound questions. Start with "What is/How does/Why/Who"
+- Answers: Clear, concise (100-150 words max 1000 chars), focus on benefits. Use bullet points for key features
+- Create 1 unique FAQ per topic. Synthesize from document content
+
+Document content:
+{combined_content}
+
+Return JSON only:
+[{{"question": "...", "answer": "...", "category": "features", "source": "document"}}]"""
+
+                response = openai_client.chat.completions.create(
+                    model="gpt-4",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.7,
+                    max_tokens=2500
+                )
+                
+                faq_json = response.choices[0].message.content.strip()
+                if faq_json.startswith("```json"):
+                    faq_json = faq_json.replace("```json", "").replace("```", "").strip()
+                
+                document_faqs = json.loads(faq_json, strict=False)
+                logger.info(f"✅ Generated {len(document_faqs)} FAQs from documents")
+        
+        all_faqs.extend(document_faqs)
+        
+        # Deduplicate FAQs
+        unique_faqs = []
+        seen_questions = set()
+        for faq in all_faqs:
+            question = faq['question']
+            normalized_question = question.lower().strip()
+            if normalized_question not in seen_questions:
+                unique_faqs.append(faq)
+                seen_questions.add(normalized_question)
+        
+        all_faqs = unique_faqs
+        
+        # ✅ NO LIMIT: Allow all FAQs to be generated and previewed
+        # (Video generation will be limited to 1 in the trigger endpoint)
+        
+        # ✅ Add all system FAQs for preview
+        system_faqs = [
+            {
+                "id": "faq_intro",
+                "question": "What is this about?",
+                "answer": f"Welcome! I'm {presenter_name}, here to guide you through this interactive demo. I'll be answering your questions and showing you everything you need to know. Feel free to ask me anything about our product, features, or how we can help solve your challenges. Let's get started!",
+                "category": "intro",
+                "is_system": True,
+                "is_intro": True
+            },
+            {
+                "id": "faq_fallback",
+                "question": "Fallback Response",
+                "answer": "I apologize, but I don't have specific information about that in our knowledge base. However, I'd be happy to connect you with our team who can help answer your questions in detail. Please use the 'Book a Meeting' option to schedule a call with our experts.",
+                "category": "fallback",
+                "is_system": True,
+                "is_fallback": True
+            },
+            {
+                "id": "faq_sales",
+                "question": "Talk to Sales",
+                "answer": "I'd be delighted to connect you with our sales team! They're experts at understanding your specific needs and can provide personalized guidance. Please click on the 'Book a Meeting' button to schedule a convenient time to chat with one of our team members. We look forward to speaking with you!",
+                "category": "fallback",
+                "is_system": True,
+                "is_sales": True
+            },
+            {
+                "id": "faq_no_answer",
+                "question": "No Answer Found",
+                "answer": "I couldn't find a relevant answer to your question. You can ask me about our product, features, pricing, or any other aspect of our solution. Or feel free to book a meeting to speak with our team directly!",
+                "category": "fallback",
+                "is_system": True,
+                "is_no_answer": True
+            }
+        ]
+        
+        # ✅ Add user collection FAQs if enabled
+        if collect_user_info:
+            if collect_name:
+                system_faqs.append({
+                    "id": "faq_user_name_request",
+                    "question": "Request Name",
+                    "answer": "Hey! Before we continue, can I know your name?",
+                    "category": "user_collection",
+                    "is_system": True,
+                    "is_user_collection": True,
+                    "collection_field": "name"
+                })
+            
+            if collect_email:
+                system_faqs.append({
+                    "id": "faq_user_email_request",
+                    "question": "Request Email",
+                    "answer": "Thanks! Can I have your email to stay in touch or share updates about the product?",
+                    "category": "user_collection",
+                    "is_system": True,
+                    "is_user_collection": True,
+                    "collection_field": "email"
+                })
+            
+            if collect_company:
+                system_faqs.append({
+                    "id": "faq_user_company_request",
+                    "question": "Request Company",
+                    "answer": "Appreciate it! Which company are you with?",
+                    "category": "user_collection",
+                    "is_system": True,
+                    "is_user_collection": True,
+                    "collection_field": "company"
+                })
+            
+            system_faqs.append({
+                "id": "faq_user_collection_complete",
+                "question": "Collection Complete",
+                "answer": "Thanks a lot! Now that I know a bit about you, what would you like to know about the product?",
+                "category": "user_collection",
+                "is_system": True,
+                "is_user_collection": True,
+                "collection_field": "complete"
+            })
+        
+        # Assign IDs to content FAQs
+        content_faqs_with_ids = [
+            {
+                "id": f"faq_{str(i+1).zfill(3)}",
+                "question": faq["question"],
+                "answer": faq["answer"],
+                "category": faq.get("category", "general"),
+                "source": faq.get("source", "unknown"),
+                "is_system": False
+            }
+            for i, faq in enumerate(all_faqs)
+        ]
+        
+        # Combine all FAQs
+        all_faqs_response = {
+            "content_faqs": content_faqs_with_ids,
+            "system_faqs": system_faqs,
+            "total_content": len(content_faqs_with_ids),
+            "total_system": len(system_faqs),
+            "total_videos": len(content_faqs_with_ids) + len(system_faqs)
+        }
+        
+        logger.info(f"✅ Generated {len(content_faqs_with_ids)} content FAQs + {len(system_faqs)} system FAQs = {all_faqs_response['total_videos']} total")
+        
+        return {
+            "success": True,
+            "faqs": all_faqs_response,
+            "qudemo_id": qudemo_id,
+            "company_name": company_name
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error generating FAQ preview: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/update-faqs/{qudemo_id}")
+async def update_faqs(qudemo_id: str, request: dict):
+    """
+    Update FAQs for a QuDemo (add/edit/delete).
+    Saves the updated FAQs to GCS as a draft.
+    """
+    try:
+        company_name = request.get('company_name')
+        content_faqs = request.get('content_faqs', [])
+        system_faqs = request.get('system_faqs', [])
+        
+        logger.info(f"📝 Updating FAQs for {company_name}/{qudemo_id}")
+        logger.info(f"   Content FAQs: {len(content_faqs)}")
+        logger.info(f"   System FAQs: {len(system_faqs)}")
+        
+        # Save to GCS
+        if gcs_qa_service:
+            bucket_name = f"qudemo-{company_name.lower().replace(' ', '-')}"
+            bucket = gcs_qa_service.gcs_service.client.bucket(bucket_name)
+            
+            faq_data = {
+                "version": "1.0",
+                "qudemo_id": qudemo_id,
+                "company_name": company_name,
+                "generated_at": datetime.now().isoformat(),
+                "status": "draft",  # Mark as draft until video generation
+                "faqs": content_faqs + system_faqs
+            }
+            
+            faq_filename = f"faqs_{company_name.replace(' ', '_')}_draft.json"
+            blob = bucket.blob(f"{company_name}/{qudemo_id}/{faq_filename}")
+            blob.upload_from_string(json.dumps(faq_data, indent=2), content_type='application/json')
+            
+            logger.info(f"✅ Saved draft FAQs to GCS: {blob.name}")
+            
+            return {
+                "success": True,
+                "message": "FAQs updated successfully",
+                "qudemo_id": qudemo_id,
+                "total_faqs": len(content_faqs) + len(system_faqs)
+            }
+        else:
+            raise HTTPException(status_code=500, detail="GCS service not initialized")
+            
+    except Exception as e:
+        logger.error(f"❌ Error updating FAQs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/trigger-video-generation-final")
+async def trigger_video_generation_final(
+    presenterPhoto: UploadFile = File(...),
+    qudemoId: str = Form(...),
+    companyName: str = Form(...)
+):
+    """
+    Step 2: Upload presenter photo and trigger HeyGen video generation for the finalized FAQs.
+    """
+    try:
+        logger.info(f"🎬 Triggering final video generation for {companyName}/{qudemoId}")
+        
+        # 1. Upload presenter photo to GCS
+        file_content = await presenterPhoto.read()
+        if len(file_content) > 5 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File size exceeds 5MB limit")
+        
+        if not gcs_qa_service:
+            raise HTTPException(status_code=500, detail="GCS service not initialized")
+        
+        file_path = f"{companyName}/{qudemoId}/presenter_photo.jpg"
+        bucket = gcs_qa_service.gcs_service.client.bucket(f"qudemo-{companyName.lower().replace(' ', '-')}")
+        
+        if not bucket.exists():
+            bucket = gcs_qa_service.gcs_service.client.create_bucket(bucket.name)
+        
+        blob = bucket.blob(file_path)
+        blob.upload_from_string(file_content, content_type=presenterPhoto.content_type or 'image/jpeg')
+        blob.make_public()
+        
+        presenter_photo_url = blob.public_url
+        logger.info(f"✅ Presenter photo uploaded: {presenter_photo_url}")
+        
+        # 2. Update Supabase with presenter photo URL
+        supabase.table('qudemos_new').update({
+            'presenter_photo_url': presenter_photo_url,
+            'updated_at': datetime.now().isoformat()
+        }).eq('id', qudemoId).execute()
+        
+        # 3. Load draft FAQs from GCS
+        faq_filename = f"faqs_{companyName.replace(' ', '_')}_draft.json"
+        draft_blob = bucket.blob(f"{companyName}/{qudemoId}/{faq_filename}")
+        
+        if not draft_blob.exists():
+            raise HTTPException(status_code=404, detail="Draft FAQs not found. Please generate FAQs first.")
+        
+        draft_faq_data = json.loads(draft_blob.download_as_text())
+        logger.info(f"✅ Loaded draft FAQs: {len(draft_faq_data['faqs'])} total")
+        logger.info(f"🎬 All {len(draft_faq_data['faqs'])} FAQs will be generated as videos")
+        
+        # 4. Save final FAQs (remove draft suffix)
+        final_faq_data = draft_faq_data.copy()
+        final_faq_data['status'] = 'final'
+        final_faq_data['presenter_photo_url'] = presenter_photo_url
+        final_faq_data['finalized_at'] = datetime.now().isoformat()
+        
+        final_faq_filename = f"faqs_{companyName.replace(' ', '_')}.json"
+        final_blob = bucket.blob(f"{companyName}/{qudemoId}/{final_faq_filename}")
+        final_blob.upload_from_string(json.dumps(final_faq_data, indent=2), content_type='application/json')
+        logger.info(f"✅ Saved final FAQs: {final_blob.name}")
+        
+        # 5. Trigger HeyGen video generation
+        if avatar_video_processor:
+            logger.info(f"🎬 Starting HeyGen video generation for {len(final_faq_data['faqs'])} FAQs...")
+            
+            # Get voice_id from qudemo
+            voice_id_to_use = None
+            try:
+                qudemo_voice = supabase.table('qudemos_new').select('voice_id').eq('id', qudemoId).execute()
+                if qudemo_voice.data and len(qudemo_voice.data) > 0:
+                    voice_id_to_use = qudemo_voice.data[0].get('voice_id')
+            except Exception as voice_error:
+                logger.warning(f"⚠️ Could not fetch voice_id: {voice_error}")
+            
+            # Trigger background video generation
+            asyncio.create_task(
+                avatar_video_processor.process_faq_videos(
+                    company_name=companyName,
+                    qudemo_id=qudemoId,
+                    presenter_photo_url=presenter_photo_url,
+                    faqs=final_faq_data['faqs'],
+                    voice_id=voice_id_to_use
+                )
+            )
+            
+            logger.info(f"✅ Video generation started in background")
+            
+            return {
+                "success": True,
+                "message": "Video generation started",
+                "qudemo_id": qudemoId,
+                "presenter_photo_url": presenter_photo_url,
+                "total_videos": len(final_faq_data['faqs']),
+                "estimated_time_minutes": len(final_faq_data['faqs']) * 3
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Avatar video processor not initialized")
+            
+    except Exception as e:
+        logger.error(f"❌ Error triggering video generation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/process-document")
 async def process_document(
     file: UploadFile = File(...),
@@ -2648,20 +3121,15 @@ Return JSON only:
         all_faqs = unique_faqs
         logger.info(f"📊 Total FAQs AFTER DEDUPLICATION: {len(all_faqs)} unique FAQs")
         
-        # ⚠️ LIMIT: Cap at 13 content FAQs (+ 4 system = 17 total videos)
-        MAX_CONTENT_FAQS = 13  # 13 content FAQs + 4 system FAQs = 17 total videos
-        if len(all_faqs) > MAX_CONTENT_FAQS:
-            logger.warning(f"⚠️ Limiting FAQs from {len(all_faqs)} to {MAX_CONTENT_FAQS}")
-            all_faqs = all_faqs[:MAX_CONTENT_FAQS]
-        
-        logger.info(f"📊 Total FAQs AFTER LIMIT: {len(all_faqs)} content FAQs (will add 4 system FAQs = {len(all_faqs) + 4} total, plus collection videos if enabled)")
+        # ✅ NO LIMIT: Allow all content FAQs to be generated
+        logger.info(f"📊 Total FAQs: {len(all_faqs)} content FAQs")
         
         # Store FAQs in GCS (regardless of document availability)
         if gcs_qa_service:
             bucket_name = f"qudemo-{company_name.lower().replace(' ', '-')}"
             bucket = gcs_qa_service.gcs_service.client.bucket(bucket_name)
             
-            # Add default fallback FAQs for common scenarios
+            # ✅ Add all system FAQs
             default_faqs = [
                 {
                     "id": "faq_intro",
@@ -2689,7 +3157,7 @@ Return JSON only:
                 }
             ]
             
-            # Add user data collection videos if enabled
+            # ✅ Add user collection videos if enabled
             if collect_user_info:
                 logger.info(f"👤 Adding user data collection videos...")
                 
@@ -2764,12 +3232,10 @@ Return JSON only:
             blob = bucket.blob(f"{company_name}/{qudemo_id}/{faq_filename}")
             blob.upload_from_string(json.dumps(faq_data, indent=2), content_type='application/json')
             logger.info(f"✅ Stored {len(faq_data['faqs'])} FAQs in GCS: {blob.name}")
-            logger.info(f"   - Content FAQs (after limit): {len(all_faqs)}")
-            logger.info(f"     • Video FAQs: {len(video_faqs)}")
-            logger.info(f"     • Document FAQs: {len(document_faqs)}")
-            logger.info(f"   - Special FAQs: {len(default_faqs)} (system videos: intro + fallback + collection)")
-            logger.info(f"   💰 FAQ Limit: {MAX_CONTENT_FAQS} content + {len(default_faqs)} system = {len(faq_data['faqs'])} TOTAL VIDEOS")
-            logger.info(f"   💰 HeyGen Credits: {len(faq_data['faqs'])} videos will be generated!")
+            logger.info(f"   - Content FAQs: {len(all_faqs)}")
+            logger.info(f"   - System FAQs: {len(default_faqs)}")
+            logger.info(f"   📊 TOTAL: {len(faq_data['faqs'])} FAQs saved for preview")
+            logger.info(f"   🎬 All {len(faq_data['faqs'])} FAQs will be generated as videos when triggered")
             
             # Generate avatar videos using HeyGen (background task)
             if avatar_video_processor and presenter_photo_url:

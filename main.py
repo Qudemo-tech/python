@@ -1470,7 +1470,10 @@ async def generate_faqs_preview(company_name: str, qudemo_id: str):
         collect_name = qudemo.get('collect_name', False)
         collect_email = qudemo.get('collect_email', False)
         collect_company = qudemo.get('collect_company', False)
-        presenter_name = qudemo.get('presenter_name', 'AI Assistant')
+        presenter_name = qudemo.get('presenter_name', None)
+        # Clean up presenter name - if None, empty, or "None", use a default
+        if not presenter_name or presenter_name == "None":
+            presenter_name = None
         
         # Generate FAQs from all sources (video transcripts + documents)
         all_faqs = []
@@ -1659,11 +1662,17 @@ Return JSON only:
         # (Video generation will be limited to 1 in the trigger endpoint)
         
         # ✅ Add all system FAQs for preview
+        # Create intro message with or without presenter name
+        if presenter_name:
+            intro_answer = f"Welcome! I'm {presenter_name}, here to guide you through this interactive demo. I'll be answering your questions and showing you everything you need to know. Feel free to ask me anything about our product, features, or how we can help solve your challenges. Let's get started!"
+        else:
+            intro_answer = "Welcome! I'm here to guide you through this interactive demo. I'll be answering your questions and showing you everything you need to know. Feel free to ask me anything about our product, features, or how we can help solve your challenges. Let's get started!"
+        
         system_faqs = [
             {
                 "id": "faq_intro",
                 "question": "INTRO_VIDEO",
-                "answer": f"Welcome! I'm {presenter_name}, here to guide you through this interactive demo. I'll be answering your questions and showing you everything you need to know. Feel free to ask me anything about our product, features, or how we can help solve your challenges. Let's get started!",
+                "answer": intro_answer,
                 "category": "intro",
                 "is_system": True,
                 "is_intro": True
@@ -1939,6 +1948,28 @@ async def process_document(
         # Read file content
         file_content = await file.read()
         logger.info(f"📊 Read {len(file_content)} bytes from file: {file.filename}")
+        
+        # Create document record in database via Node.js backend
+        try:
+            import requests
+            node_api_url = os.getenv('NODE_API_BASE_URL', 'http://localhost:5000')
+            create_doc_url = f"{node_api_url}/api/documents/create"
+            
+            create_doc_data = {
+                "documentId": document_id,
+                "qudemoId": qudemo_id,
+                "filename": file.filename,
+                "mimeType": mime_type,
+                "fileSize": len(file_content)
+            }
+            
+            response = requests.post(create_doc_url, json=create_doc_data, timeout=10)
+            if response.ok:
+                logger.info(f"✅ Created document record in database: {document_id}")
+            else:
+                logger.warning(f"⚠️ Failed to create document record: {response.status_code}")
+        except Exception as create_error:
+            logger.warning(f"⚠️ Error creating document record: {create_error}")
         
         # Process the document
         success = document_processor.process_document_from_content(
@@ -2788,7 +2819,10 @@ async def generate_faq_for_avatar_videos(company_name: str, qudemo_id: str):
             
             if response.data:
                 presenter_photo_url = response.data.get('presenter_photo_url')
-                presenter_name = response.data.get('presenter_name') or 'Presenter'
+                presenter_name = response.data.get('presenter_name', None)
+                # Clean up presenter name - if None, empty, or "None", don't use it
+                if not presenter_name or presenter_name == "None":
+                    presenter_name = None
                 collect_user_info = response.data.get('collect_user_info', False)
                 collect_name = response.data.get('collect_name', False)
                 collect_email = response.data.get('collect_email', False)
@@ -3187,11 +3221,17 @@ Return JSON only:
             bucket = gcs_qa_service.gcs_service.client.bucket(bucket_name)
             
             # ✅ Add all system FAQs
+            # Create intro message with or without presenter name
+            if presenter_name:
+                intro_answer = f"Welcome! I'm {presenter_name}, here to guide you through this interactive demo. I'll be answering your questions and showing you everything you need to know. Feel free to ask me anything about our product, features, or how we can help solve your challenges. Let's get started!"
+            else:
+                intro_answer = "Welcome! I'm here to guide you through this interactive demo. I'll be answering your questions and showing you everything you need to know. Feel free to ask me anything about our product, features, or how we can help solve your challenges. Let's get started!"
+            
             default_faqs = [
                 {
                     "id": "faq_intro",
                     "question": "INTRO_VIDEO",
-                    "answer": f"Welcome! I'm here to guide you through this interactive demo. I'll be answering your questions and showing you everything you need to know. Feel free to ask me anything about our product, features, or how we can help solve your challenges. Let's get started!",
+                    "answer": intro_answer,
                     "category": "intro",
                     "estimated_duration": 15.0,
                     "is_intro": True
@@ -3716,7 +3756,10 @@ async def update_faq_answer(company_name: str, qudemo_id: str, faq_id: str, requ
             response = supabase.table('qudemos_new').select('presenter_photo_url, presenter_name').eq('id', qudemo_id).execute()
             if response.data and len(response.data) > 0:
                 presenter_photo_url = response.data[0].get('presenter_photo_url')
-                presenter_name = response.data[0].get('presenter_name', 'Presenter')
+                presenter_name = response.data[0].get('presenter_name', None)
+                # Clean up presenter name - if None, empty, or "None", don't use it
+                if not presenter_name or presenter_name == "None":
+                    presenter_name = None
             else:
                 logger.warning(f"⚠️ No presenter photo found for QuDemo {qudemo_id}")
                 return {

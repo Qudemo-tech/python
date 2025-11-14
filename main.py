@@ -12,8 +12,6 @@ from typing import List, Optional, Dict
 from datetime import datetime
 from openai import OpenAI
 import requests
-from collections import defaultdict
-import time
 
 # FastAPI imports
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
@@ -273,34 +271,6 @@ app = FastAPI(
 
 # Include routers
 app.include_router(company_router, prefix="/api/company", tags=["Company Management"])
-
-# Simple rate limiter to prevent request loops
-rate_limiter = defaultdict(list)
-
-@app.middleware("http")
-async def rate_limit_middleware(request: Request, call_next):
-    """Simple rate limiter to prevent infinite loops"""
-    client_ip = request.client.host if request.client else "unknown"
-    current_time = time.time()
-    
-    # Only rate limit POST to root endpoint
-    if request.method == "POST" and request.url.path == "/":
-        # Clean old requests (older than 10 seconds)
-        rate_limiter[client_ip] = [t for t in rate_limiter[client_ip] if current_time - t < 10]
-        
-        # Check if more than 20 requests in 10 seconds
-        if len(rate_limiter[client_ip]) > 20:
-            logger.error(f"🚫 Rate limit exceeded for {client_ip} - blocking request")
-            return JSONResponse(
-                status_code=429,
-                content={"error": "Too many requests", "message": "Please slow down. Rate limit: 20 requests per 10 seconds."}
-            )
-        
-        # Add current request
-        rate_limiter[client_ip].append(current_time)
-    
-    response = await call_next(request)
-    return response
 
 # CORS middleware
 app.add_middleware(
@@ -1849,6 +1819,9 @@ Return JSON only:
             "company_name": company_name
         }
         
+    except HTTPException as http_ex:
+        # Re-raise HTTP exceptions (like 402 for quota) without converting to 500
+        raise http_ex
     except Exception as e:
         logger.error(f"❌ Error generating FAQ preview: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3614,26 +3587,43 @@ async def delete_company_bucket(request: dict):
 
 @app.post("/make-bucket-public/{company_name}")
 async def make_bucket_public(company_name: str):
-    """Make an existing GCS bucket publicly readable (one-time fix for existing buckets)"""
+    """Make an existing GCS bucket publicly readable and enable CORS (one-time fix for existing buckets)"""
     try:
-        logger.info(f"🌍 Making bucket public for company: {company_name}")
+        logger.info(f"🌍 Making bucket public and enabling CORS for company: {company_name}")
         
         gcs_service = GoogleCloudStorageService()
         bucket = gcs_service._get_company_bucket(company_name)
         
         # Set IAM policy to make bucket publicly readable
-        policy = bucket.get_iam_policy(requested_policy_version=3)
-        policy.bindings.append({
-            "role": "roles/storage.objectViewer",
-            "members": {"allUsers"}
-        })
-        bucket.set_iam_policy(policy)
+        try:
+            policy = bucket.get_iam_policy(requested_policy_version=3)
+            policy.bindings.append({
+                "role": "roles/storage.objectViewer",
+                "members": {"allUsers"}
+            })
+            bucket.set_iam_policy(policy)
+            logger.info(f"✅ Made bucket publicly readable: {bucket.name}")
+        except Exception as policy_error:
+            logger.warning(f"⚠️ Could not set public access (might already be set): {policy_error}")
         
-        logger.info(f"✅ Made bucket publicly readable: {bucket.name}")
+        # Set CORS configuration
+        try:
+            bucket.cors = [
+                {
+                    "origin": ["*"],  # Allow all origins
+                    "method": ["GET", "HEAD", "OPTIONS"],
+                    "responseHeader": ["Content-Type", "Access-Control-Allow-Origin", "Access-Control-Allow-Headers"],
+                    "maxAgeSeconds": 3600
+                }
+            ]
+            bucket.update()  # Use update() to properly persist CORS configuration
+            logger.info(f"🌐 CORS enabled for bucket: {bucket.name}")
+        except Exception as cors_error:
+            logger.warning(f"⚠️ Could not set CORS: {cors_error}")
         
         return {
             "success": True,
-            "message": f"Bucket {bucket.name} is now publicly readable",
+            "message": f"Bucket {bucket.name} is now publicly readable with CORS enabled",
             "bucket_name": bucket.name
         }
         

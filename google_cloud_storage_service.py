@@ -91,6 +91,21 @@ class GoogleCloudStorageService:
                     logger.info(f"🌍 Made bucket publicly readable: {bucket_name}")
                 except Exception as policy_error:
                     logger.warning(f"⚠️ Could not set public access on bucket: {policy_error}")
+                
+                # Set CORS configuration to allow browser access from any origin
+                try:
+                    bucket.cors = [
+                        {
+                            "origin": ["*"],  # Allow all origins (or specify ["https://qudemo.com"] for production)
+                            "method": ["GET", "HEAD", "OPTIONS"],
+                            "responseHeader": ["Content-Type", "Access-Control-Allow-Origin", "Access-Control-Allow-Headers"],
+                            "maxAgeSeconds": 3600
+                        }
+                    ]
+                    bucket.update()  # Use update() to properly persist CORS configuration
+                    logger.info(f"🌐 CORS enabled for bucket: {bucket_name}")
+                except Exception as cors_error:
+                    logger.warning(f"⚠️ Could not set CORS on bucket: {cors_error}")
             else:
                 logger.info(f"✅ Connected to existing company bucket: {bucket_name}")
             

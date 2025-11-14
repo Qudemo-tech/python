@@ -12,10 +12,13 @@ from typing import List, Optional, Dict
 from datetime import datetime
 from openai import OpenAI
 import requests
+from collections import defaultdict
+import time
 
 # FastAPI imports
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 import tempfile
@@ -271,6 +274,34 @@ app = FastAPI(
 # Include routers
 app.include_router(company_router, prefix="/api/company", tags=["Company Management"])
 
+# Simple rate limiter to prevent request loops
+rate_limiter = defaultdict(list)
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    """Simple rate limiter to prevent infinite loops"""
+    client_ip = request.client.host if request.client else "unknown"
+    current_time = time.time()
+    
+    # Only rate limit POST to root endpoint
+    if request.method == "POST" and request.url.path == "/":
+        # Clean old requests (older than 10 seconds)
+        rate_limiter[client_ip] = [t for t in rate_limiter[client_ip] if current_time - t < 10]
+        
+        # Check if more than 20 requests in 10 seconds
+        if len(rate_limiter[client_ip]) > 20:
+            logger.error(f"🚫 Rate limit exceeded for {client_ip} - blocking request")
+            return JSONResponse(
+                status_code=429,
+                content={"error": "Too many requests", "message": "Please slow down. Rate limit: 20 requests per 10 seconds."}
+            )
+        
+        # Add current request
+        rate_limiter[client_ip].append(current_time)
+    
+    response = await call_next(request)
+    return response
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -335,8 +366,28 @@ async def root():
     }
 
 @app.post("/")
-async def root_post():
+async def root_post(request: Request):
     """Handle POST requests to root - return helpful error"""
+    # Get client IP and headers
+    client_ip = request.client.host if request.client else "unknown"
+    user_agent = request.headers.get("user-agent", "unknown")
+    referer = request.headers.get("referer", "none")
+    content_type = request.headers.get("content-type", "none")
+    
+    # Log suspicious activity with full details
+    logger.warning(
+        f"⚠️ POST to root endpoint | IP: {client_ip} | "
+        f"UserAgent: {user_agent} | Referer: {referer} | Content-Type: {content_type}"
+    )
+    
+    # Try to read the body (if any)
+    try:
+        body = await request.body()
+        if body:
+            logger.warning(f"⚠️ Request body preview: {body[:200]}")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not read request body: {e}")
+    
     return {
         "error": "Invalid endpoint",
         "message": "POST requests are not supported at the root path",
@@ -1522,7 +1573,7 @@ Video transcript:
 Return JSON: [{{"topic": "description", "importance": "high/medium"}}]"""
 
                         topics_response = openai_client.chat.completions.create(
-                            model="gpt-4o-mini",
+                            model="gpt-4.1-mini",  # 🆕 Latest model with 1M context
                             messages=[{"role": "user", "content": topics_prompt}],
                             temperature=0.3,
                             max_tokens=500
@@ -1550,10 +1601,10 @@ Return JSON only:
 [{{"question": "...", "answer": "...", "category": "features", "source": "video"}}]"""
 
                         response = openai_client.chat.completions.create(
-                            model="gpt-4",
+                            model="gpt-4.1-mini",  # 🆕 Latest model with 1M context
                             messages=[{"role": "user", "content": faq_prompt}],
                             temperature=0.7,
-                            max_tokens=2500
+                            max_tokens=2000
                         )
                         
                         faq_json = response.choices[0].message.content.strip()
@@ -1579,32 +1630,44 @@ Return JSON only:
             
             if all_documents:
                 combined_content = "\n\n".join([doc.get('content', '') for doc in all_documents])
-                combined_content = combined_content[:10000]
                 
-                # Identify topics
+                # Smart truncation: Limit to ~25k characters (~6k tokens) to stay within limits
+                # This allows for prompt + response while staying under 8k token limit for gpt-4o-mini
+                max_content_length = 25000
+                if len(combined_content) > max_content_length:
+                    logger.warning(f"⚠️ Document content is large ({len(combined_content)} chars). Truncating to {max_content_length} chars.")
+                    combined_content = combined_content[:max_content_length] + "\n\n[Content truncated due to size...]"
+                
+                # Identify topics (with error handling)
                 doc_topics_prompt = f"""Identify high-level topics from this document for customer FAQs.
 Prioritize: Product uniqueness, target audience, value proposition, benefits, time/cost savings.
 Then: Key features, pricing, use cases.
-Max 10 topics.
+Max 8 topics.
 
 Document content:
 {combined_content}
 
 Return JSON: [{{"topic": "description", "importance": "high/medium"}}]"""
 
-                doc_topics_response = openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": doc_topics_prompt}],
-                    temperature=0.3,
-                    max_tokens=500
-                )
-                
-                doc_topics_json = doc_topics_response.choices[0].message.content.strip()
-                if doc_topics_json.startswith("```json"):
-                    doc_topics_json = doc_topics_json.replace("```json", "").replace("```", "").strip()
-                
-                doc_topics = json.loads(doc_topics_json)
-                doc_topics_list = "\n".join([f"- {t.get('topic', '')}" for t in doc_topics])
+                try:
+                    doc_topics_response = openai_client.chat.completions.create(
+                        model="gpt-4.1-mini",  # 🆕 Latest model with 1M context
+                        messages=[{"role": "user", "content": doc_topics_prompt}],
+                        temperature=0.3,
+                        max_tokens=300
+                    )
+                    
+                    doc_topics_json = doc_topics_response.choices[0].message.content.strip()
+                    if doc_topics_json.startswith("```json"):
+                        doc_topics_json = doc_topics_json.replace("```json", "").replace("```", "").strip()
+                    
+                    doc_topics = json.loads(doc_topics_json)
+                    doc_topics_list = "\n".join([f"- {t.get('topic', '')}" for t in doc_topics])
+                    
+                except Exception as topic_error:
+                    logger.error(f"⚠️ Error identifying topics, using default: {topic_error}")
+                    # Use default topics if extraction fails
+                    doc_topics_list = "- Product overview\n- Key features\n- Benefits\n- Use cases\n- Pricing"
                 
                 # Generate FAQs
                 prompt = f"""Extract or generate FAQs from this document.
@@ -1630,19 +1693,34 @@ Document content:
 Return JSON only:
 [{{"question": "...", "answer": "...", "category": "features", "source": "document"}}]"""
 
-                response = openai_client.chat.completions.create(
-                    model="gpt-4",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.7,
-                    max_tokens=2500
-                )
-                
-                faq_json = response.choices[0].message.content.strip()
-                if faq_json.startswith("```json"):
-                    faq_json = faq_json.replace("```json", "").replace("```", "").strip()
-                
-                document_faqs = json.loads(faq_json, strict=False)
-                logger.info(f"✅ Generated {len(document_faqs)} FAQs from documents")
+                try:
+                    logger.info(f"📤 Sending {len(prompt)} chars to OpenAI for FAQ generation")
+                    response = openai_client.chat.completions.create(
+                        model="gpt-4.1-mini",  # 🆕 Latest model (April 2025) - 1M context window!
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.7,
+                        max_tokens=2000
+                    )
+                    
+                    faq_json = response.choices[0].message.content.strip()
+                    if faq_json.startswith("```json"):
+                        faq_json = faq_json.replace("```json", "").replace("```", "").strip()
+                    
+                    document_faqs = json.loads(faq_json, strict=False)
+                    logger.info(f"✅ Generated {len(document_faqs)} FAQs from documents")
+                    
+                except Exception as openai_error:
+                    error_message = str(openai_error)
+                    if "429" in error_message or "quota" in error_message.lower():
+                        logger.error(f"💰 OpenAI quota exceeded for document FAQs. Please check your billing: {error_message}")
+                        raise HTTPException(
+                            status_code=402,  # Payment Required
+                            detail="OpenAI API quota exceeded. Please check your OpenAI billing and usage limits."
+                        )
+                    else:
+                        logger.error(f"❌ Error calling OpenAI for document FAQs: {error_message}")
+                        # Continue without document FAQs rather than failing completely
+                        document_faqs = []
         
         all_faqs.extend(document_faqs)
         
@@ -2900,7 +2978,7 @@ Return JSON: [{{"topic": "description", "importance": "high/medium"}}]"""
 
                         try:
                             topics_response = openai_client.chat.completions.create(
-                                model="gpt-4o-mini",
+                                model="gpt-4.1-mini",  # 🆕 Latest model with 1M context
                                 messages=[{"role": "user", "content": topics_prompt}],
                                 temperature=0.3,
                                 max_tokens=500
@@ -2944,10 +3022,10 @@ Return JSON only:
                                 video_faqs = []
                             else:
                                 response = openai_client.chat.completions.create(
-                                    model="gpt-4",
+                                    model="gpt-4.1-mini",  # 🆕 Latest model with 1M context
                                     messages=[{"role": "user", "content": prompt}],
                                     temperature=0.7,
-                                    max_tokens=2500
+                                    max_tokens=2000
                                 )
                                 
                                 faq_json = response.choices[0].message.content.strip()
@@ -3024,7 +3102,7 @@ Return JSON: [{{"topic": "description", "importance": "high/medium"}}]"""
 
                 try:
                     doc_topics_response = openai_client.chat.completions.create(
-                        model="gpt-4o-mini",
+                        model="gpt-4.1-mini",  # 🆕 Latest model with 1M context
                         messages=[{"role": "user", "content": doc_topics_prompt}],
                         temperature=0.3,
                         max_tokens=500
@@ -3077,10 +3155,10 @@ Return JSON only:
                         document_faqs = []
                     else:
                         response = openai_client.chat.completions.create(
-                            model="gpt-4",
+                            model="gpt-4.1-mini",  # 🆕 Latest model with 1M context
                             messages=[{"role": "user", "content": prompt}],
                             temperature=0.7,
-                            max_tokens=2500
+                            max_tokens=2000
                         )
                         
                         faq_json = response.choices[0].message.content.strip()

@@ -395,7 +395,32 @@ RULES:
                         logger.info(f"🎯 EXACT match found: {faq.get('question')}")
                         break
             
-            # Priority 3: Semantic matching using GPT-4o-mini (fast and cheap)
+            # Priority 3: Quick relevance check (before expensive LLM call)
+            # Skip LLM if question is obviously off-topic
+            if not best_match:
+                # Extract key terms from all FAQs to check basic relevance
+                faq_terms = set()
+                for faq in faqs:
+                    faq_question = faq.get('question', '').lower()
+                    # Extract meaningful words (longer than 3 chars, not common words)
+                    words = [w for w in faq_question.split() 
+                            if len(w) > 3 and w not in ['what', 'how', 'does', 'can', 'will', 'are', 'the', 'this', 'that', 'from', 'with', 'about']]
+                    faq_terms.update(words)
+                
+                # Check if user question has ANY overlap with FAQ terms
+                question_words = [w for w in question_lower.split() if len(w) > 3]
+                has_overlap = any(word in faq_terms for word in question_words)
+                
+                if not has_overlap and len(question_words) > 2:
+                    # Question has no keyword overlap with any FAQ - likely off-topic
+                    logger.info(f"⚡ FAST REJECT: No keyword overlap with FAQs - skipping LLM call")
+                    best_match = None
+                    best_score = 0.0
+                    # Skip to fallback without calling LLM
+                else:
+                    logger.info(f"✓ Basic relevance check passed - proceeding to LLM matching")
+            
+            # Priority 4: Semantic matching using GPT-4o-mini (fast and cheap)
             if not best_match:
                 try:
                     from openai import OpenAI
@@ -429,10 +454,24 @@ Return JSON:
   "reasoning": "brief explanation"
 }}
 
-RULES:
-- Use semantic similarity, not just exact words
-- If confidence < 70%, set match_found to false
-- Consider the user's intent"""
+MATCHING RULES:
+1. Use SEMANTIC SIMILARITY - understand meaning and intent, not just exact words
+2. PARTIAL QUESTIONS are OK - if user question is a subset of FAQ question, it's a MATCH
+   Examples:
+   - User: "How is it different?" → FAQ: "How is [Product] different from competitors?" = MATCH (90%+)
+   - User: "Does it integrate?" → FAQ: "Does [Product] integrate with Slack?" = MATCH (85%+)
+   - User: "What's the pricing?" → FAQ: "What's the pricing for teams?" = MATCH (90%+)
+3. IGNORE product/company name variations - focus on FEATURE/TOPIC:
+   - "[ProductName]" = "it" = "this" = "your product" = "the tool" = "you"
+   - User asking about "pricing" should match "[ProductName] pricing"
+   - User asking about "integration" should match "[ProductName] integration"
+4. Understand SYNONYMS:
+   - "different" = "unique" = "special" = "stand out"
+   - "integrate" = "connect" = "sync" = "link" = "work with"
+   - "pricing" = "cost" = "price" = "how much" = "fees"
+   - "book" = "schedule" = "set up" = "arrange"
+5. Confidence threshold: Set match_found=false ONLY if < 65% confidence
+6. When in doubt, PREFER matching - it's better to show a related answer than fallback"""
 
                             response = openai_client.chat.completions.create(
                                 model="gpt-4o-mini",
@@ -441,7 +480,7 @@ RULES:
                                     {"role": "user", "content": prompt}
                                 ],
                                 temperature=0.1,
-                                max_tokens=200
+                                max_tokens=100  # Reduced for faster response (JSON output is ~80 tokens)
                             )
                             
                             result_text = response.choices[0].message.content.strip()
@@ -466,7 +505,7 @@ RULES:
                     logger.error(f"⚠️ AI matching failed: {ai_error}")
             
             # STEP 3: Return the result
-            if best_match and best_score >= 0.70:
+            if best_match and best_score >= 0.65:
                 # Found a good match!
                 logger.info(f"✅ Matched FAQ: {best_match.get('id')} ({best_score*100:.0f}% confidence)")
                 

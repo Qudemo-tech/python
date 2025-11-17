@@ -368,23 +368,38 @@ RULES:
             # Priority 1: Check for exact match on special keywords
             special_keywords = {
                 "NO_ANSWER_FOUND": ["NO_ANSWER_FOUND"],
-                "SALES_INQUIRY": ["sales", "pricing", "buy", "purchase", "contact", "meeting", "demo", "talk to"],
+                "SALES_INQUIRY": ["sales", "pricing", "buy", "purchase", "contact", "meeting", "book a demo", "schedule a demo", "talk to"],
                 "INTRO_VIDEO": ["INTRO_VIDEO"]
             }
             
             question_lower = question.lower()
             
             # Check if this is a sales-related query
-            for keyword_list in special_keywords["SALES_INQUIRY"]:
-                if keyword_list in question_lower:
-                    for faq in faqs:
-                        if faq.get('question') == "SALES_INQUIRY":
-                            best_match = faq
-                            best_score = 1.0
-                            logger.info(f"🎯 Matched to SALES_INQUIRY fallback")
+            # Use word boundaries to avoid false matches (e.g., "demo" in "Qudemo")
+            import re
+            for keyword in special_keywords["SALES_INQUIRY"]:
+                # For multi-word phrases, check exact match
+                if " " in keyword:
+                    if keyword in question_lower:
+                        for faq in faqs:
+                            if faq.get('question') == "SALES_INQUIRY":
+                                best_match = faq
+                                best_score = 1.0
+                                logger.info(f"🎯 Matched to SALES_INQUIRY fallback")
+                                break
+                        if best_match:
                             break
-                    if best_match:
-                        break
+                else:
+                    # For single words, use word boundaries
+                    if re.search(r'\b' + re.escape(keyword) + r'\b', question_lower):
+                        for faq in faqs:
+                            if faq.get('question') == "SALES_INQUIRY":
+                                best_match = faq
+                                best_score = 1.0
+                                logger.info(f"🎯 Matched to SALES_INQUIRY fallback")
+                                break
+                        if best_match:
+                            break
             
             # Priority 2: Exact question match (for suggested questions)
             if not best_match:
@@ -439,12 +454,13 @@ RULES:
                             
                             faq_text = "\n".join(faq_list)
                             
-                            prompt = f"""Match this user question to the most relevant FAQ.
+                            prompt = f"""Here are the FAQs for this product:
 
-USER QUESTION: "{question}"
-
-AVAILABLE FAQs:
 {faq_text}
+
+User Question: "{question}"
+
+Match the user's question to the most relevant FAQ above. Understand the meaning and context, not just exact words. Partial questions should match complete FAQs. Ignore differences in product names.
 
 Return JSON:
 {{
@@ -454,24 +470,7 @@ Return JSON:
   "reasoning": "brief explanation"
 }}
 
-MATCHING RULES:
-1. Use SEMANTIC SIMILARITY - understand meaning and intent, not just exact words
-2. PARTIAL QUESTIONS are OK - if user question is a subset of FAQ question, it's a MATCH
-   Examples:
-   - User: "How is it different?" → FAQ: "How is [Product] different from competitors?" = MATCH (90%+)
-   - User: "Does it integrate?" → FAQ: "Does [Product] integrate with Slack?" = MATCH (85%+)
-   - User: "What's the pricing?" → FAQ: "What's the pricing for teams?" = MATCH (90%+)
-3. IGNORE product/company name variations - focus on FEATURE/TOPIC:
-   - "[ProductName]" = "it" = "this" = "your product" = "the tool" = "you"
-   - User asking about "pricing" should match "[ProductName] pricing"
-   - User asking about "integration" should match "[ProductName] integration"
-4. Understand SYNONYMS:
-   - "different" = "unique" = "special" = "stand out"
-   - "integrate" = "connect" = "sync" = "link" = "work with"
-   - "pricing" = "cost" = "price" = "how much" = "fees"
-   - "book" = "schedule" = "set up" = "arrange"
-5. Confidence threshold: Set match_found=false ONLY if < 65% confidence
-6. When in doubt, PREFER matching - it's better to show a related answer than fallback"""
+Match if confidence >= 65%. When in doubt, prefer matching."""
 
                             response = openai_client.chat.completions.create(
                                 model="gpt-4o-mini",

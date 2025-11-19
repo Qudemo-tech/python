@@ -171,7 +171,7 @@ class HeyGenService:
                 return truncated.strip() + '...'
     
     def generate_video(self, image_key: str, script: str, video_title: str, 
-                      voice_id: Optional[str] = None) -> Optional[str]:
+                      voice_id: Optional[str] = None, talking_style: Optional[str] = None) -> Optional[str]:
         """
         Generate avatar video using HeyGen API
         
@@ -207,6 +207,11 @@ class HeyGenService:
                 "image_key": image_key,  # HeyGen requires image_key field
                 "video_title": video_title
             }
+            
+            # Add optional talking_style if provided (experimental)
+            if talking_style:
+                payload["talking_style"] = talking_style
+                logger.info(f"🎭 Using talking style: {talking_style}")
             
             headers = {
                 "accept": "application/json",

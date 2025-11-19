@@ -508,10 +508,20 @@ Match if confidence >= 65%. When in doubt, prefer matching."""
                 # Found a good match!
                 logger.info(f"✅ Matched FAQ: {best_match.get('id')} ({best_score*100:.0f}% confidence)")
                 
-                video_url = best_match.get('video_url')
-                has_video = bool(video_url and best_match.get('video_status') == 'completed')
+                # Support both regular and custom videos
+                video_url = best_match.get('video_url') or best_match.get('custom_video_url')
+                has_video = bool(video_url and (
+                    best_match.get('video_status') == 'completed' or  # Regular avatar video
+                    best_match.get('has_custom_video') or  # Custom uploaded video
+                    best_match.get('has_avatar_video')  # Custom video flag
+                ))
                 
-                if not has_video:
+                if has_video:
+                    if best_match.get('has_custom_video'):
+                        logger.info(f"🎬 Custom video available for FAQ: {best_match.get('id')}")
+                    else:
+                        logger.info(f"🎬 Avatar video available for FAQ: {best_match.get('id')}")
+                else:
                     logger.warning(f"⚠️ FAQ {best_match.get('id')} doesn't have video yet")
                 
                 return {
@@ -523,6 +533,8 @@ Match if confidence >= 65%. When in doubt, prefer matching."""
                     'faq_question': best_match.get('question'),
                     'match_confidence': best_score,
                     'formatted_timestamp': 'AI Avatar' if has_video else '',
+                    'is_custom': best_match.get('is_custom', False),
+                    'has_custom_video': best_match.get('has_custom_video', False),
                     'sources': [{
                         'type': 'faq',
                         'faq_id': best_match.get('id'),

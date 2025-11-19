@@ -316,6 +316,14 @@ class QuDemoContentRequest(BaseModel):
 class UrlRequest(BaseModel):
     url: str
 
+class CustomFAQRequest(BaseModel):
+    question: str
+    answer: str
+    answer_type: str  # "text" or "video"
+    video_url: Optional[str] = None
+    chat_fallback: Optional[str] = "Here is your demo video"
+    category: Optional[str] = "custom"
+
 class BatchUrlRequest(BaseModel):
     urls: List[str]
 
@@ -880,6 +888,405 @@ async def store_visitor_interaction(request: VisitorInteractionRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/upload-custom-faq-video")
+async def upload_custom_faq_video(
+    video: UploadFile = File(...),
+    qudemo_id: str = Form(...),
+    company_name: str = Form(...),
+    faq_id: Optional[str] = Form(None)
+):
+    """
+    Upload a custom video for a FAQ answer
+    Max size: 300MB
+    Supported formats: MP4, MOV, WebM
+    """
+    try:
+        logger.info(f"📹 Uploading custom FAQ video for {company_name}/{qudemo_id}")
+        
+        # Validate file type
+        allowed_types = ['video/mp4', 'video/quicktime', 'video/webm']
+        if video.content_type not in allowed_types:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid file type. Allowed: MP4, MOV, WebM"
+            )
+        
+        # Read file content
+        content = await video.read()
+        file_size_mb = len(content) / (1024 * 1024)
+        
+        # Validate file size (300MB limit)
+        if file_size_mb > 300:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File size ({file_size_mb:.1f}MB) exceeds 300MB limit"
+            )
+        
+        logger.info(f"📊 Video size: {file_size_mb:.1f}MB")
+        
+        # Generate FAQ ID if not provided
+        if not faq_id:
+            # Get existing custom FAQs count
+            gcs_service = GoogleCloudStorageService()
+            bucket_name = f"qudemo-{company_name.lower().replace(' ', '-')}"
+            bucket = gcs_service.client.bucket(bucket_name)
+            
+            faq_filename = f"faqs_{company_name.replace(' ', '_')}.json"
+            blob = bucket.blob(f"{company_name}/{qudemo_id}/{faq_filename}")
+            
+            custom_count = 0
+            if blob.exists():
+                content_json = blob.download_as_text()
+                faqs_data = json.loads(content_json)
+                faqs = faqs_data.get('faqs', [])
+                custom_count = len([f for f in faqs if f.get('is_custom')])
+            
+            faq_id = f"faq_custom_{str(custom_count + 1).zfill(3)}"
+        
+        logger.info(f"🆔 FAQ ID: {faq_id}")
+        
+        # Determine file extension
+        file_ext = video.filename.split('.')[-1]
+        if file_ext.lower() not in ['mp4', 'mov', 'webm']:
+            file_ext = 'mp4'  # Default to mp4
+        
+        # Upload to GCS
+        gcs_service = GoogleCloudStorageService()
+        bucket_name = f"qudemo-{company_name.lower().replace(' ', '-')}"
+        bucket = gcs_service.client.bucket(bucket_name)
+        
+        # Store in custom_videos folder
+        video_path = f"{company_name}/{qudemo_id}/custom_videos/{faq_id}.{file_ext}"
+        video_blob = bucket.blob(video_path)
+        
+        # Upload video
+        video_blob.upload_from_string(
+            content,
+            content_type=video.content_type
+        )
+        
+        # Make video publicly accessible
+        video_blob.make_public()
+        video_url = video_blob.public_url
+        
+        logger.info(f"✅ Video uploaded successfully: {video_url}")
+        
+        # Try to get video duration (optional, requires moviepy or similar)
+        # For now, we'll estimate based on file size
+        estimated_duration = min(file_size_mb * 2, 300)  # Rough estimate
+        
+        return {
+            "success": True,
+            "video_url": video_url,
+            "faq_id": faq_id,
+            "file_size_mb": round(file_size_mb, 2),
+            "estimated_duration": estimated_duration
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error uploading custom video: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/add-custom-faq/{company_name}/{qudemo_id}")
+async def add_custom_faq(
+    company_name: str,
+    qudemo_id: str,
+    request: CustomFAQRequest
+):
+    """
+    Add a custom FAQ (text or video answer) to a QuDemo
+    """
+    try:
+        logger.info(f"📝 Adding custom FAQ for {company_name}/{qudemo_id}")
+        logger.info(f"   Question: {request.question}")
+        logger.info(f"   Answer Type: {request.answer_type}")
+        
+        # Initialize GCS service
+        gcs_service = GoogleCloudStorageService()
+        bucket_name = f"qudemo-{company_name.lower().replace(' ', '-')}"
+        bucket = gcs_service.client.bucket(bucket_name)
+        
+        # Load existing FAQs
+        faq_filename = f"faqs_{company_name.replace(' ', '_')}.json"
+        blob = bucket.blob(f"{company_name}/{qudemo_id}/{faq_filename}")
+        
+        if not blob.exists():
+            logger.info(f"📝 FAQ file doesn't exist yet, creating new one for custom FAQs")
+            # Create initial FAQ structure with system FAQs
+            faqs_data = {
+                "version": "1.0",
+                "qudemo_id": qudemo_id,
+                "company_name": company_name,
+                "generated_at": datetime.now().isoformat(),
+                "faqs": [
+                    {
+                        "id": "faq_intro",
+                        "question": "INTRO_VIDEO",
+                        "answer": "Welcome! I'm here to guide you through this interactive demo. Feel free to ask me anything!",
+                        "category": "intro",
+                        "is_system": True,
+                        "is_intro": True,
+                        "estimated_duration": 10.0
+                    },
+                    {
+                        "id": "faq_fallback_no_answer",
+                        "question": "NO_ANSWER_FOUND",
+                        "answer": "I don't have specific information about that. Please contact our team for more details.",
+                        "category": "fallback",
+                        "is_system": True,
+                        "is_fallback": True,
+                        "estimated_duration": 8.0
+                    },
+                    {
+                        "id": "faq_fallback_sales",
+                        "question": "SALES_INQUIRY",
+                        "answer": "I'd be happy to connect you with our sales team! Please click the 'Book a Meeting' button.",
+                        "category": "fallback",
+                        "is_system": True,
+                        "is_fallback": True,
+                        "estimated_duration": 10.0
+                    }
+                ]
+            }
+            faqs = faqs_data['faqs']
+        else:
+            # Force reload to bypass cache
+            blob.reload()
+            content = blob.download_as_text()
+            faqs_data = json.loads(content)
+            faqs = faqs_data.get('faqs', [])
+        
+        # Generate FAQ ID
+        custom_count = len([f for f in faqs if f.get('is_custom')])
+        faq_id = f"faq_custom_{str(custom_count + 1).zfill(3)}"
+        
+        # Estimate duration
+        if request.answer_type == "video" and request.video_url:
+            estimated_duration = 30.0  # Default, will be updated if we can extract actual duration
+        else:
+            word_count = len(request.answer.split())
+            estimated_duration = word_count * 0.4  # ~0.4 seconds per word
+        
+        # Create new FAQ object
+        new_faq = {
+            "id": faq_id,
+            "question": request.question,
+            "answer": request.answer if request.answer_type == "text" else request.chat_fallback,
+            "category": request.category,
+            "is_custom": True,
+            "has_custom_video": request.answer_type == "video",
+            "estimated_duration": estimated_duration,
+            "created_at": datetime.now().isoformat()
+        }
+        
+        # Add video URL if video answer
+        if request.answer_type == "video" and request.video_url:
+            new_faq["custom_video_url"] = request.video_url
+            new_faq["video_url"] = request.video_url
+            new_faq["has_avatar_video"] = True
+        
+        # Add to FAQs list
+        faqs.append(new_faq)
+        faqs_data['faqs'] = faqs
+        
+        # Update FAQ file
+        blob.upload_from_string(
+            json.dumps(faqs_data, indent=2, ensure_ascii=False),
+            content_type='application/json'
+        )
+        
+        logger.info(f"✅ Custom FAQ added successfully: {faq_id}")
+        
+        return {
+            "success": True,
+            "faq": new_faq,
+            "total_faqs": len(faqs)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error adding custom FAQ: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/update-custom-faq/{company_name}/{qudemo_id}/{faq_id}")
+async def update_custom_faq(
+    company_name: str,
+    qudemo_id: str,
+    faq_id: str,
+    request: CustomFAQRequest
+):
+    """
+    Update an existing custom FAQ
+    """
+    try:
+        logger.info(f"✏️ Updating custom FAQ {faq_id} for {company_name}/{qudemo_id}")
+        
+        # Initialize GCS service
+        gcs_service = GoogleCloudStorageService()
+        bucket_name = f"qudemo-{company_name.lower().replace(' ', '-')}"
+        bucket = gcs_service.client.bucket(bucket_name)
+        
+        # Load existing FAQs
+        faq_filename = f"faqs_{company_name.replace(' ', '_')}.json"
+        blob = bucket.blob(f"{company_name}/{qudemo_id}/{faq_filename}")
+        
+        if not blob.exists():
+            raise HTTPException(status_code=404, detail="FAQ file not found")
+        
+        blob.reload()
+        content = blob.download_as_text()
+        faqs_data = json.loads(content)
+        faqs = faqs_data.get('faqs', [])
+        
+        # Find and update the FAQ
+        faq_found = False
+        for i, faq in enumerate(faqs):
+            if faq.get('id') == faq_id:
+                # Estimate duration
+                if request.answer_type == "video" and request.video_url:
+                    estimated_duration = faq.get('estimated_duration', 30.0)
+                else:
+                    word_count = len(request.answer.split())
+                    estimated_duration = word_count * 0.4
+                
+                # Update FAQ
+                faqs[i].update({
+                    "question": request.question,
+                    "answer": request.answer if request.answer_type == "text" else request.chat_fallback,
+                    "category": request.category,
+                    "has_custom_video": request.answer_type == "video",
+                    "estimated_duration": estimated_duration,
+                    "updated_at": datetime.now().isoformat()
+                })
+                
+                # Update video URL if video answer
+                if request.answer_type == "video" and request.video_url:
+                    faqs[i]["custom_video_url"] = request.video_url
+                    faqs[i]["video_url"] = request.video_url
+                    faqs[i]["has_avatar_video"] = True
+                else:
+                    # Remove video fields if changing to text
+                    faqs[i].pop("custom_video_url", None)
+                    faqs[i].pop("video_url", None)
+                    faqs[i].pop("has_avatar_video", None)
+                
+                faq_found = True
+                break
+        
+        if not faq_found:
+            raise HTTPException(status_code=404, detail=f"FAQ {faq_id} not found")
+        
+        # Update FAQ file
+        faqs_data['faqs'] = faqs
+        blob.upload_from_string(
+            json.dumps(faqs_data, indent=2, ensure_ascii=False),
+            content_type='application/json'
+        )
+        
+        logger.info(f"✅ Custom FAQ updated successfully: {faq_id}")
+        
+        return {
+            "success": True,
+            "faq": faqs[i],
+            "total_faqs": len(faqs)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error updating custom FAQ: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/delete-custom-faq/{company_name}/{qudemo_id}/{faq_id}")
+async def delete_custom_faq(
+    company_name: str,
+    qudemo_id: str,
+    faq_id: str
+):
+    """
+    Delete a custom FAQ and its associated video (if any)
+    """
+    try:
+        logger.info(f"🗑️ Deleting custom FAQ {faq_id} for {company_name}/{qudemo_id}")
+        
+        # Initialize GCS service
+        gcs_service = GoogleCloudStorageService()
+        bucket_name = f"qudemo-{company_name.lower().replace(' ', '-')}"
+        bucket = gcs_service.client.bucket(bucket_name)
+        
+        # Load existing FAQs
+        faq_filename = f"faqs_{company_name.replace(' ', '_')}.json"
+        blob = bucket.blob(f"{company_name}/{qudemo_id}/{faq_filename}")
+        
+        if not blob.exists():
+            raise HTTPException(status_code=404, detail="FAQ file not found")
+        
+        blob.reload()
+        content = blob.download_as_text()
+        faqs_data = json.loads(content)
+        faqs = faqs_data.get('faqs', [])
+        
+        # Find the FAQ and check if it has a video
+        faq_to_delete = None
+        for faq in faqs:
+            if faq.get('id') == faq_id:
+                faq_to_delete = faq
+                break
+        
+        if not faq_to_delete:
+            raise HTTPException(status_code=404, detail=f"FAQ {faq_id} not found")
+        
+        # Delete video from GCS if it exists
+        video_deleted = False
+        if faq_to_delete.get('has_custom_video') and faq_to_delete.get('custom_video_url'):
+            try:
+                # Extract video path from URL
+                # Format: .../custom_videos/faq_custom_001.mp4
+                video_path = f"{company_name}/{qudemo_id}/custom_videos/{faq_id}"
+                
+                # Try different extensions
+                for ext in ['mp4', 'mov', 'webm']:
+                    video_blob = bucket.blob(f"{video_path}.{ext}")
+                    if video_blob.exists():
+                        video_blob.delete()
+                        video_deleted = True
+                        logger.info(f"🗑️ Deleted video: {video_path}.{ext}")
+                        break
+            except Exception as e:
+                logger.warning(f"⚠️ Could not delete video: {e}")
+        
+        # Remove FAQ from list
+        faqs = [f for f in faqs if f.get('id') != faq_id]
+        faqs_data['faqs'] = faqs
+        
+        # Update FAQ file
+        blob.upload_from_string(
+            json.dumps(faqs_data, indent=2, ensure_ascii=False),
+            content_type='application/json'
+        )
+        
+        logger.info(f"✅ Custom FAQ deleted successfully: {faq_id}")
+        
+        return {
+            "success": True,
+            "deleted_faq_id": faq_id,
+            "video_deleted": video_deleted,
+            "total_faqs": len(faqs)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error deleting custom FAQ: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/generate-suggested-questions/{company_name}/{qudemo_id}")
 async def generate_suggested_questions(company_name: str, qudemo_id: str):
     """Generate fresh suggested questions for a QuDemo without storing them"""
@@ -1020,7 +1427,7 @@ async def get_suggested_questions(company_name: str, qudemo_id: str):
                 
                 # System question identifiers to exclude
                 system_questions = [
-                    'NO_ANSWER_FOUND', 'SALES_INQUIRY', 'INTRO_VIDEO', 
+                    'NO_ANSWER_FOUND', 'SALES_INQUIRY', 'INTRO_VIDEO',
                     'NAME_REQUEST', 'EMAIL_REQUEST', 'COMPANY_REQUEST', 'COLLECTION_COMPLETE',
                     'INTRO', 'FALLBACK', 'SALES', 'NO_ANSWER'  # Also check shorter versions
                 ]

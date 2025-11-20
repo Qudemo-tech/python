@@ -416,25 +416,94 @@ async def get_heygen_voices():
         # Fetch voices from HeyGen API
         heygen_voices = heygen_service.get_available_voices()
         
-        if heygen_voices is None:
-            # Fallback to custom voice if API fails
-            logger.warning("⚠️ Failed to fetch voices from HeyGen API, using fallback")
+        if heygen_voices is None or len(heygen_voices) == 0:
+            # Fallback to default voices if API fails or returns empty
+            logger.warning("⚠️ Failed to fetch voices from HeyGen API or no voices returned, using fallback voices")
             voices = [
                 {
                     "id": "01d674cfd32b4728a3fddd21b7e7d543",
-                    "name": "Custom Professional Voice",
+                    "name": "Ryan",
                     "description": "Your custom trained HeyGen voice - warm, professional, and engaging",
                     "language": "English (US)",
                     "gender": "Male",
+                    "accent": "American",
                     "sample_text": "Hello! Welcome to our platform. I'm here to answer your questions and help you succeed.",
                     "rate": 0.95,
                     "pitch": 0.9,
                     "is_default": True,
                     "is_custom": True
+                },
+                {
+                    "id": "2d5b0e6cf36a45978b139a0547576d02",
+                    "name": "Emma",
+                    "description": "Professional female voice perfect for AI avatar videos",
+                    "language": "English (US)",
+                    "gender": "Female",
+                    "accent": "American",
+                    "sample_text": "Hello! I'm Emma. Welcome to our platform.",
+                    "rate": 1.0,
+                    "pitch": 1.0,
+                    "is_default": False,
+                    "is_custom": False
+                },
+                {
+                    "id": "1bd001e7e50f421d891986aad5158bc8",
+                    "name": "Michael",
+                    "description": "Professional male voice perfect for AI avatar videos",
+                    "language": "English (UK)",
+                    "gender": "Male",
+                    "accent": "British",
+                    "sample_text": "Hello! I'm Michael. Welcome to our platform.",
+                    "rate": 1.0,
+                    "pitch": 1.0,
+                    "is_default": False,
+                    "is_custom": False
+                },
+                {
+                    "id": "3b554e7e8c5f4e13b7f8f5e6c5e5a5b5",
+                    "name": "Sarah",
+                    "description": "Professional female voice perfect for AI avatar videos",
+                    "language": "English (UK)",
+                    "gender": "Female",
+                    "accent": "British",
+                    "sample_text": "Hello! I'm Sarah. Welcome to our platform.",
+                    "rate": 1.0,
+                    "pitch": 1.0,
+                    "is_default": False,
+                    "is_custom": False
+                },
+                {
+                    "id": "4c664f8f9d6f5f24c8g9g6f7d6f6b6c6",
+                    "name": "David",
+                    "description": "Professional male voice perfect for AI avatar videos",
+                    "language": "English (AU)",
+                    "gender": "Male",
+                    "accent": "Australian",
+                    "sample_text": "Hello! I'm David. Welcome to our platform.",
+                    "rate": 1.0,
+                    "pitch": 1.0,
+                    "is_default": False,
+                    "is_custom": False
+                },
+                {
+                    "id": "5d775g9g0e7g6g35d9h0h7g8e7g7c7d7",
+                    "name": "Olivia",
+                    "description": "Professional female voice perfect for AI avatar videos",
+                    "language": "English (AU)",
+                    "gender": "Female",
+                    "accent": "Australian",
+                    "sample_text": "Hello! I'm Olivia. Welcome to our platform.",
+                    "rate": 1.0,
+                    "pitch": 1.0,
+                    "is_default": False,
+                    "is_custom": False
                 }
             ]
+            logger.info(f"✅ Using {len(voices)} fallback voices")
         else:
             # Process HeyGen API response and create diverse voice set
+            logger.info(f"🔍 Processing {len(heygen_voices)} voices from HeyGen API")
+            
             voices = []
             custom_voice_id = "01d674cfd32b4728a3fddd21b7e7d543"
             
@@ -448,9 +517,23 @@ async def get_heygen_voices():
                 
                 # Get voice attributes
                 voice_name = voice.get('display_name') or voice.get('name', 'Unknown Voice')
-                voice_gender = voice.get('gender', 'Unknown')
+                voice_gender_raw = voice.get('gender', 'Unknown')
+                # Normalize gender to title case for consistent processing
+                voice_gender = voice_gender_raw.title() if voice_gender_raw else 'Unknown'
                 voice_language = voice.get('language', 'English')
                 voice_description = voice.get('description', '')
+                voice_accent = voice.get('accent', '')
+                
+                # Skip voice clones and non-English voices (except for custom voice)
+                if not is_custom:
+                    # Skip if it's a voice clone
+                    if 'clone' in voice_name.lower() or 'veo voice' in voice_name.lower():
+                        continue
+                    # Only include English voices for better UX
+                    if not any(lang in voice_language.lower() for lang in ['english', 'multilingual']):
+                        continue
+                
+                logger.info(f"  - Voice: {voice_name} ({voice_gender}, {voice_language}) - ID: {voice_id}")
                 
                 # Generate description if empty
                 if not voice_description or voice_description.strip() == '':
@@ -458,7 +541,7 @@ async def get_heygen_voices():
                         voice_description = "Your custom trained HeyGen voice - warm, professional, and engaging"
                     else:
                         # Generate description based on gender and style
-                        gender_desc = "female" if voice_gender == "Female" else "male"
+                        gender_desc = "female" if voice_gender.lower() == "female" else "male"
                         voice_description = f"Professional {gender_desc} voice perfect for AI avatar videos"
                 
                 voice_data = {
@@ -467,6 +550,7 @@ async def get_heygen_voices():
                     "description": voice_description,
                     "language": voice_language,
                     "gender": voice_gender,
+                    "accent": voice_accent,
                     "sample_text": voice.get('preview_text') or voice.get('sample_text') or f"Hello! I'm {voice_name}. Welcome to our platform, I'm here to help answer your questions.",
                     "is_default": is_custom,
                     "is_custom": is_custom
@@ -474,16 +558,28 @@ async def get_heygen_voices():
                 
                 if is_custom:
                     voices.append(voice_data)
-                elif voice_gender == "Male":
+                elif voice_gender.lower() == "male":
                     male_voices.append(voice_data)
-                elif voice_gender == "Female":
+                elif voice_gender.lower() == "female":
                     female_voices.append(voice_data)
             
-            # Select diverse voices: Custom + 5 male + 5 female = 11 total
-            # This ensures each preview sounds distinct in browser TTS
-            # Limiting count ensures creators can distinguish between voice options
-            selected_male = male_voices[:5] if len(male_voices) >= 5 else male_voices
-            selected_female = female_voices[:5] if len(female_voices) >= 5 else female_voices
+            logger.info(f"📊 Categorized: {len(male_voices)} male, {len(female_voices)} female voices")
+            
+            # Select diverse voices: Aim for at least 6 total (including custom)
+            # Pick 3 male + 3 female to get 6 total with custom voice
+            selected_male = male_voices[:3] if len(male_voices) >= 3 else male_voices
+            selected_female = female_voices[:3] if len(female_voices) >= 3 else female_voices
+            
+            # If we don't have enough, add more from the other gender
+            total_needed = 6 - len(voices)  # Already has custom voice
+            current_count = len(selected_male) + len(selected_female)
+            
+            if current_count < total_needed:
+                additional_needed = total_needed - current_count
+                if len(male_voices) > len(selected_male):
+                    selected_male.extend(male_voices[len(selected_male):len(selected_male) + additional_needed])
+                elif len(female_voices) > len(selected_female):
+                    selected_female.extend(female_voices[len(selected_female):len(selected_female) + additional_needed])
             
             # Assign distinct preview characteristics to each voice
             voice_styles = [
@@ -533,6 +629,55 @@ async def get_heygen_voices():
             "error": str(e),
             "voices": []
         }
+
+@app.post("/heygen-voice-preview/{voice_id}")
+async def preview_heygen_voice(voice_id: str):
+    """
+    Get voice preview from HeyGen API
+    Proxies the HeyGen voice preview request to keep API key secure
+    """
+    try:
+        logger.info(f"🔊 Previewing voice: {voice_id}")
+        
+        if not heygen_service:
+            logger.error("❌ HeyGen service not initialized")
+            raise HTTPException(status_code=500, detail="HeyGen service not available")
+        
+        # Call HeyGen API to get voice preview
+        preview_result = heygen_service.preview_voice(voice_id)
+        
+        if preview_result:
+            # Check for success - HeyGen returns {error: null, data: {...}}
+            if preview_result.get('error') is None and preview_result.get('data'):
+                data = preview_result.get('data', {})
+                audio_url = data.get('audio_url')
+                
+                if audio_url:
+                    logger.info(f"✅ Voice preview generated successfully: {audio_url}")
+                    return {
+                        "success": True,
+                        "audio_url": audio_url,
+                        "duration": data.get('duration'),
+                        "data": data
+                    }
+            
+            # If we have a 'code' field (backward compatibility)
+            elif preview_result.get('code') == 100:
+                logger.info(f"✅ Voice preview generated successfully")
+                return {
+                    "success": True,
+                    "audio_url": preview_result.get('data', {}).get('audio_url'),
+                    "data": preview_result.get('data', {})
+                }
+        
+        # Error case
+        error_msg = preview_result.get('error', 'Unknown error') if preview_result else 'Failed to generate preview'
+        logger.error(f"❌ Voice preview failed: {error_msg}")
+        raise HTTPException(status_code=500, detail=error_msg)
+            
+    except Exception as e:
+        logger.error(f"❌ Error previewing voice: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/faqs/{company_name}/{qudemo_id}")
 async def get_all_faqs(company_name: str, qudemo_id: str):
@@ -658,6 +803,42 @@ async def ask_question(company_name: str, qudemo_id: str, request: QuestionReque
     """
     try:
         logger.info(f"❓ Processing question for {company_name} qudemo {qudemo_id} using NEW SIMPLIFIED Q&A")
+        
+        # Check if QuDemo is active before processing
+        try:
+            qudemo_check = supabase.table('qudemos_new').select('id, is_active, status').eq('id', qudemo_id).execute()
+            
+            if not qudemo_check.data or len(qudemo_check.data) == 0:
+                logger.warning(f"❌ QuDemo not found: {qudemo_id}")
+                raise HTTPException(status_code=404, detail="QuDemo not found")
+            
+            qudemo_data = qudemo_check.data[0]
+            is_active = qudemo_data.get('is_active', True)
+            status = qudemo_data.get('status', 'active')
+            
+            if not is_active or status != 'active':
+                logger.warning(f"❌ QuDemo is disabled: {qudemo_id} (is_active: {is_active}, status: {status})")
+                return {
+                    'success': False,
+                    'error': 'This QuDemo has been disabled and is not currently available',
+                    'disabled': True,
+                    'answer': 'This QuDemo is currently unavailable. Please contact the owner for more information.',
+                    'start': 0,
+                    'end': 0,
+                    'video_url': None,
+                    'sources': [],
+                    'total_sources': 0,
+                    'search_score': 0,
+                    'confidence_score': 0
+                }
+            
+            logger.info(f"✅ QuDemo is active: {qudemo_id}")
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"❌ Error checking QuDemo status: {e}")
+            # Continue processing if check fails (fail-open for availability)
         
         # SPECIAL HANDLING: Map system question identifiers to FAQ IDs
         system_question_map = {
@@ -2285,13 +2466,15 @@ async def update_faqs(qudemo_id: str, request: dict):
 async def trigger_video_generation_final(
     presenterPhoto: UploadFile = File(...),
     qudemoId: str = Form(...),
-    companyName: str = Form(...)
+    companyName: str = Form(...),
+    voiceId: Optional[str] = Form(None)
 ):
     """
     Step 2: Upload presenter photo and trigger HeyGen video generation for the finalized FAQs.
     """
     try:
         logger.info(f"🎬 Triggering final video generation for {companyName}/{qudemoId}")
+        logger.info(f"🎤 Voice ID received from frontend: {voiceId}")
         
         # 1. Upload presenter photo to GCS
         file_content = await presenterPhoto.read()
@@ -2314,11 +2497,20 @@ async def trigger_video_generation_final(
         presenter_photo_url = blob.public_url
         logger.info(f"✅ Presenter photo uploaded: {presenter_photo_url}")
         
-        # 2. Update Supabase with presenter photo URL
-        supabase.table('qudemos_new').update({
+        # 2. Update Supabase with presenter photo URL and voice ID
+        update_data = {
             'presenter_photo_url': presenter_photo_url,
             'updated_at': datetime.now().isoformat()
-        }).eq('id', qudemoId).execute()
+        }
+        
+        # Update voice_id if provided from frontend
+        if voiceId:
+            logger.info(f"🎤 Updating voice_id in database: {voiceId}")
+            update_data['voice_id'] = voiceId
+        else:
+            logger.warning(f"⚠️ No voice_id provided from frontend, will use existing value from database")
+        
+        supabase.table('qudemos_new').update(update_data).eq('id', qudemoId).execute()
         
         # 3. Load draft FAQs from GCS
         faq_filename = f"faqs_{companyName.replace(' ', '_')}_draft.json"
@@ -2346,16 +2538,26 @@ async def trigger_video_generation_final(
         if avatar_video_processor:
             logger.info(f"🎬 Starting HeyGen video generation for {len(final_faq_data['faqs'])} FAQs...")
             
-            # Get voice_id from qudemo
-            voice_id_to_use = None
-            try:
-                qudemo_voice = supabase.table('qudemos_new').select('voice_id').eq('id', qudemoId).execute()
-                if qudemo_voice.data and len(qudemo_voice.data) > 0:
-                    voice_id_to_use = qudemo_voice.data[0].get('voice_id')
-            except Exception as voice_error:
-                logger.warning(f"⚠️ Could not fetch voice_id: {voice_error}")
+            # Use voice_id from frontend (already updated in database above)
+            voice_id_to_use = voiceId
+            if not voice_id_to_use:
+                # Fallback: fetch from database if not provided
+                try:
+                    logger.info(f"🎤 Voice ID not provided, fetching from database for qudemo: {qudemoId}")
+                    qudemo_voice = supabase.table('qudemos_new').select('voice_id').eq('id', qudemoId).execute()
+                    logger.info(f"🎤 Database query result: {qudemo_voice.data}")
+                    if qudemo_voice.data and len(qudemo_voice.data) > 0:
+                        voice_id_to_use = qudemo_voice.data[0].get('voice_id')
+                        logger.info(f"🎤 Voice ID from database: {voice_id_to_use}")
+                    else:
+                        logger.warning(f"⚠️ No voice_id found in database for qudemo {qudemoId}")
+                except Exception as voice_error:
+                    logger.warning(f"⚠️ Could not fetch voice_id: {voice_error}")
+            else:
+                logger.info(f"🎤 Using voice ID from frontend: {voice_id_to_use}")
             
             # Trigger background video generation
+            logger.info(f"🎤 Starting video generation with voice_id: {voice_id_to_use}")
             asyncio.create_task(
                 avatar_video_processor.process_faq_videos(
                     company_name=companyName,

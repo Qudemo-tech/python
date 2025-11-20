@@ -123,10 +123,21 @@ class HeyGenService:
             
             response = requests.get(self.voices_url, headers=headers, timeout=30)
             
+            logger.info(f"🔍 HeyGen voices API response status: {response.status_code}")
+            
             if response.status_code == 200:
                 data = response.json()
+                logger.info(f"🔍 HeyGen API response data keys: {list(data.keys())}")
+                
                 voices = data.get('data', {}).get('voices', [])
                 logger.info(f"✅ Successfully fetched {len(voices)} voices from HeyGen")
+                
+                # Log first few voices for debugging
+                if voices:
+                    logger.info(f"🔍 First voice: {voices[0].get('display_name')} ({voices[0].get('voice_id')})")
+                    if len(voices) > 1:
+                        logger.info(f"🔍 Second voice: {voices[1].get('display_name')} ({voices[1].get('voice_id')})")
+                
                 return voices
             else:
                 logger.error(f"❌ HeyGen voices API error: {response.status_code} - {response.text}")
@@ -134,6 +145,64 @@ class HeyGenService:
                 
         except Exception as e:
             logger.error(f"❌ Error fetching voices from HeyGen: {e}")
+            return None
+    
+    def preview_voice(self, voice_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Generate a preview audio for a specific voice
+        
+        Args:
+            voice_id: The HeyGen voice ID to preview
+            
+        Returns:
+            Dict with audio_url and other preview data, or None if failed
+        """
+        try:
+            if not self.api_key:
+                logger.error("❌ HeyGen API key not configured")
+                return None
+            
+            logger.info(f"🔊 Generating voice preview for voice: {voice_id}")
+            
+            preview_url = f"https://api.heygen.com/v2/voices/{voice_id}/preview"
+            
+            headers = {
+                "accept": "application/json",
+                "content-type": "application/json",
+                "x-api-key": self.api_key
+            }
+            
+            payload = {
+                "voice_id": voice_id,
+                "text_type": "text",
+                "text": "Hello! This is a preview of my voice. I will be narrating your AI-powered demo videos.",
+                "settings": {
+                    "pitch": "0",
+                    "speed": "1",
+                    "volume": "1"
+                },
+                "with_timestamps": False
+            }
+            
+            response = requests.post(preview_url, json=payload, headers=headers, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                logger.info(f"✅ Voice preview generated successfully")
+                logger.info(f"🔍 Preview response keys: {list(data.keys())}")
+                
+                # HeyGen returns: {error: null, data: {audio_url, duration, ...}}
+                # Add a 'code' field for backward compatibility
+                if 'code' not in data and data.get('error') is None:
+                    data['code'] = 100  # Success code
+                
+                return data
+            else:
+                logger.error(f"❌ HeyGen voice preview error: {response.status_code} - {response.text}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Error generating voice preview: {e}")
             return None
     
     def truncate_script(self, text: str, max_length: int = 1000) -> str:

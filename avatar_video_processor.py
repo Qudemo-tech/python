@@ -226,9 +226,11 @@ class AvatarVideoProcessor:
         
         try:
             logger.info(f"🎬 Processing FAQ: {faq_id}")
+            logger.info(f"🎤 Voice ID received for FAQ {faq_id}: {voice_id}")
             
             # Step 1: Generate video with HeyGen
             video_title = f"{company_name} - {faq_id}"
+            logger.info(f"🎤 Calling HeyGen with voice_id: {voice_id}")
             video_id = self.heygen.generate_video(
                 image_key=image_key,
                 script=answer,  # HeyGen service will truncate to 1000 chars

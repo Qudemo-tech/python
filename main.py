@@ -282,7 +282,9 @@ app.add_middleware(
         "https://qudemo.com",
         "https://qudemo-frontend.vercel.app",
         "https://qudemo.vercel.app",
-        "https://testqudemo.netlify.app"
+        "https://testqudemo.netlify.app",
+        "https://qudemo-prod.netlify.app",
+        "https://thaklis.com"
     ],
     allow_credentials=True,
     allow_methods=["*"],
